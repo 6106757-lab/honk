@@ -40,7 +40,7 @@
 | `fallback_resolver` | `fallback_resolver` | `"8.8.8.8:53"` | 回退 resolver 兼容值；当前运行时不读取该字段。 |
 | `bandwidth_max_tx` | `bandwidth_max_tx` | `""` | 发送带宽提示兼容值，例如 `'200 mbps'`；当前运行时不读取该字段。 |
 | `bandwidth_max_rx` | `bandwidth_max_rx` | `""` | 接收带宽提示兼容值；当前运行时不读取该字段。 |
-| `relay_buf_size` | `relay_buf_size` | `'1MiB'` | 用户态拷贝中继、splice 管道与 WebSocket 桥每方向使用的缓冲区。单条流在途数据只有这么多，吞吐约为 `大小 / RTT`，高延迟隧道应调大（如 `'4MiB'`）。范围 `8KiB`–`16MiB`，支持 `K`/`KB`/`KiB`/`M`/`MB`/`MiB` 后缀或纯字节数。 |
+| `relay_buf_size` | `relay_buf_size` | `'65535'` | 用户态中继与 WebSocket 桥的缓冲大小。它其实覆盖两件不同的事：拷贝循环是严格串行的，所以分块被限制在一个协议帧（`65535` 字节 —— `AnyTLS` 每次写入截断到 `u16::MAX`、`Trojan` 超过直接报错，再大只会被拆成更多帧）；而 WebSocket 那一侧的 duplex 管道是真正的在途缓冲，确实随该值放大。默认一个帧；调大只对 WebSocket 隧道有意义，超过约一个带宽时延积后再无收益。范围 `8KiB`–`262140`，支持 `K`/`KB`/`KiB`/`M`/`MB`/`MiB` 后缀或纯字节数。 |
 | `preconnect_node_count` | `preconnect_node_count` | `'auto'` | 启动时执行一次预热的合格裸 TCP 节点数；`0` 关闭，`'auto'` 最多选择八个。 |
 | `udp_warm_node_count` | `udp_warm_node_count` | `0` | 每组 UDP 预热候选数；`0` 关闭独立 UDP 预热协调器。 |
 | `max_concurrent_dials` | `max_concurrent_dials` | `64` | 各运行时代次内物理代理连接和协议握手的请求上限；运行时资源预算可能进一步收紧。 |

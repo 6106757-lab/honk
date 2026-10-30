@@ -133,10 +133,13 @@ pub struct GlobalConfig {
     pub bandwidth_max_tx: String,
     #[serde(default)]
     pub bandwidth_max_rx: String,
-    /// Per-direction buffer used by the userspace copy relay and the
-    /// WebSocket bridge, e.g. `'1MiB'` or `'65536'`. Raising it lifts
-    /// single-flow throughput on high-RTT paths, because one flow can only
-    /// keep this many bytes in flight (`buffer / RTT`).
+    /// Buffer used by the userspace copy relay, the WebSocket bridge and the
+    /// splice pipe, e.g. `'65535'` or `'1MiB'`.
+    ///
+    /// The copy relay is serial, so its chunk is capped at one protocol frame
+    /// (`65535`) and raising the value cannot lift throughput there. The
+    /// WebSocket duplex and the splice pipe do keep this many bytes in flight
+    /// and do scale with it, up to about one bandwidth-delay product.
     #[serde(default = "default_relay_buf_size")]
     pub relay_buf_size: String,
     #[serde(default = "default_udphop_interval_secs")]
@@ -350,7 +353,9 @@ fn default_fallback_resolver() -> String {
     "8.8.8.8:53".into()
 }
 fn default_relay_buf_size() -> String {
-    "1MiB".into()
+    // One protocol frame. A larger copy chunk cannot raise throughput (the
+    // relay loop is serial) and gets split by the framed outbounds anyway.
+    u16::MAX.to_string()
 }
 fn default_udphop_interval_secs() -> u64 {
     30

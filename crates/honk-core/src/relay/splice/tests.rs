@@ -110,10 +110,11 @@ fn test_is_unsupported_errno() {
 
 /// Two active directions are bounded to four private FDs and two requested
 /// pipe pages per full-duplex connection. The page bound follows
-/// `global { relay_buf_size: ... }` rather than a fixed 64 KiB, because a
-/// pipe that cannot hold a round trip caps a direct flow exactly like the
-/// copy relay does. Pipes are never shared, so closing a connection cannot
-/// expose staged bytes to another one.
+/// `global { relay_buf_size: ... }` rather than a fixed 64 KiB: a splice pipe
+/// holds several pages in flight, so one that cannot fit a round trip caps a
+/// direct flow. That is not true of the serial copy relay, whose chunk only
+/// sets syscall granularity. Pipes are never shared, so closing a connection
+/// cannot expose staged bytes to another one.
 #[test]
 fn test_full_duplex_pipe_resource_bound() {
     let _lock = TEST_LOCK.blocking_lock();

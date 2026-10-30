@@ -295,17 +295,21 @@ impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for RelayIo<S> {
 const DRAIN_DEADLINE: std::time::Duration = splice::DRAIN_DEADLINE;
 
 // Idle and chatty flows keep this small buffer; one saturated read marks a
-// bulk flow, which then uses the whole configured buffer for the rest of its
-// life. That upper bound comes from `global { relay_buf_size: '...' }`
-// (default 1 MiB) because one flow can only keep `buffer / RTT` bytes per
-// second in flight: the old fixed 64 KiB was barely 1 MB/s on a 60 ms path,
-// no matter how much bandwidth the node had.
+// bulk flow, which then uses the largest chunk a framed outbound can take in a
+// single write for the rest of its life.
+//
+// This is a syscall/task-wakeup knob, not a window. The loop below is strictly
+// serial — read, `write_all`, read — so its pipeline depth is one at any buffer
+// size and a flow's throughput is set by the two TCP windows. Growing the chunk
+// past one protocol frame cannot help, and hurts: `AnyTLS` truncates every
+// `poll_write` to `u16::MAX` and `Trojan` refuses anything larger, so a 1 MiB
+// chunk would be split into sixteen frames with a permit acquisition each.
 const RELAY_BUF_MIN: usize = 8 * 1024;
 
-/// Upper bound for one copy buffer: the configured `relay_buf_size`, never
-/// below the small idle buffer.
+/// Upper bound for one copy buffer: one protocol frame at most, never below
+/// the small idle buffer.
 fn relay_buf_max() -> usize {
-    honk_config::tuning::relay_buf_size().max(RELAY_BUF_MIN)
+    honk_config::tuning::relay_copy_chunk().max(RELAY_BUF_MIN)
 }
 
 /// Stops both copy directions where neither holds unwritten bytes, so the

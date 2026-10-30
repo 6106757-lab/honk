@@ -515,7 +515,7 @@ pub(super) fn parse_global_section(
                         *text,
                         diagnostics,
                         "global.relay_buf_size",
-                        "size is outside 8KiB..16MiB; the runtime clamps it",
+                        "size is outside 8KiB..262140; the runtime clamps it",
                     );
                 }
                 cfg.relay_buf_size = value.to_owned();
@@ -524,7 +524,7 @@ pub(super) fn parse_global_section(
                 *text,
                 diagnostics,
                 "global.relay_buf_size",
-                "size is not a byte count (`65536`, `512KiB`, `1MiB`); keeping the default (1MiB)",
+                "size is not a byte count (`65535`, `512KiB`, `1MiB`); keeping the default (65535)",
             ),
         }
     }

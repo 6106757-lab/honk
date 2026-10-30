@@ -304,9 +304,10 @@ async fn wrap_ws(
         .await
         .map_err(|e| anyhow::anyhow!("WebSocket upgrade failed: {}", e))?;
 
-    // One flow can only keep `capacity / RTT` bytes in flight, and the
-    // WebSocket bridge is the narrowest link in that chain, so size it from
-    // `global { relay_buf_size: ... }` instead of a fixed 64 KiB.
+    // The duplex half is a genuine in-flight buffer: the bridge writer drains
+    // it while the relay keeps filling it, so `capacity / RTT` does bound a
+    // single flow here. That is unlike the relay copy chunk, which is a serial
+    // read/write loop and gains nothing from being larger than one frame.
     let capacity = honk_config::tuning::relay_buf_size();
     let (client_half, server_half) = tokio::io::duplex(capacity);
     let progress = crate::runtime::flow_observation::current()
@@ -396,7 +397,10 @@ async fn ws_bridge_relay(
 
     // server → ws
     let s2w = async {
-        let mut buf = vec![0u8; honk_config::tuning::relay_buf_size()];
+        // One frame per read: this buffer is copied again into the outgoing
+        // `Message`, so keeping it at one protocol frame bounds both the
+        // per-flow allocation and the copy volume.
+        let mut buf = vec![0u8; honk_config::tuning::relay_copy_chunk()];
         loop {
             use tokio::io::AsyncReadExt;
             let n = server_read

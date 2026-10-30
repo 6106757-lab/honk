@@ -38,10 +38,13 @@ use tracing::debug;
 /// kernel-selected value.
 const PIPE_SIZE: usize = 64 * 1024;
 
-/// Sizes the splice pipe from `global { relay_buf_size: ... }`. Direct flows
-/// are limited by `pipe / RTT` just like copied ones, so the pipe follows the
-/// same knob, clamped to what `F_SETPIPE_SZ` can grant by default
-/// (`/proc/sys/fs/pipe-max-size` is 1 MiB on stock kernels).
+/// Sizes the splice pipe from `global { relay_buf_size: ... }`.
+///
+/// Unlike the userspace copy loop — serial, so its chunk is not a window —
+/// splice keeps several pipe pages in flight at once. The pipe therefore does
+/// bound a direct flow at roughly `pipe / RTT`, which is why it follows the
+/// knob all the way up to the kernel's default `/proc/sys/fs/pipe-max-size`
+/// (1 MiB on stock kernels) instead of stopping at one frame.
 fn pipe_size() -> usize {
     honk_config::tuning::relay_buf_size().clamp(PIPE_SIZE, 1024 * 1024)
 }
