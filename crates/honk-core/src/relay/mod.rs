@@ -614,7 +614,7 @@ mod tests {
                 assert!(
                     sizes[1..sizes.len() - 1]
                         .iter()
-                        .all(|&size| size == relay_buf_max()),
+                        .all(|&size| size == relay_buf_max().min(limit)),
                     "saturated data must not fragment into small frames: {sizes:?}"
                 );
             }

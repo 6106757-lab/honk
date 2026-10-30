@@ -108,13 +108,16 @@ fn test_is_unsupported_errno() {
     assert!(!is_unsupported_errno(&io::Error::other("synthetic")));
 }
 
-/// Two active directions are bounded to four private FDs and 128 KiB of
-/// requested pipe pages per full-duplex connection, down from the prior
-/// 512 KiB request. Pipes are never shared, so closing a connection
-/// cannot expose staged bytes to another one.
+/// Two active directions are bounded to four private FDs and two requested
+/// pipe pages per full-duplex connection. The page bound follows
+/// `global { relay_buf_size: ... }` rather than a fixed 64 KiB, because a
+/// pipe that cannot hold a round trip caps a direct flow exactly like the
+/// copy relay does. Pipes are never shared, so closing a connection cannot
+/// expose staged bytes to another one.
 #[test]
 fn test_full_duplex_pipe_resource_bound() {
     let _lock = TEST_LOCK.blocking_lock();
+    let bound = pipe_size();
     let client_to_upstream = Pipe::new().expect("create client pipe");
     let upstream_to_client = Pipe::new().expect("create upstream pipe");
     assert_ne!(
@@ -126,12 +129,12 @@ fn test_full_duplex_pipe_resource_bound() {
         upstream_to_client.write.as_raw_fd()
     );
     assert!(
-        client_to_upstream.capacity <= PIPE_SIZE && upstream_to_client.capacity <= PIPE_SIZE,
+        client_to_upstream.capacity <= bound && upstream_to_client.capacity <= bound,
         "kernel pipe capacity must remain within the requested per-direction bound"
     );
     assert!(
-        client_to_upstream.capacity + upstream_to_client.capacity <= 2 * PIPE_SIZE,
-        "full-duplex splice relay exceeds its 128 KiB pipe-page bound"
+        client_to_upstream.capacity + upstream_to_client.capacity <= 2 * bound,
+        "full-duplex splice relay exceeds its pipe-page bound"
     );
 }
 
