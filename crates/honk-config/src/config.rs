@@ -133,6 +133,12 @@ pub struct GlobalConfig {
     pub bandwidth_max_tx: String,
     #[serde(default)]
     pub bandwidth_max_rx: String,
+    /// Per-direction buffer used by the userspace copy relay and the
+    /// WebSocket bridge, e.g. `'1MiB'` or `'65536'`. Raising it lifts
+    /// single-flow throughput on high-RTT paths, because one flow can only
+    /// keep this many bytes in flight (`buffer / RTT`).
+    #[serde(default = "default_relay_buf_size")]
+    pub relay_buf_size: String,
     #[serde(default = "default_udphop_interval_secs")]
     pub udphop_interval_secs: u64,
     /// Timeout for TCP connect (SYN/SYN-ACK) in milliseconds.
@@ -343,6 +349,9 @@ fn default_utls_imitate() -> String {
 fn default_fallback_resolver() -> String {
     "8.8.8.8:53".into()
 }
+fn default_relay_buf_size() -> String {
+    "1MiB".into()
+}
 fn default_udphop_interval_secs() -> u64 {
     30
 }
@@ -407,6 +416,7 @@ impl Default for GlobalConfig {
             fallback_resolver: default_fallback_resolver(),
             bandwidth_max_tx: String::new(),
             bandwidth_max_rx: String::new(),
+            relay_buf_size: default_relay_buf_size(),
             udphop_interval_secs: default_udphop_interval_secs(),
             connect_timeout_ms: default_connect_timeout_ms(),
             dns_resolve_timeout_ms: default_dns_resolve_timeout_ms(),

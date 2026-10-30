@@ -40,6 +40,7 @@ The dae parser accepts compatibility-only keys and stores them in `GlobalConfig`
 | `fallback_resolver` | `fallback_resolver` | `"8.8.8.8:53"` | Compatibility fallback-resolver value. The current runtime does not read it. |
 | `bandwidth_max_tx` | `bandwidth_max_tx` | `""` | Compatibility transmit-bandwidth hint, such as `'200 mbps'`. The current runtime does not read it. |
 | `bandwidth_max_rx` | `bandwidth_max_rx` | `""` | Compatibility receive-bandwidth hint. The current runtime does not read it. |
+| `relay_buf_size` | `relay_buf_size` | `'1MiB'` | Per-direction buffer for the userspace copy relay, the splice pipe and the WebSocket bridge. One flow keeps only this much in flight, so its throughput is about `size / RTT` — raise it on high-RTT tunnels (e.g. `'4MiB'`). Accepts `8KiB`–`16MiB`, with `K`/`KB`/`KiB`/`M`/`MB`/`MiB` suffixes or a bare byte count. |
 | `preconnect_node_count` | `preconnect_node_count` | `'auto'` | Number of eligible bare-TCP nodes warmed once at startup; `0` disables it and `'auto'` selects at most eight. |
 | `udp_warm_node_count` | `udp_warm_node_count` | `0` | Per-group UDP warm-candidate count. `0` disables the independent UDP warm coordinator. |
 | `max_concurrent_dials` | `max_concurrent_dials` | `64` | Requested generation-local cap on physical proxied connects and protocol handshakes; runtime resource budgeting may clamp it. |

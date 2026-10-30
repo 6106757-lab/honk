@@ -834,6 +834,21 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         // in the config (Direct/Block protocols → DirectHandler/BlockHandler).
         config.ensure_builtin_nodes();
 
+        // Relay tuning is operational, not routing: apply it before the first
+        // flow so `global { relay_buf_size: '...' }` takes effect without a
+        // rebuild. An unparsable value keeps the compiled-in default.
+        let requested = &config.global.relay_buf_size;
+        let configured_relay_buf = honk_config::tuning::parse_size(requested)
+            .unwrap_or(honk_config::tuning::DEFAULT_RELAY_BUF_SIZE);
+        let effective_relay_buf = honk_config::tuning::set_relay_buf_size(configured_relay_buf);
+        if effective_relay_buf != configured_relay_buf {
+            warn!(
+                requested = configured_relay_buf,
+                effective = effective_relay_buf,
+                "relay_buf_size clamped to the supported range"
+            );
+        }
+
         // Effective log level: --debug flag > RUST_LOG env > config log_level >
         // "info".
         let config_level = match config.global.log_level.trim() {

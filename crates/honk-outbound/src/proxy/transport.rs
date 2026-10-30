@@ -304,7 +304,11 @@ async fn wrap_ws(
         .await
         .map_err(|e| anyhow::anyhow!("WebSocket upgrade failed: {}", e))?;
 
-    let (client_half, server_half) = tokio::io::duplex(65536);
+    // One flow can only keep `capacity / RTT` bytes in flight, and the
+    // WebSocket bridge is the narrowest link in that chain, so size it from
+    // `global { relay_buf_size: ... }` instead of a fixed 64 KiB.
+    let capacity = honk_config::tuning::relay_buf_size();
+    let (client_half, server_half) = tokio::io::duplex(capacity);
     let progress = crate::runtime::flow_observation::current()
         .map(|_| std::sync::Arc::new(parking_lot::Mutex::new(WsWriteProgress::default())));
 
@@ -392,7 +396,7 @@ async fn ws_bridge_relay(
 
     // server → ws
     let s2w = async {
-        let mut buf = vec![0u8; 65536];
+        let mut buf = vec![0u8; honk_config::tuning::relay_buf_size()];
         loop {
             use tokio::io::AsyncReadExt;
             let n = server_read

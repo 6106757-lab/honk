@@ -20,6 +20,7 @@ pub mod paths;
 pub mod routing;
 pub mod share_link;
 pub mod subscription;
+pub mod tuning;
 pub mod types;
 
 pub use config::Config;

@@ -99,6 +99,7 @@ pub(super) const GLOBAL_KEYS: &[&str] = &[
     "fallback_resolver",
     "bandwidth_max_tx",
     "bandwidth_max_rx",
+    "relay_buf_size",
     "udp_warm_node_count",
     "preconnect_node_count",
     "max_concurrent_dials",
@@ -504,6 +505,28 @@ pub(super) fn parse_global_section(
         .map(|text| text.unquote().raw())
     {
         cfg.bandwidth_max_rx = value.to_owned();
+    }
+    if let Some(text) = settings.get("relay_buf_size") {
+        let value = text.unquote().raw();
+        match crate::tuning::parse_size(value) {
+            Some(bytes) => {
+                if !crate::tuning::relay_buf_size_in_range(bytes) {
+                    scalar_warning(
+                        *text,
+                        diagnostics,
+                        "global.relay_buf_size",
+                        "size is outside 8KiB..16MiB; the runtime clamps it",
+                    );
+                }
+                cfg.relay_buf_size = value.to_owned();
+            }
+            None => scalar_warning(
+                *text,
+                diagnostics,
+                "global.relay_buf_size",
+                "size is not a byte count (`65536`, `512KiB`, `1MiB`); keeping the default (1MiB)",
+            ),
+        }
     }
     if let Some(text) = settings.get("udp_warm_node_count") {
         let value = text.unquote().raw();
