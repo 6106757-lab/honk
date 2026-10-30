@@ -515,7 +515,7 @@ pub(super) fn parse_global_section(
                         *text,
                         diagnostics,
                         "global.relay_buf_size",
-                        "size is outside 8KiB..262140; the runtime clamps it",
+                        "size is outside the supported relay buffer range; the runtime clamps it",
                     );
                 }
                 cfg.relay_buf_size = value.to_owned();

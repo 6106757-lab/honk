@@ -40,10 +40,12 @@ pub const MIN_RELAY_BUF_SIZE: usize = 8 * 1024;
 
 /// Largest accepted buffer, per direction and per flow.
 ///
-/// Only the duplex pipe benefits from going past one frame, and even there the
-/// gain stops once the pipe covers roughly one bandwidth-delay product. Four
-/// frames' worth is past that point on any tunnel this binary is likely to see.
-pub const MAX_RELAY_BUF_SIZE: usize = 4 * MAX_FRAME_PAYLOAD;
+/// This bound exists for the duplex pipe, the only consumer that scales with
+/// the value; the copy chunk is capped separately at [`MAX_FRAME_PAYLOAD`].
+/// Eight MiB covers one bandwidth-delay product at 60 ms for roughly 1 Gbit/s,
+/// so it is past the point where more buys anything, while still leaving room
+/// for `'1MiB'`/`'2MiB'` style settings instead of forcing a frame-sized value.
+pub const MAX_RELAY_BUF_SIZE: usize = 8 * 1024 * 1024;
 
 static RELAY_BUF_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_RELAY_BUF_SIZE);
 
@@ -130,6 +132,16 @@ mod tests {
             set_relay_buf_size(DEFAULT_RELAY_BUF_SIZE),
             DEFAULT_RELAY_BUF_SIZE
         );
+    }
+
+    /// `1MiB` is what the documentation suggested before the copy chunk was
+    /// capped, so existing configs carry it and must not start warning; the
+    /// upper bound belongs to the duplex pipe, not to one frame.
+    #[test]
+    fn one_mebibyte_stays_in_range() {
+        assert!(relay_buf_size_in_range(1024 * 1024));
+        assert!(relay_buf_size_in_range(MAX_FRAME_PAYLOAD));
+        assert!(!relay_buf_size_in_range(MAX_RELAY_BUF_SIZE + 1));
     }
 
     /// The configured buffer may sit far above one frame, but the copy loop
