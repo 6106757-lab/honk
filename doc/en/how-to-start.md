@@ -252,6 +252,34 @@ bootstrap_resolver: '1.1.1.1:53'
 
 See the [configuration guide](configuration.md) for the complete configuration flow. The repository's `config.dae`, `config.min.dae`, and `example.dae` contain example interfaces or nodes and must be adapted before deployment.
 
+### Single-arm gateways
+
+This setup is not supported; questions and bug reports about it are not answered.
+
+On a single-arm gateway, also called a bypass router, `lan_interface` and the WAN are the same interface or bridge: clients use the honk host as their gateway, and the host sends their traffic back out through that interface to the upstream router. Set the three kernel parameters below on such a host. honk does not set these three, and `auto_config_kernel_parameter` does not change that (see the [global reference](reference/global.md)).
+
+- With `send_redirects` on, the kernel sends clients ICMP redirects that point them at the upstream router, and their traffic then bypasses honk. The kernel sends redirects when either the `all` or the interface value is `1`, so set both to `0`.
+- honk sets `rp_filter` to `0` only on the first bound LAN interface, but the kernel applies the higher of the `all` and interface values, so a value of `1` or `2` under `all` overrides it. Set `all` to `0`.
+
+Replace `br-lan` with the interface named in `lan_interface`, then load the file:
+
+```shell
+sudo tee /etc/sysctl.d/60-honk-single-arm.conf <<'EOF'
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.br-lan.send_redirects = 0
+net.ipv4.conf.all.rp_filter = 0
+EOF
+sudo sysctl -p /etc/sysctl.d/60-honk-single-arm.conf
+```
+
+The file is also applied at every boot. Check the values; each should be `0`:
+
+```shell
+sysctl net.ipv4.conf.all.send_redirects net.ipv4.conf.br-lan.send_redirects net.ipv4.conf.all.rp_filter
+```
+
+A client that already received a redirect may keep the learned route for a while; reconnect it to the network before testing.
+
 ### Web UI and APIs
 
 Add one of the following blocks to the configuration, then restart honk. These examples listen only on the local machine. See the [experimental reference](reference/experimental.md) for all other fields and reverse-proxy requirements.
@@ -465,6 +493,7 @@ cargo run --release -p honk-core -- \
 | NFQUEUE is disabled or queue 320 is busy | Check nftables/NFQUEUE kernel support, the queue owner, and stale honk instances. Set `nfqueue_enable: false` only when staging is intentionally unnecessary. |
 | LAN traffic is not intercepted | `lan_interface` is empty or names the wrong interface. honk does not substitute `lo`. If the interface is named correctly, see the next row. |
 | `GET /runtime` shows an `interface_binding` degradation | A configured interface is not bound yet; the logs name it. `pending`: it does not exist or an `auto` entry has no IPv4 default route. `unsupported_type`: the link type is refused (for example `lo`, a VRF device or `dae0`); name a supported interface or a member. `attach_failed`: the TCX link could not be created, updated or verified; see the warning in the logs. See the [native API reference](./reference/api.md#native-api) for interface-state fields. |
+| On a single-arm gateway, clients bypass honk or forwarded traffic is dropped | Set `send_redirects` to `0` for `all` and the LAN interface, and `net.ipv4.conf.all.rp_filter` to `0`. See [Single-arm gateways](#single-arm-gateways). |
 | VLESS/VMess reports `No handler for protocol` | The build lacks `rprx`; use the default features or add `rprx` explicitly. |
 | A Geo rule fails to load | Put `geoip.dat`/`geosite.dat` in the configured `data_dir`, or verify the documented legacy/share search locations; remove unused Geo rules if not needed. |
 | A GNU binary does not execute on VyOS or a minimal system | Use the musl release for the same architecture. |

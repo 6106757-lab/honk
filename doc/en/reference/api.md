@@ -1135,8 +1135,8 @@ Both directories must contain `index.html`. `HONK_DOONA_DIR` is the only require
 
 | Pin in `.github/ci/pins.env` | Value |
 | --- | --- |
-| doona release | `0.1.0-rc.3` |
-| Commit | `931be7f19c481c8d2ce01509faa0f9050ce175bb` |
+| doona release | `0.1.0-rc.4` |
+| Commit | `58dfe2e2d1bccb1c0363895adb27eb4bfa1e932d` |
 | Archive checksums | `DOONA_SHA256`, `DOONA_LITE_SHA256` |
 
 From the repository root, run `export HONK_DOONA_DIR=$(ci/fetch-doona.sh)`. The script:
@@ -1153,9 +1153,9 @@ Full release builds include the embedded UI. The lean `-clash-api` and `-native-
 
 Lite uses system fonts. The Noto Sans TC and SC fonts are not embedded. Doona's CSS declares those fonts with `font-display: optional`, so the browser falls back to system fonts when the font requests return 404.
 
-To use Noto Sans, extract `doona-<version>.tar.gz` and `doona-fonts-<version>.tar.gz` from the [doona release](https://github.com/Zakkaus/doona/releases) into one directory and point `ui` at it, or install the `doona` and `doona-fonts` packages and set `ui: /usr/share/doona`. Both editions share the corresponding GPL-3.0-only source at the doona tag [`v0.1.0-rc.3`](https://github.com/Zakkaus/doona/tree/v0.1.0-rc.3).
+To use Noto Sans, extract `doona-<version>.tar.gz` and `doona-fonts-<version>.tar.gz` from the [doona release](https://github.com/Zakkaus/doona/releases) into one directory and point `ui` at it, or install the `doona` and `doona-fonts` packages and set `ui: /usr/share/doona`. Both editions share the corresponding GPL-3.0-only source at the doona tag [`v0.1.0-rc.4`](https://github.com/Zakkaus/doona/tree/v0.1.0-rc.4).
 
-The release workflow attaches `doona-source-0.1.0-rc.3.tar.gz` to the tag release and to the rolling Debug release. `ci/fetch-doona.sh --source` checks that the tag still points at the pinned commit and generates it with `git archive --format=tar --prefix=doona/ v0.1.0-rc.3 | gzip -n` (GNU gzip). Redistributors of a `native-ui` binary must preserve the notices and provide corresponding source through a method permitted by GPL-3.0 section 6.
+The release workflow attaches `doona-source-0.1.0-rc.4.tar.gz` to the tag release and to the rolling Debug release. `ci/fetch-doona.sh --source` checks that the tag still points at the pinned commit and generates it with `git archive --format=tar --prefix=doona/ v0.1.0-rc.4 | gzip -n` (GNU gzip). Redistributors of a `native-ui` binary must preserve the notices and provide corresponding source through a method permitted by GPL-3.0 section 6.
 
 To reproduce the assets, extract the source archive into its own directory, use Node matching `^22.13.0 || ^24.0.0 || >=26.0.0` and `pnpm@11.15.1`. From the extracted source directory:
 

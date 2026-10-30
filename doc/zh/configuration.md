@@ -83,7 +83,7 @@ global {
     log_file: 'honk.log'
     # 嗅探域名并校验目的 IP。
     dial_mode: domain
-    # 应用推荐的网关 sysctl。
+    # 为兼容 dae 而保留；honk 按固定规则设置 sysctl。
     auto_config_kernel_parameter: true
     # 解析代理主机名时避免自拦截。
     bootstrap_resolver: '1.1.1.1:53'

@@ -83,7 +83,7 @@ global {
     log_file: 'honk.log'
     # Sniff domains and verify their destination IP.
     dial_mode: domain
-    # Apply the recommended gateway sysctls.
+    # Accepted for dae compatibility; honk applies its own fixed sysctl setup.
     auto_config_kernel_parameter: true
     # Resolve proxy hostnames without self-interception.
     bootstrap_resolver: '1.1.1.1:53'
