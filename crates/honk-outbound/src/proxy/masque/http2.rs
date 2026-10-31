@@ -21,7 +21,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 use super::tun::TunDevice;
 
@@ -66,12 +66,17 @@ pub struct MasqueTunnel {
     /// TUN device, and neither would notice on its own that the tunnel is
     /// over: a device whose reader never returns keeps its name, and the next
     /// tunnel for the same node then fails to create it with `EBUSY`.
-    shutdown: Arc<Notify>,
+    ///
+    /// A watch rather than a `Notify`: waking only the waiters loses the
+    /// wakeup for whichever task was mid-packet at that moment, and that
+    /// task then holds its TUN device forever.
+    shutdown: watch::Sender<bool>,
+    shutdown_signal: watch::Receiver<bool>,
 }
 
 impl Drop for MasqueTunnel {
     fn drop(&mut self) {
-        self.shutdown.notify_waiters();
+        let _ = self.shutdown.send(true);
     }
 }
 
@@ -91,7 +96,7 @@ impl MasqueTunnel {
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let alive = Arc::new(AtomicBool::new(true));
-        let shutdown = Arc::new(Notify::new());
+        let (shutdown, shutdown_signal) = watch::channel(false);
         let tun_label = tun_name.to_string();
 
         let (mut sender, connection) = h2::client::Builder::new()
@@ -106,7 +111,7 @@ impl MasqueTunnel {
             .await?;
         // The connection driver must run for the stream to make progress.
         let carrier_alive = Arc::clone(&alive);
-        let carrier_shutdown = Arc::clone(&shutdown);
+        let carrier_shutdown = shutdown.clone();
         let carrier_label = tun_label.clone();
         tokio::spawn(async move {
             match connection.await {
@@ -114,7 +119,7 @@ impl MasqueTunnel {
                 Err(error) => tracing::debug!("masque h2 connection closed: {error}"),
             }
             carrier_alive.store(false, Ordering::Relaxed);
-            carrier_shutdown.notify_waiters();
+            let _ = carrier_shutdown.send(true);
         });
 
         let uri = format!("https://{CONNECT_AUTHORITY}/");
@@ -142,10 +147,10 @@ impl MasqueTunnel {
         // down. The tunnel is one request that lasts as long as the node
         // does, so park the handle in a task that just waits for the tunnel
         // to end.
-        let parked_shutdown = Arc::clone(&shutdown);
+        let mut parked_shutdown = shutdown.subscribe();
         tokio::spawn(async move {
             let _carrier = sender;
-            parked_shutdown.notified().await;
+            let _ = parked_shutdown.changed().await;
         });
 
         // A node that configures its tunnel addresses needs no assignment, and
@@ -168,7 +173,8 @@ impl MasqueTunnel {
         // carrier is gone.
         let upstream = tun.clone();
         let upstream_alive = LivenessGuard::new(Arc::clone(&alive));
-        let upstream_shutdown = Arc::clone(&shutdown);
+        let upstream_shutdown = shutdown.clone();
+        let mut upstream_signal = shutdown_signal.clone();
         let tun_label = tun_name.to_string();
         tokio::spawn(async move {
             let _alive = upstream_alive;
@@ -182,7 +188,7 @@ impl MasqueTunnel {
                     tokio::pin!(read);
                     tokio::select! {
                         result = &mut read => result,
-                        _ = upstream_shutdown.notified() => break,
+                        _ = upstream_signal.changed() => break,
                     }
                 };
                 match outcome {
@@ -204,13 +210,14 @@ impl MasqueTunnel {
                     }
                 }
             }
-            upstream_shutdown.notify_waiters();
+            let _ = upstream_shutdown.send(true);
         });
 
         // Endpoint -> TUN.
         let downstream = tun.clone();
         let downstream_alive = LivenessGuard::new(Arc::clone(&alive));
-        let downstream_shutdown = Arc::clone(&shutdown);
+        let downstream_shutdown = shutdown.clone();
+        let mut downstream_signal = shutdown_signal.clone();
         let tun_label = tun_name.to_string();
         // HTTP/2 makes the reader release capacity by hand. Without this the
         // endpoint runs out of window after the first few dozen packets and
@@ -225,7 +232,7 @@ impl MasqueTunnel {
                 tokio::pin!(next);
                 let chunk = tokio::select! {
                     chunk = &mut next => chunk,
-                    _ = downstream_shutdown.notified() => break,
+                    _ = downstream_signal.changed() => break,
                 };
                 let Some(chunk) = chunk else {
                     tracing::debug!("masque: endpoint ended the stream on {tun_label}");
@@ -257,7 +264,7 @@ impl MasqueTunnel {
                             }
                             if let Err(error) = downstream.send(&payload).await {
                                 tracing::debug!("masque TUN write failed: {error}");
-                                downstream_shutdown.notify_waiters();
+                                let _ = downstream_shutdown.send(true);
                                 return;
                             }
                         }
@@ -265,13 +272,13 @@ impl MasqueTunnel {
                         Err(CapsuleError::Incomplete) => break,
                         Err(error) => {
                             tracing::debug!("masque capsule decode failed: {error}");
-                            downstream_shutdown.notify_waiters();
+                            let _ = downstream_shutdown.send(true);
                             return;
                         }
                     }
                 }
             }
-            downstream_shutdown.notify_waiters();
+            let _ = downstream_shutdown.send(true);
         });
 
         Ok(Self {
@@ -279,6 +286,7 @@ impl MasqueTunnel {
             addresses,
             alive,
             shutdown,
+            shutdown_signal,
         })
     }
 
