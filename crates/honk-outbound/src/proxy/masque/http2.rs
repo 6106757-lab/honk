@@ -90,7 +90,7 @@ impl MasqueTunnel {
         });
 
         let uri = format!("https://{CONNECT_AUTHORITY}/");
-        let mut request = http::Request::builder()
+        let request = http::Request::builder()
             .method(http::Method::CONNECT)
             .uri(&uri)
             .header(CAPSULE_PROTOCOL_HEADER.0, CAPSULE_PROTOCOL_HEADER.1)

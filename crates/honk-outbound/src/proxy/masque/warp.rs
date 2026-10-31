@@ -142,7 +142,8 @@ fn self_signed(device: &PKey<Private>) -> anyhow::Result<X509> {
     let mut name = X509NameBuilder::new()?;
     name.append_entry_by_text("CN", "honk-masque")?;
     let name = name.build();
-    let serial = Asn1Integer::from_bn(&BigNum::from_u32(1)?)?;
+    let serial_number = BigNum::from_u32(1)?;
+    let serial = Asn1Integer::from_bn(&serial_number)?;
     let not_before = Asn1Time::days_from_now(0)?;
     let not_after = Asn1Time::days_from_now(CERT_VALID_DAYS)?;
     let mut builder = X509Builder::new()?;
