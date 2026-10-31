@@ -16,6 +16,7 @@
 //! address, so the kernel routes it through the tunnel with full BBR, window
 //! scaling and retransmit behaviour. See [`tun`] and [`carrier`].
 
+pub mod bind;
 pub mod capsule;
 pub mod http2;
 pub mod tun;
