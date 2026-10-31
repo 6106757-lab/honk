@@ -7,24 +7,34 @@
 //!                     of silently opening a plain HTTP/3 stream.
 
 use honk_config::node::Node;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use super::http2::MasqueTunnel;
 use super::warp::WarpIdentity;
+use super::CarrierDialer;
+use crate::proxy::AsyncReadWrite;
 
 /// Default tunnel MTU. IPv6 requires >= 1280 and every MASQUE endpoint we
 /// know advertises WARP-sized packets, so 1280 is the safe floor.
 pub const DEFAULT_MTU: u32 = 1280;
 
 /// Open the node's IP tunnel over its configured carrier.
-pub async fn open_tunnel(node: &Node, connect_timeout: Duration) -> anyhow::Result<MasqueTunnel> {
+///
+/// `detour` carries the connection to the endpoint through another node when
+/// the node names one; the generation supplies it, since only it can reach
+/// that node's runtime.
+pub async fn open_tunnel(
+    node: &Node,
+    connect_timeout: Duration,
+    detour: Option<&dyn CarrierDialer>,
+) -> anyhow::Result<MasqueTunnel> {
     let config = node
         .masque()
         .ok_or_else(|| anyhow::anyhow!("masque node {} has no masque config", node.name))?;
     let network = config.network();
     match network {
-        "h2" | "http2" | "" => open_h2(node, connect_timeout).await,
+        "h2" | "http2" | "" => open_h2(node, connect_timeout, detour).await,
         "quic" | "h3" | "http3" => anyhow::bail!(
             "masque node {}: `network: quic` needs HTTP/3 connect-ip, which honk does not \
              carry yet; use `network: h2`",
@@ -35,12 +45,35 @@ pub async fn open_tunnel(node: &Node, connect_timeout: Duration) -> anyhow::Resu
 }
 
 /// TCP + WARP TLS + HTTP/2 CONNECT-IP.
-async fn open_h2(node: &Node, connect_timeout: Duration) -> anyhow::Result<MasqueTunnel> {
+async fn open_h2(
+    node: &Node,
+    connect_timeout: Duration,
+    detour: Option<&dyn CarrierDialer>,
+) -> anyhow::Result<MasqueTunnel> {
     let config = node
         .masque()
         .ok_or_else(|| anyhow::anyhow!("masque node {} has no masque config", node.name))?;
     let address = endpoint_address(node);
-    let tcp = crate::util::connect_outbound(&address, connect_timeout).await?;
+    let tcp = match (config.detour.as_deref(), detour) {
+        (Some(name), Some(dialer)) => {
+            let endpoint = resolve_endpoint(&address).await?;
+            dialer
+                .connect(endpoint, connect_timeout)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "masque node {}: detour {name:?} could not reach {address}: {error}",
+                        node.name
+                    )
+                })?
+        }
+        (Some(name), None) => anyhow::bail!(
+            "masque node {}: detour {name:?} is not bound in this generation",
+            node.name
+        ),
+        (None, _) => Box::new(crate::util::connect_outbound(&address, connect_timeout).await?)
+            as Box<dyn AsyncReadWrite>,
+    };
     let identity = WarpIdentity::build(node)?;
     let tls = identity.connect(tcp, connect_timeout).await?;
     let io = crate::tls::BatchRead::new(tls);
@@ -53,6 +86,14 @@ async fn open_h2(node: &Node, connect_timeout: Duration) -> anyhow::Result<Masqu
          (mtu {mtu}, addresses {preferred:?})"
     );
     MasqueTunnel::open_h2(io, mtu, &tun_name, &preferred).await
+}
+
+/// Resolve the endpoint literal to an address a detour can dial.
+async fn resolve_endpoint(address: &str) -> anyhow::Result<SocketAddr> {
+    tokio::net::lookup_host(address)
+        .await?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("masque endpoint {address} resolved to nothing"))
 }
 
 /// The node's `host:port`, bracketed when the endpoint is an IPv6 literal.

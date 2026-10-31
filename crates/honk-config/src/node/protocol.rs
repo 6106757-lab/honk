@@ -228,6 +228,10 @@ pub struct MasqueConfig {
     pub remote_dns_resolve: bool,
     /// DNS servers to use inside the tunnel.
     pub dns: Vec<String>,
+    /// Name of the node the carrier dials through before reaching the
+    /// endpoint. An endpoint blocked on the path out is often reachable from
+    /// an existing node, so the carrier rides it instead of dialling directly.
+    pub detour: Option<String>,
     pub tls: TlsOptions,
 }
 

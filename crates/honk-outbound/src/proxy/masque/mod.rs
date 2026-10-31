@@ -26,16 +26,33 @@ pub mod warp;
 use async_trait::async_trait;
 use honk_config::node::Node;
 use std::fmt;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
 use super::{
-    PacketOutbound, PacketTransport, ProbeableOutbound, ProxyStream, TcpOutbound,
+    AsyncReadWrite, PacketOutbound, PacketTransport, ProbeableOutbound, ProxyStream, TcpOutbound,
     UdpSocketTransport, WarmRequirement, WarmableOutbound,
 };
 use crate::runtime::{NodeRuntime, ProtocolRuntime};
+
+/// Reaches the MASQUE endpoint through another node.
+///
+/// An endpoint that the direct path out cannot reach is often reachable from
+/// an existing node, so a node may name a detour and ride it. Only the
+/// generation can turn that name into a dial, so it supplies the dialer once
+/// the node set is known.
+pub trait CarrierDialer: Send + Sync {
+    /// Connect to `endpoint` through the detour node.
+    fn connect(
+        &self,
+        endpoint: SocketAddr,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Box<dyn AsyncReadWrite>>> + Send>>;
+}
 
 /// MASQUE outbound handler. Stateless: the tunnel itself lives in the node's
 /// generation runtime ([`MasqueRuntime`]) so a reload tears down the old TUN
@@ -57,6 +74,9 @@ impl MasqueHandler {
 /// a TUN device.
 pub struct MasqueRuntime {
     tunnel: Mutex<Option<Arc<http2::MasqueTunnel>>>,
+    /// Dialer for the node's detour, bound once the generation knows the node
+    /// the detour names.
+    detour: std::sync::OnceLock<Arc<dyn CarrierDialer>>,
 }
 
 impl Default for MasqueRuntime {
@@ -79,7 +99,14 @@ impl MasqueRuntime {
     pub fn new() -> Self {
         Self {
             tunnel: Mutex::new(None),
+            detour: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Give the runtime the dialer for the node's detour. Ignored when the
+    /// node names none, or when the generation binds twice.
+    pub fn bind_detour(&self, dialer: Arc<dyn CarrierDialer>) {
+        let _ = self.detour.set(dialer);
     }
 
     /// The node's tunnel, opening it on first use. Concurrent callers share one
@@ -99,7 +126,9 @@ impl MasqueRuntime {
             // it, then rebuild. Cached TUN devices outlive their endpoint.
             guard.take();
         }
-        let tunnel = Arc::new(carrier::open_tunnel(node, connect_timeout).await?);
+        let tunnel = Arc::new(
+            carrier::open_tunnel(node, connect_timeout, self.detour.get().map(Arc::as_ref)).await?,
+        );
         *guard = Some(Arc::clone(&tunnel));
         Ok(tunnel)
     }

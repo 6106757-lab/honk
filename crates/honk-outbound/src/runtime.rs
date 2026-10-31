@@ -782,6 +782,23 @@ pub type SharedRuntimeRegistry = Arc<parking_lot::RwLock<Arc<OutboundRuntimeRegi
 
 impl OutboundRuntimeRegistry {
     /// Build and validate a registry from the generation's node set.
+    /// Give a MASQUE node's runtime the dialer for its configured detour.
+    /// Returns false when the node is unknown or is not a MASQUE node.
+    pub fn bind_masque_detour(
+        &self,
+        node_id: uuid::Uuid,
+        dialer: Arc<dyn crate::proxy::masque::CarrierDialer>,
+    ) -> bool {
+        let Some(runtime) = self.nodes.get(&node_id) else {
+            return false;
+        };
+        let ProtocolRuntime::Masque(masque) = &runtime.runtime else {
+            return false;
+        };
+        masque.bind_detour(dialer);
+        true
+    }
+
     pub fn build(nodes: &[Node]) -> Result<Self, RuntimeRegistryError> {
         Self::build_reusing(
             nodes,

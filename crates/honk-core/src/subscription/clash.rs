@@ -417,6 +417,9 @@ fn apply_protocol(mapping: &Mapping, node: &mut Node) -> Result<(), &'static str
                 Some(value) => fields::alpn_list(value)?,
                 None => Vec::new(),
             };
+            // mihomo calls the same idea `dialer-proxy`; sing-box, `detour`.
+            config.detour = yaml_text_alias(mapping, &["dialer-proxy", "dialer_proxy", "detour"])?
+                .filter(|value| !value.trim().is_empty());
         }
         OutboundConfig::Direct | OutboundConfig::Block => unreachable!(),
     }

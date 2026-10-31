@@ -20,6 +20,7 @@ use nfqueue_runtime::{
 #[cfg(feature = "ebpf")]
 use nfqueue_runtime::{NfqueueRuntime, NfqueueRuntimeEvent, wait_nfqueue_event};
 mod lifecycle;
+pub(crate) mod masque_detour;
 pub mod packet_sniffer;
 mod preconnect;
 mod probers;

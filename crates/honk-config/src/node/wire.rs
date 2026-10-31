@@ -189,6 +189,8 @@ struct FlatNode {
     #[serde(default)]
     masque_dns: Vec<String>,
     #[serde(default)]
+    masque_detour: Option<String>,
+    #[serde(default)]
     mark: Option<u32>,
     #[serde(default)]
     tags: Vec<String>,
@@ -496,6 +498,7 @@ impl FlatNode {
             masque_remote_dns_resolve
         );
         strip!(!self.masque_dns.is_empty() && !masque, masque_dns);
+        strip!(self.masque_detour.is_some() && !masque, masque_detour);
 
         if !dropped.is_empty() {
             diagnostics.push(DetailedDiagnostic::warning(
@@ -722,6 +725,7 @@ impl FlatNode {
                     mtu: flat.quic_mtu,
                     remote_dns_resolve: flat.masque_remote_dns_resolve.unwrap_or(false),
                     dns: std::mem::take(&mut flat.masque_dns),
+                    detour: flat.masque_detour.take(),
                     tls,
                 })
             }
@@ -833,6 +837,8 @@ struct WireOptions<'a> {
     masque_remote_dns_resolve: Option<bool>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     masque_dns: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    masque_detour: Option<&'a str>,
     mark: Option<u32>,
     tags: &'a [String],
     subscription_id: Option<uuid::Uuid>,
@@ -972,6 +978,7 @@ impl<'a> WireOptions<'a> {
                 wire.masque_local_ipv6 = config.local_ipv6.as_deref();
                 wire.masque_remote_dns_resolve = Some(config.remote_dns_resolve);
                 wire.masque_dns = config.dns.as_slice();
+                wire.masque_detour = config.detour.as_deref();
                 wire.set_tls(&config.tls);
             }
             OutboundConfig::Direct | OutboundConfig::Block => {}
