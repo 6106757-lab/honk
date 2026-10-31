@@ -490,7 +490,7 @@ fn apply_stream(mapping: &Mapping, node: &mut Node, udp: Option<bool>) -> Result
             return Err("gRPC options require gRPC transport");
         }
     }
-    if let Some(value) = yaml_value(mapping, "xhttp-opts") {
+    if let Some(value) = yaml_value(mapping, "xhttp-opts").filter(|value| yaml_active(value)) {
         let transport = node
             .transport_mut()
             .ok_or("XHTTP options require XHTTP transport")?;
@@ -503,7 +503,12 @@ fn apply_stream(mapping: &Mapping, node: &mut Node, udp: Option<bool>) -> Result
         if let Some(options) = yaml_value(mapping, "ws-opts").filter(|value| yaml_active(value)) {
             let options = options.as_mapping().ok_or("ws-opts must be a mapping")?;
             transport.ws_path = yaml_text_alias(options, &["path"])?;
-            if let Some(headers) = yaml_value(options, "headers") {
+            // Generators emit a dangling `headers:` key with no value whenever
+            // the tunnel carries none. It is an empty header set, not a
+            // malformed one, and rejecting it drops the whole node.
+            if let Some(headers) =
+                yaml_value(options, "headers").filter(|value| yaml_active(value))
+            {
                 let headers = headers
                     .as_mapping()
                     .ok_or("ws-opts.headers must be a mapping")?;

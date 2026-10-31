@@ -813,3 +813,45 @@ fn c14_feed_duration_aliases_compare_after_ceiling() {
         Some(0)
     );
 }
+
+#[test]
+fn websocket_headers_may_be_empty_and_sni_is_optional() {
+    // Subscription generators emit `headers:` with no value whenever the
+    // tunnel carries no Host header. Losing the node over it silently empties
+    // every plain WebSocket proxy in such a feed.
+    const FEED: &str = r#"proxies:
+  - name: plain-ws
+    type: vless
+    server: 203.69.104.22
+    port: 8080
+    uuid: a357d265-84c6-4242-8e73-8327627d53fa
+    network: ws
+    ws-opts:
+      path: "/"
+      headers:
+  - name: ws-with-host
+    type: vless
+    server: 139.59.105.44
+    port: 25555
+    uuid: 27c5483f-17f4-48ae-9a04-def53d88440d
+    network: ws
+    ws-opts:
+      path: "/"
+      headers:
+        Host: sdeweb.hkcsl.com
+"#;
+    let nodes = parse_clash_subscription(FEED, None).unwrap();
+    assert_eq!(
+        nodes.iter().map(|node| node.name.as_str()).collect::<Vec<_>>(),
+        ["plain-ws", "ws-with-host"]
+    );
+    let transport = nodes[0].transport().unwrap();
+    assert_eq!(transport.transport, "ws");
+    assert_eq!(transport.ws_path.as_deref(), Some("/"));
+    assert_eq!(transport.ws_host, None);
+    assert!(!nodes[0].tls().unwrap().enabled);
+    assert_eq!(
+        nodes[1].transport().unwrap().ws_host.as_deref(),
+        Some("sdeweb.hkcsl.com")
+    );
+}
