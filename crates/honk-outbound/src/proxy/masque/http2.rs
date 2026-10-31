@@ -21,6 +21,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Notify;
 
 use super::tun::TunDevice;
 
@@ -56,6 +57,17 @@ pub struct MasqueTunnel {
     /// Cleared by whichever direction notices the carrier is gone, so the
     /// runtime can rebuild the tunnel instead of handing out a dead one.
     alive: Arc<AtomicBool>,
+    /// Releases the shuttle tasks. Both of them wait on the carrier or on the
+    /// TUN device, and neither would notice on its own that the tunnel is
+    /// over: a device whose reader never returns keeps its name, and the next
+    /// tunnel for the same node then fails to create it with `EBUSY`.
+    shutdown: Arc<Notify>,
+}
+
+impl Drop for MasqueTunnel {
+    fn drop(&mut self) {
+        self.shutdown.notify_waiters();
+    }
 }
 
 impl MasqueTunnel {
@@ -74,6 +86,7 @@ impl MasqueTunnel {
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let alive = Arc::new(AtomicBool::new(true));
+        let shutdown = Arc::new(Notify::new());
 
         let (mut sender, connection) = h2::client::Builder::new()
             .enable_push(false)
@@ -82,11 +95,13 @@ impl MasqueTunnel {
             .await?;
         // The connection driver must run for the stream to make progress.
         let carrier_alive = Arc::clone(&alive);
+        let carrier_shutdown = Arc::clone(&shutdown);
         tokio::spawn(async move {
             if let Err(error) = connection.await {
                 tracing::debug!("masque h2 connection closed: {error}");
             }
             carrier_alive.store(false, Ordering::Relaxed);
+            carrier_shutdown.notify_waiters();
         });
 
         let uri = format!("https://{CONNECT_AUTHORITY}/");
@@ -124,16 +139,31 @@ impl MasqueTunnel {
         let tun = Arc::new(TunDevice::create(tun_name)?);
         tun.configure(&addresses, mtu)?;
 
-        // TUN -> endpoint.
+        // TUN -> endpoint. Waiting on the device alone is not enough: a quiet
+        // tunnel never wakes the reader, so the task also waits to be told the
+        // carrier is gone.
         let upstream = tun.clone();
         let upstream_alive = LivenessGuard::new(Arc::clone(&alive));
+        let upstream_shutdown = Arc::clone(&shutdown);
+        let tun_label = tun_name.to_string();
         tokio::spawn(async move {
             let _alive = upstream_alive;
             let mut packet = vec![0u8; mtu as usize];
+            let mut packets = 0usize;
             loop {
-                match upstream.recv(&mut packet).await {
+                let read = upstream.recv(&mut packet);
+                tokio::pin!(read);
+                let outcome = tokio::select! {
+                    result = &mut read => result,
+                    _ = upstream_shutdown.notified() => break,
+                };
+                match outcome {
                     Ok(0) => break,
                     Ok(length) => {
+                        packets += 1;
+                        if packets == 1 {
+                            tracing::debug!("masque: first packet to {tun_label}: {length} bytes");
+                        }
                         let capsule = capsule::encode_datagram(&packet[..length]).freeze();
                         if let Err(error) = send_stream.send_data(capsule, false) {
                             tracing::debug!("masque upstream closed: {error}");
@@ -146,15 +176,26 @@ impl MasqueTunnel {
                     }
                 }
             }
+            upstream_shutdown.notify_waiters();
         });
 
         // Endpoint -> TUN.
         let downstream = tun.clone();
         let downstream_alive = LivenessGuard::new(Arc::clone(&alive));
+        let downstream_shutdown = Arc::clone(&shutdown);
+        let tun_label = tun_name.to_string();
         tokio::spawn(async move {
             let _alive = downstream_alive;
             let mut buffer = BytesMut::new();
-            while let Some(chunk) = body.data().await {
+            let mut packets = 0usize;
+            loop {
+                let next = body.data();
+                tokio::pin!(next);
+                let chunk = tokio::select! {
+                    chunk = &mut next => chunk,
+                    _ = downstream_shutdown.notified() => break,
+                };
+                let Some(chunk) = chunk else { break };
                 match chunk {
                     Ok(chunk) => buffer.extend_from_slice(&chunk),
                     Err(error) => {
@@ -168,8 +209,16 @@ impl MasqueTunnel {
                     }
                     match capsule::decode(&mut buffer) {
                         Ok(Capsule::Datagram { payload, .. }) => {
+                            packets += 1;
+                            if packets == 1 {
+                                tracing::debug!(
+                                    "masque: first packet from {tun_label}: {} bytes",
+                                    payload.len()
+                                );
+                            }
                             if let Err(error) = downstream.send(&payload).await {
                                 tracing::debug!("masque TUN write failed: {error}");
+                                downstream_shutdown.notify_waiters();
                                 return;
                             }
                         }
@@ -177,17 +226,20 @@ impl MasqueTunnel {
                         Err(CapsuleError::Incomplete) => break,
                         Err(error) => {
                             tracing::debug!("masque capsule decode failed: {error}");
+                            downstream_shutdown.notify_waiters();
                             return;
                         }
                     }
                 }
             }
+            downstream_shutdown.notify_waiters();
         });
 
         Ok(Self {
             tun,
             addresses,
             alive,
+            shutdown,
         })
     }
 

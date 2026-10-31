@@ -7,7 +7,6 @@
 //! ```text
 //! Capsule {
 //!   Capsule Type (i),
-//!   [Context ID (i)],     -- DATAGRAM only
 //!   Length (i),
 //!   Value (..),
 //! }
@@ -16,6 +15,13 @@
 //! Type and Length use QUIC variable-length integers, so a capsule header is
 //! between 3 and 24 bytes. A reader must therefore buffer partial capsules
 //! rather than assuming one read equals one capsule.
+//!
+//! The Context ID of RFC 9484 lives inside the value of an HTTP/3 datagram,
+//! not in the capsule header — and the connect-ip endpoints deployed today
+//! omit it from HTTP/2 capsules entirely, carrying the IP packet as the whole
+//! value. A capsule that puts a Context ID before Length is read back as a
+//! zero-length datagram followed by garbage, which is why the endpoint resets
+//! the tunnel instead of forwarding anything.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -31,9 +37,9 @@ pub const CAPSULE_ROUTE_ADVERTISEMENT: u64 = 0x03;
 pub enum Capsule {
     /// An IP packet destined for (or received from) the tunnel.
     ///
-    /// Over HTTP/2 this capsule is itself the payload: the raw IP packet.
-    /// Over HTTP/3 the payload is carried in a QUIC DATAGRAM and the capsule
-    /// form is only used as a fallback.
+    /// Over HTTP/2 the capsule value is the packet itself, so `context_id` is
+    /// always 0. Over HTTP/3 the packet would ride in a QUIC DATAGRAM, whose
+    /// Context ID is the one recorded here.
     Datagram {
         context_id: u64,
         payload: Bytes,
@@ -160,10 +166,14 @@ fn safe_8(buf: &mut impl Buf) -> Option<[u8; 8]> {
 }
 
 /// Encode a DATAGRAM capsule wrapping `payload` (an IP packet).
+///
+/// The packet is the whole capsule value: `Type, Length, Packet`. Endpoints
+/// that speak Cloudflare's connect-ip read it that way, so a Context ID in
+/// front of Length would be parsed as a zero-length value and the rest of the
+/// bytes as a second, malformed capsule.
 pub fn encode_datagram(payload: &[u8]) -> BytesMut {
     let mut buf = BytesMut::new();
     put_varint(&mut buf, CAPSULE_DATAGRAM);
-    put_varint(&mut buf, 0); // Context ID
     put_varint(&mut buf, payload.len() as u64);
     buf.put_slice(payload);
     buf
@@ -177,12 +187,6 @@ pub fn encode_datagram(payload: &[u8]) -> BytesMut {
 pub fn decode(buf: &mut BytesMut) -> Result<Capsule, CapsuleError> {
     let mut cursor = std::io::Cursor::new(&buf[..]);
     let kind = read_varint(&mut cursor).ok_or(CapsuleError::Incomplete)?;
-    // Only DATAGRAM carries a Context ID, and it precedes Length.
-    let context_id = if kind == CAPSULE_DATAGRAM {
-        read_varint(&mut cursor).ok_or(CapsuleError::Incomplete)?
-    } else {
-        0
-    };
     let length = read_varint(&mut cursor).ok_or(CapsuleError::Incomplete)?;
     let length =
         usize::try_from(length).map_err(|_| CapsuleError::Malformed("capsule too large"))?;
@@ -195,7 +199,7 @@ pub fn decode(buf: &mut BytesMut) -> Result<Capsule, CapsuleError> {
 
     let capsule = match kind {
         CAPSULE_DATAGRAM => Capsule::Datagram {
-            context_id,
+            context_id: 0,
             payload: value,
         },
         CAPSULE_ADDRESS_ASSIGN => Capsule::AddressAssign {
@@ -270,6 +274,8 @@ mod tests {
     #[test]
     fn datagram_capsule_survives_a_round_trip() {
         let packet = b"\x45\x00\x00\x14";
+        // Type, Length, packet — no Context ID in front of the length.
+        assert_eq!(&encode_datagram(packet)[..], b"\x00\x04\x45\x00\x00\x14");
         let mut buf = encode_datagram(packet);
         let capsule = decode(&mut buf).expect("decodes");
         match capsule {

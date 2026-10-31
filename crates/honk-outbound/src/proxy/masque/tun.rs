@@ -46,35 +46,26 @@ impl TunDevice {
             .custom_flags(libc::O_NONBLOCK)
             .open(TUN_PATH)?;
 
-        let mut request: libc::ifreq = unsafe { mem::zeroed() };
-        for (slot, byte) in request.ifr_name.iter_mut().zip(name.bytes()) {
-            *slot = byte as libc::c_char;
+        match attach(&file, name) {
+            Ok(resolved) => Self::finish(file, resolved),
+            // The name is still held for an instant when the previous
+            // generation of the same node is being torn down. Take the next
+            // free index rather than failing the tunnel.
+            Err(error) if error.raw_os_error() == Some(libc::EBUSY) => {
+                let template = format!("{name}%d");
+                let resolved = attach(&file, &template)?;
+                Self::finish(file, resolved)
+            }
+            Err(error) => Err(error),
         }
-        if name.len() >= request.ifr_name.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("TUN name {name:?} exceeds IFNAMSIZ"),
-            ));
-        }
-        request.ifr_ifru.ifru_flags = (libc::IFF_TUN | libc::IFF_NO_PI) as libc::c_short;
+    }
 
-        if unsafe { libc::ioctl(file.as_raw_fd(), libc::TUNSETIFF, &request) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        // Read the name back: the kernel may have expanded a `%d` template.
-        let resolved = request
-            .ifr_name
-            .iter()
-            .take_while(|&&byte| byte != 0)
-            .map(|&byte| byte as u8 as char)
-            .collect::<String>();
-
+    fn finish(file: File, name: String) -> io::Result<Self> {
         Ok(Self {
             // SAFETY: `file` is the freshly opened TUN descriptor; nothing else
             // has a handle to it and it stays owned by the AsyncFd until drop.
             inner: unsafe { AsyncFd::register(file)? },
-            name: resolved,
+            name,
         })
     }
 
@@ -139,6 +130,33 @@ impl TunDevice {
             }
         }
     }
+}
+
+/// Attach `file` to the device called `name`, returning the name the kernel
+/// resolved (it expands a `%d` template to the next free index).
+fn attach(file: &File, name: &str) -> io::Result<String> {
+    let mut request: libc::ifreq = unsafe { mem::zeroed() };
+    for (slot, byte) in request.ifr_name.iter_mut().zip(name.bytes()) {
+        *slot = byte as libc::c_char;
+    }
+    if name.len() >= request.ifr_name.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("TUN name {name:?} exceeds IFNAMSIZ"),
+        ));
+    }
+    request.ifr_ifru.ifru_flags = (libc::IFF_TUN | libc::IFF_NO_PI) as libc::c_short;
+
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::TUNSETIFF, &request) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(request
+        .ifr_name
+        .iter()
+        .take_while(|&&byte| byte != 0)
+        .map(|&byte| byte as u8 as char)
+        .collect::<String>())
 }
 
 /// The `ip` family selectors for the routes this device needs: `-4`, `-6`, or
