@@ -42,19 +42,27 @@ for a in d.get("artifacts", []):
 
 mkdir -p "$OUT"
 auth -L "$url" -o "$OUT/artifact.zip"
-(
-  cd "$OUT"
-  unzip -oq artifact.zip
-  rm -f artifact.zip
-  found=0
-  for t in *.tar.gz; do
-    [[ -f $t ]] || continue
-    tar -xzf "$t"
-    rm -f "$t"
-    found=1
-  done
-  [[ $found == 1 ]] || { echo "no tarball in the artifact" >&2; exit 1; }
-)
+
+# Unpack with python rather than unzip: a minimal gateway often has neither
+# unzip nor a package mirror handy, and every host running this has python.
+"$PY" - "$OUT" <<'PY'
+import os, sys, tarfile, zipfile
+
+out = sys.argv[1]
+archive = os.path.join(out, "artifact.zip")
+with zipfile.ZipFile(archive) as zf:
+    zf.extractall(out)
+os.remove(archive)
+
+tarballs = [n for n in sorted(os.listdir(out)) if n.endswith(".tar.gz")]
+if not tarballs:
+    sys.exit("no tarball inside the artifact")
+for name in tarballs:
+    path = os.path.join(out, name)
+    with tarfile.open(path) as tf:
+        tf.extractall(out)
+    os.remove(path)
+PY
 
 bin=$(find "$OUT" -type f -name honk-core | head -1)
 [[ -n $bin ]] || { echo "no honk-core inside the archive" >&2; exit 1; }
