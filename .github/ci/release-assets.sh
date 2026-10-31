@@ -32,6 +32,22 @@ for path in "$dist"/*.tar.gz; do
   rows+=("$arch $libc $api_rank $alloc_rank"$'\t'"| \`$file\` | \`$alloc-$api-$arch-$libc\` |")
 done
 
+# Formal releases also carry distribution packages of the static musl full build.
+for path in "$dist"/*.deb "$dist"/*.rpm "$dist"/*.pkg.tar.zst; do
+  [[ -e $path ]] || continue
+  file=${path##*/}
+  if [[ ! $file =~ ^honk-core-.+-(x86_64|aarch64)\.(deb|rpm|pkg\.tar\.zst)$ ]]; then
+    printf '::error::Unrecognised package name: %s\n' "$file" >&2
+    exit 1
+  fi
+  case ${BASH_REMATCH[2]} in
+    deb) kind='Debian and Ubuntu' ;;
+    rpm) kind='Fedora and RHEL' ;;
+    *) kind='Arch Linux' ;;
+  esac
+  others+=("| \`$file\` | $kind package of \`mimalloc-fullapi-${BASH_REMATCH[1]}-musl\` |")
+done
+
 if (( ${#rows[@]} == 0 )); then
   printf '::error::No honk-core archives in %s\n' "$dist" >&2
   exit 1

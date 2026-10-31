@@ -315,11 +315,26 @@ jobs:
       - name: Add doona corresponding source
         run: bash release-source/ci/fetch-doona.sh --source dist
 
+      # Formal releases also package the static musl full builds for dpkg, rpm and pacman.
+      - name: Build Linux packages
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+          source .github/ci/pins.env
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/nfpm.tar.gz" \
+            "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          echo "$NFPM_SHA256  $RUNNER_TEMP/nfpm.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/nfpm.tar.gz" -C "$RUNNER_TEMP" nfpm
+          PATH="$RUNNER_TEMP:$PATH" bash .github/ci/build-packages.sh ../dist "$GITHUB_REF_NAME"
+
       # One checksum file covers every published archive, formal and Debug alike; the
       # attestation lets `gh attestation verify` tie each archive to this workflow run.
       - name: Write SHA256SUMS
         working-directory: dist
-        run: sha256sum -- *.tar.gz > SHA256SUMS
+        run: |
+          shopt -s nullglob
+          sha256sum -- *.tar.gz *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
 
       # Every release body explains each archive as {allocator}-{API}-{arch}-{libc}.
       - name: Write release notes
@@ -349,6 +364,9 @@ jobs:
         with:
           files: |
             dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
             dist/SHA256SUMS
           fail_on_unmatched_files: true
           prerelease: ${{ contains(github.ref_name, '-') }}

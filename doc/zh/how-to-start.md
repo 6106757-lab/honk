@@ -129,6 +129,20 @@ honk-core --version
 
 发布二进制已内嵌 eBPF 目标文件，不需要单独安装 `honk-ebpf`。运行时也不会调用 `ip`、`nft`、`iptables` 或 `nsenter` 子进程。
 
+### 发行版软件包
+
+正式版本还附带 `x86_64` 与 `aarch64` 静态 musl full 构建的软件包：Debian 和 Ubuntu 用 `.deb`，Fedora 和 RHEL 用 `.rpm`，Arch Linux 用 `.pkg.tar.zst`。软件包会安装 `/usr/bin/honk-core`、`honk-core.service` 和 `/etc/honk/example.dae`，因此不需要再按[使用 systemd 运行](#使用-systemd-运行)操作。
+
+```shell
+sudo apt install ./honk-core-<version>-x86_64.deb       # Debian、Ubuntu
+sudo dnf install ./honk-core-<version>-x86_64.rpm       # Fedora、RHEL
+sudo pacman -U ./honk-core-<version>-x86_64.pkg.tar.zst # Arch Linux
+sudo cp /etc/honk/example.dae /etc/honk/config.dae      # 然后按需修改
+sudo systemctl enable --now honk-core
+```
+
+升级软件包会重启正在运行的 `honk-core.service`，卸载软件包会停止并禁用该服务。honk 与 dae 挂载在同一批网卡上，不能同时运行：该服务声明了 `Conflicts=dae.service`，启动其中一个就会停止另一个。从 dae 切换过来时，还要执行 `sudo systemctl disable dae`，避免 dae 开机自启。
+
 ### 从源码构建
 
 下述包含真实 eBPF 的源码构建使用：
@@ -367,6 +381,7 @@ sudo curl -fL --retry 3 -o /var/lib/honk/geoip.dat \
 Description=honk transparent proxy engine
 Wants=network-online.target
 After=network-online.target
+Conflicts=dae.service
 
 [Service]
 Type=notify
