@@ -9,10 +9,15 @@
 #   DOMAIN-SUFFIX,...,DIRECT       -> Talkatone   原为直连，按要求改为代理
 #   IP-CIDR,...,DIRECT,NO-RESOLVE  -> dip(...)    按目的 IP 匹配，走代理
 #
-# 顺序不可调换：去广告必须排在代理规则之前。crashlytics.com、inmobi.com、
-# inner-active.mobi、mobilefuse.com 这四个父域同时出现在两份清单里，若代理
-# 规则在先，其广告子域（例如 firebase-settings.crashlytics.com）会先命中代理
-# 而永远拦不掉。
+# 位置与顺序都有讲究，ci/update-rules.sh 负责把本文件的两个段落安置好：
+#
+#   1. 整个区块必须插在 dport(853) -> block 之后、geosite 分流之前。规则是首条
+#      命中即生效，若排在 geosite 之后，googlesyndication.com 与
+#      firebase-settings.crashlytics.com 会先命中 geosite: google，广告拦不掉。
+#   2. 区块内部，去广告必须排在代理规则之前。crashlytics.com、inmobi.com、
+#      inner-active.mobi、mobilefuse.com 这四个父域同时出现在两份清单里，若代理
+#      规则在先，其广告子域（例如 firebase-settings.crashlytics.com）会先命中
+#      代理而永远拦不掉。
 #
 # 注意：原清单把 firebaselogging-pa.googleapis.com 和 firebaseinstallations.
 # googleapis.com 也计入广告。它们并非 Talkatone 专用，任何依赖 Firebase 的
