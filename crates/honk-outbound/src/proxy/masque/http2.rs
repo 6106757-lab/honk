@@ -13,8 +13,8 @@ use bytes::BytesMut;
 use h2::RecvStream;
 use h2::ext::Protocol;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::tun::TunDevice;
