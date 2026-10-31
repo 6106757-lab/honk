@@ -506,8 +506,7 @@ fn apply_stream(mapping: &Mapping, node: &mut Node, udp: Option<bool>) -> Result
             // Generators emit a dangling `headers:` key with no value whenever
             // the tunnel carries none. It is an empty header set, not a
             // malformed one, and rejecting it drops the whole node.
-            if let Some(headers) =
-                yaml_value(options, "headers").filter(|value| yaml_active(value))
+            if let Some(headers) = yaml_value(options, "headers").filter(|value| yaml_active(value))
             {
                 let headers = headers
                     .as_mapping()

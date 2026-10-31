@@ -842,7 +842,10 @@ fn websocket_headers_may_be_empty_and_sni_is_optional() {
 "#;
     let nodes = parse_clash_subscription(FEED, None).unwrap();
     assert_eq!(
-        nodes.iter().map(|node| node.name.as_str()).collect::<Vec<_>>(),
+        nodes
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>(),
         ["plain-ws", "ws-with-host"]
     );
     let transport = nodes[0].transport().unwrap();
@@ -854,4 +857,33 @@ fn websocket_headers_may_be_empty_and_sni_is_optional() {
         nodes[1].transport().unwrap().ws_host.as_deref(),
         Some("sdeweb.hkcsl.com")
     );
+}
+
+#[test]
+fn masque_carriers_keep_separate_node_identities() {
+    // A subscription may list the same endpoint twice, once per carrier. The
+    // carrier changes which server answers, so the two entries are distinct
+    // nodes rather than a duplicate to be dropped.
+    const FEED: &str = r#"proxies:
+  - name: warp-h3
+    type: masque
+    server: 151.242.164.2
+    port: 65534
+    private-key: MHcCAQEEIN/pynzk3UL6zTCxHM+H/kY5WJNbtFEpA3Hn/cjRtILPoAoGCCqGSM49AwEHoUQDQgAEZLr6964x5FHpnzlmskl+FLsbu66UYt71UYYqjjkTIqszZFonW4yTPFGwo6aNMkP5Psj66m/3a3i2yGe94h8CKQ==
+  - name: warp-h2
+    type: masque
+    server: 151.242.164.2
+    port: 65534
+    private-key: MHcCAQEEIN/pynzk3UL6zTCxHM+H/kY5WJNbtFEpA3Hn/cjRtILPoAoGCCqGSM49AwEHoUQDQgAEZLr6964x5FHpnzlmskl+FLsbu66UYt71UYYqjjkTIqszZFonW4yTPFGwo6aNMkP5Psj66m/3a3i2yGe94h8CKQ==
+    network: h2
+"#;
+    let nodes = parse_clash_subscription(FEED, None).unwrap();
+    assert_eq!(
+        nodes
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>(),
+        ["warp-h3", "warp-h2"]
+    );
+    assert_ne!(nodes[0].derive_id(), nodes[1].derive_id());
 }

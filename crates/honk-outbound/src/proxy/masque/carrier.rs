@@ -22,8 +22,7 @@ pub async fn open_tunnel(node: &Node, connect_timeout: Duration) -> anyhow::Resu
     let config = node
         .masque()
         .ok_or_else(|| anyhow::anyhow!("masque node {} has no masque config", node.name))?;
-    // Matches mihomo: an absent `network` means HTTP/3.
-    let network = config.network.as_deref().unwrap_or("quic");
+    let network = config.network();
     match network {
         "h2" | "http2" | "" => open_h2(node, connect_timeout).await,
         "quic" | "h3" | "http3" => anyhow::bail!(

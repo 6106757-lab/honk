@@ -231,6 +231,14 @@ pub struct MasqueConfig {
     pub tls: TlsOptions,
 }
 
+impl MasqueConfig {
+    /// Carrier the node dials over. Matches mihomo: an absent `network` means
+    /// HTTP/3, so both the dial path and node identity agree on one answer.
+    pub fn network(&self) -> &str {
+        self.network.as_deref().unwrap_or("quic")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutboundConfig {
     Shadowsocks(ShadowsocksConfig),
@@ -439,6 +447,12 @@ impl OutboundConfig {
         ]
         .map(identity_field)
         .join("|");
+        if let Self::Masque(config) = self {
+            // The carrier is a different endpoint: the same address answers h2
+            // and h3 on separate shapes, and subscriptions list both.
+            fingerprint.push_str("|masque-network:");
+            fingerprint.push_str(config.network());
+        }
         if let Self::Vless(config) = self {
             fingerprint.push('|');
             fingerprint.push_str(&config.identity_fingerprint());
