@@ -151,11 +151,15 @@ impl MasqueTunnel {
             let mut packet = vec![0u8; mtu as usize];
             let mut packets = 0usize;
             loop {
-                let read = upstream.recv(&mut packet);
-                tokio::pin!(read);
-                let outcome = tokio::select! {
-                    result = &mut read => result,
-                    _ = upstream_shutdown.notified() => break,
+                // The read borrows the buffer, so it has to end before the
+                // buffer is read back out: hence the block.
+                let outcome = {
+                    let read = upstream.recv(&mut packet);
+                    tokio::pin!(read);
+                    tokio::select! {
+                        result = &mut read => result,
+                        _ = upstream_shutdown.notified() => break,
+                    }
                 };
                 match outcome {
                     Ok(0) => break,
