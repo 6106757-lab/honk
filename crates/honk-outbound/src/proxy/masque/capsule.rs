@@ -34,14 +34,22 @@ pub enum Capsule {
     /// Over HTTP/2 this capsule is itself the payload: the raw IP packet.
     /// Over HTTP/3 the payload is carried in a QUIC DATAGRAM and the capsule
     /// form is only used as a fallback.
-    Datagram { context_id: u64, payload: Bytes },
+    Datagram {
+        context_id: u64,
+        payload: Bytes,
+    },
     /// The endpoint assigned us addresses. `prefix_len` is in bits.
     AddressAssign {
         addresses: Vec<AssignedAddress>,
     },
     /// The endpoint advertised routes it will carry for us.
-    RouteAdvertisement { ranges: Vec<AddressRange> },
-    Unknown { kind: u64, payload: Bytes },
+    RouteAdvertisement {
+        ranges: Vec<AddressRange>,
+    },
+    Unknown {
+        kind: u64,
+        payload: Bytes,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,7 +179,8 @@ pub fn decode(buf: &mut BytesMut) -> Result<Capsule, CapsuleError> {
         0
     };
     let length = read_varint(&mut cursor).ok_or(CapsuleError::Incomplete)?;
-    let length = usize::try_from(length).map_err(|_| CapsuleError::Malformed("capsule too large"))?;
+    let length =
+        usize::try_from(length).map_err(|_| CapsuleError::Malformed("capsule too large"))?;
     let header_len = cursor.position() as usize;
     if buf.len() < header_len + length {
         return Err(CapsuleError::Incomplete);
@@ -201,7 +210,9 @@ pub fn decode(buf: &mut BytesMut) -> Result<Capsule, CapsuleError> {
 fn parse_address_assign(mut value: &[u8]) -> Result<Vec<AssignedAddress>, CapsuleError> {
     let mut out = Vec::new();
     while !value.is_empty() {
-        let family = *value.first().ok_or(CapsuleError::Malformed("truncated family"))?;
+        let family = *value
+            .first()
+            .ok_or(CapsuleError::Malformed("truncated family"))?;
         let (ip, prefix_len) = match family {
             0x02 => {
                 if value.len() < 6 {
@@ -257,7 +268,10 @@ mod tests {
         let mut buf = encode_datagram(packet);
         let capsule = decode(&mut buf).expect("decodes");
         match capsule {
-            Capsule::Datagram { context_id, payload } => {
+            Capsule::Datagram {
+                context_id,
+                payload,
+            } => {
                 assert_eq!(context_id, 0);
                 assert_eq!(&payload[..], &packet[..]);
             }

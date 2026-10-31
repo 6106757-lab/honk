@@ -17,6 +17,7 @@
 //! scaling and retransmit behaviour. See [`tun`] and [`carrier`].
 
 pub mod capsule;
+pub mod http2;
 pub mod tun;
 
 use async_trait::async_trait;
