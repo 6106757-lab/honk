@@ -248,6 +248,7 @@ impl ControlPlane {
                 cli_override: None,
                 effective: effective_log_file,
             },
+            startup_downgrades: StartupDowngrades::default(),
             ebpf: ebpf_arc,
             router: router_arc,
             proxy_registry,

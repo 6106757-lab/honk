@@ -232,6 +232,7 @@ impl ControlPlane {
             warn!(%error, "reload rejected: invalid subscription ids");
             return Ok(ReloadOutcome::Rejected);
         }
+        self.startup_downgrades.apply(&mut new_config);
         let current_router = self.router.read().await.clone();
         let current_config = self.config.read().await.clone();
         #[cfg(feature = "native-api")]
@@ -375,8 +376,12 @@ impl ControlPlane {
                 return Ok(ReloadOutcome::Noop { generation });
             }
         }
-        let restart_required =
-            restart_required_fields(&current_config, &new_config, &self.log_files);
+        let restart_required = restart_required_fields(
+            &current_config,
+            &new_config,
+            &self.log_files,
+            &self.startup_downgrades,
+        );
         if !restart_required.is_empty() {
             warn!(
                 fields = ?restart_required.iter().map(|field| field.path).collect::<Vec<_>>(),

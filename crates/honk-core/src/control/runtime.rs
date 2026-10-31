@@ -272,6 +272,7 @@ impl ControlPlane {
             "NFQUEUE startup failed before datapath admission; disabling staging for this process"
         );
         self.pending_udp_verdicts = None;
+        self.startup_downgrades.record_nfqueue_unavailable();
         let mut config = self.config.write().await;
         disable_nfqueue_for_startup(Arc::make_mut(&mut config), enabled);
     }

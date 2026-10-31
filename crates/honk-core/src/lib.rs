@@ -541,9 +541,10 @@ fn instance_lock(mock_mode: bool) -> anyhow::Result<Option<nix::fcntl::Flock<std
     .map(Some)
 }
 
-fn prepare_nfqueue_startup(config: &mut Config, mock_mode: bool) {
+/// Returns whether NFQUEUE was requested but disabled because it is unavailable.
+fn prepare_nfqueue_startup(config: &mut Config, mock_mode: bool) -> bool {
     if !config.global.nfqueue_enable {
-        return;
+        return false;
     }
 
     let reason = if mock_mode {
@@ -568,7 +569,9 @@ fn prepare_nfqueue_startup(config: &mut Config, mock_mode: bool) {
             "NFQUEUE is unavailable at startup; continuing with NFQUEUE staging disabled"
         );
         config.global.nfqueue_enable = false;
+        return true;
     }
+    false
 }
 
 fn probe_runtime_data_dir(path: &std::path::Path) -> std::io::Result<()> {
@@ -1070,7 +1073,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     // The old instance owns queue 320 until this lock is released. Check
     // NFQUEUE only after the handoff so a transient busy result cannot turn
     // a healthy restart into a permanently degraded process.
-    prepare_nfqueue_startup(&mut config, mock_mode);
+    let nfqueue_unavailable = prepare_nfqueue_startup(&mut config, mock_mode);
 
     #[cfg(feature = "ebpf")]
     let _dae0_guard;
@@ -1295,6 +1298,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         resource_budget,
         Arc::clone(&degradations),
     )?;
+    if nfqueue_unavailable {
+        control_plane
+            .startup_downgrades()
+            .record_nfqueue_unavailable();
+    }
     #[cfg(feature = "native-api")]
     let native_observation = if native_enabled {
         Some(native_api::observation::NativeObservation::attach(&mut control_plane).await)
@@ -1795,7 +1803,7 @@ mod startup_lifecycle_tests {
     fn nfqueue_requested_with_mock_backend_falls_back_to_disabled() {
         let mut config = honk_config::Config::default();
         config.global.nfqueue_enable = true;
-        prepare_nfqueue_startup(&mut config, true);
+        assert!(prepare_nfqueue_startup(&mut config, true));
         assert!(!config.global.nfqueue_enable);
     }
 
@@ -1804,7 +1812,7 @@ mod startup_lifecycle_tests {
     fn nfqueue_requested_without_ebpf_falls_back_to_disabled() {
         let mut config = honk_config::Config::default();
         config.global.nfqueue_enable = true;
-        prepare_nfqueue_startup(&mut config, false);
+        assert!(prepare_nfqueue_startup(&mut config, false));
         assert!(!config.global.nfqueue_enable);
     }
 
