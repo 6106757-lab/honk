@@ -28,7 +28,6 @@ const CAPSULE_PROTOCOL_HEADER: (&str, &str) = ("capsule-protocol", "?1");
 pub struct MasqueTunnel {
     tun: Arc<TunDevice>,
     assigned: Vec<IpAddr>,
-    mtu: u32,
 }
 
 impl MasqueTunnel {
@@ -142,7 +141,7 @@ impl MasqueTunnel {
             }
         });
 
-        Ok(Self { tun, assigned, mtu })
+        Ok(Self { tun, assigned })
     }
 
     /// Interface name of the TUN device backing this tunnel.

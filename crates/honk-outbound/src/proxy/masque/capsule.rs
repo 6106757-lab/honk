@@ -103,10 +103,10 @@ impl std::error::Error for CapsuleError {}
 pub fn put_varint(buf: &mut BytesMut, value: u64) {
     match value {
         0..=0x3F => buf.put_u8(value as u8),
-        0..=0x3FFF => {
+        0x40..=0x3FFF => {
             buf.put_u16(0x4000 | value as u16);
         }
-        0..=0x3FFF_FFFF => {
+        0x4000..=0x3FFF_FFFF => {
             buf.put_u32(0x8000_0000 | value as u32);
         }
         _ => {
@@ -127,7 +127,12 @@ pub fn read_varint(buf: &mut impl Buf) -> Option<u64> {
         return None;
     }
     let value = match length {
-        1 => u64::from(first & 0x3F),
+        1 => {
+            // The single-byte form still has to consume its byte, or a caller
+            // decoding a sequence would read the same one repeatedly.
+            buf.advance(1);
+            u64::from(first & 0x3F)
+        }
         2 => u64::from(u16::from_be_bytes(safe_2(buf)?) & 0x3FFF),
         4 => u64::from(u32::from_be_bytes(safe_4(buf)?) & 0x3FFF_FFFF),
         8 => u64::from_be_bytes(safe_8(buf)?) & 0x3FFF_FFFF_FFFF_FFFF,
