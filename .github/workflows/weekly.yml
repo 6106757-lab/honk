@@ -1,8 +1,11 @@
 name: Weekly
 
+# Upstream runs these maintenance jobs on a timer. GitHub disables scheduled
+# workflows in every fork, and enabling one would spend a couple of hours of
+# runner time each Monday on work a downstream fork does not need (the fuzz
+# job alone runs three 480-second campaigns). Keep it dispatch-only: nothing
+# runs unless someone deliberately asks for it.
 on:
-  schedule:
-    - cron: '23 4 * * 1'
   workflow_dispatch:
 
 permissions:

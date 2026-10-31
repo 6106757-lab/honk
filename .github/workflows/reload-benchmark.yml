@@ -17,8 +17,8 @@ on:
       - ".github/ci/pins.env"
       - "ci/compare-reload-benchmark.py"
       - "ci/test-compare-reload-benchmark.py"
-  schedule:
-    - cron: "23 4 * * 1"
+  # Scheduled runs are dropped: GitHub disables scheduled workflows in forks,
+  # and this benchmark is a maintainer tool, not something to run unattended.
   workflow_dispatch:
 
 permissions:

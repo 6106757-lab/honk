@@ -1,0 +1,198 @@
+name: Build
+
+# This fork deploys exactly one binary: x86_64-unknown-linux-musl, full
+# variant. Release only reacts to v*/debug.* tags, and its release job needs
+# repository write permissions a fork cannot grant, so a push to main used to
+# leave no fresh binary behind at all — the only way to get one was to fire a
+# manual dispatch. This workflow builds the deployed target on every push to
+# main and keeps the artifact for 30 days instead of Release's one.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "ci/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".github/ci/pins.env"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build x86_64-unknown-linux-musl-full
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Branch names may contain '/', which cannot appear in an asset path.
+      - name: Resolve artifact name
+        run: |
+          set -euo pipefail
+          echo "ARTIFACT_NAME=honk-core-${GITHUB_REF_NAME//\//-}-x86_64-unknown-linux-musl-full" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Read Rust toolchains
+        id: toolchain
+        run: |
+          set -euo pipefail
+          echo "stable=$(grep -oP '^channel\s*=\s*\"\K[^\"]+' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+          echo "ebpf=$(grep -oP '^channel\s*=\s*\"\K[^\"]+' crates/honk-ebpf/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust stable (with target)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.stable }}
+          target: x86_64-unknown-linux-musl
+
+      - name: Install Rust nightly (for the eBPF object)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.ebpf }}
+          components: rust-src, llvm-tools
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: build-x86_64-unknown-linux-musl-full
+          cache-on-failure: true
+          workspaces: |
+            . -> target
+            crates/honk-ebpf -> target
+
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev pkg-config cmake libclang-dev zstd
+
+      - name: Install pinned bpf-linker
+        run: |
+          set -euo pipefail
+          source .github/ci/pins.env
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bpf-linker.tar.zst" \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v$BPF_LINKER_VERSION/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          echo "$BPF_LINKER_SHA256  $RUNNER_TEMP/bpf-linker.tar.zst" | sha256sum -c -
+          zstd -dc "$RUNNER_TEMP/bpf-linker.tar.zst" | tar -xf - -C "$CARGO_HOME/bin"
+          bpf-linker --version
+
+      # The eBPF object is target-independent; build it once on the host so
+      # the cross build just picks it up (build.rs locates it when present).
+      - name: Build eBPF object
+        run: |
+          set -euo pipefail
+          cd crates/honk-ebpf
+          cargo build --release -Zbuild-std=core --target bpfel-unknown-none
+
+      # aya refuses objects without BTF ("no BTF parsed for object") — fail
+      # the build here instead of at runtime on a gateway.
+      - name: Verify eBPF object has BTF
+        run: readelf -S crates/honk-ebpf/target/bpfel-unknown-none/release/honk-ebpf | grep -q '\.BTF'
+
+      # boring-sys (BoringSSL, C++) needs a clang-compatible target toolchain:
+      # under cross compilation CMake injects clang-style --target flags into
+      # boring-sys' ASM rules that real GCC rejects, and zig rejects the Rust
+      # triple spelling — ci/zigcc / ci/zigcxx strip those flags and re-anchor
+      # on the zig-style target in $ZIGCC_TARGET.
+      - name: Install zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.14.1
+
+      - name: Fetch doona for the embedded UI
+        run: |
+          set -euo pipefail
+          dir=$(ci/fetch-doona.sh)
+          echo "HONK_DOONA_DIR=$dir" >> "$GITHUB_ENV"
+
+      # The full variant is what this fork deploys: eBPF offload plus the
+      # clash API and the embedded UI, on mimalloc.
+      - name: Resolve feature set
+        run: echo "FEATURES=ebpf,rprx,clash-api,native-ui,mimalloc" >> "$GITHUB_ENV"
+
+      - name: Build honk-core (cross via zig wrappers)
+        run: |
+          set -euo pipefail
+          T=x86_64-unknown-linux-musl
+          export ZIGCC_TARGET="${T/-unknown/}"
+          # cc crate wants lowercase CC_<target_with_underscores>; cargo
+          # wants uppercase CARGO_TARGET_<TARGET>.
+          L=$(printf '%s' "$T" | tr '-' '_')
+          U=$(printf '%s' "$T" | tr 'a-z-' 'A-Z_')
+          eval "export CC_${L}=\$PWD/ci/zigcc"
+          eval "export CXX_${L}=\$PWD/ci/zigcxx"
+          eval "export CARGO_TARGET_${U}_LINKER=\$PWD/ci/zigcc"
+          # musl: let zig supply the CRT (Rust's self-contained rcrt1.o and
+          # zig's crt1.o both define _start).
+          eval "export CARGO_TARGET_${U}_RUSTFLAGS='-C link-self-contained=no'"
+          # boring-sys generates its bindings with bindgen at build time —
+          # point it at zig's target headers, not the host's.
+          BINDGEN_EXTRA_CLANG_ARGS="$(ci/zig-bindgen-env "$ZIGCC_TARGET")"
+          export BINDGEN_EXTRA_CLANG_ARGS
+          cargo build --release -p honk-core --no-default-features --features "$FEATURES" --target "$T"
+
+      - name: Package artifact
+        run: |
+          set -euo pipefail
+          name="$ARTIFACT_NAME"
+          mkdir -p "dist/$name"
+          cp "target/x86_64-unknown-linux-musl/release/honk-core" "dist/$name/"
+          cp LICENSE README.md "dist/$name/"
+          # Both editions keep their own notices; their GPL-3.0-only license
+          # must match the top-level LICENSE.
+          for edition in doona doona-lite; do
+            ui_dir="$HONK_DOONA_DIR"
+            [[ "$edition" != doona-lite ]] || ui_dir="${HONK_DOONA_DIR%/}-lite"
+            if ! cmp -s LICENSE "$ui_dir/LICENSE"; then
+              echo "::error::$edition's LICENSE differs from honk's; ship it under $edition/ again"
+              exit 1
+            fi
+            mkdir "dist/$name/$edition"
+            cp -r "$ui_dir"/{LICENSES,NOTICE,THIRD-PARTY-NOTICES.txt} "dist/$name/$edition/"
+          done
+          tar -czf "$name.tar.gz" -C dist "$name"
+
+      - name: Start the packaged binary
+        run: |
+          set -euo pipefail
+          smoke_dir=$(mktemp -d "$RUNNER_TEMP/build-smoke.XXXXXX")
+          trap 'rm -rf "$smoke_dir"' EXIT
+          tar -xzf "$ARTIFACT_NAME.tar.gz" -C "$smoke_dir"
+          "$smoke_dir/$ARTIFACT_NAME/honk-core" --version
+
+      # Uploaded under a stable name so the local fetch script can keep using
+      # one download path regardless of which commit was built.
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: honk-core-x86_64-unknown-linux-musl-full
+          path: ${{ env.ARTIFACT_NAME }}.tar.gz
+          retention-days: 30
+
+      - name: Record the build
+        run: |
+          set -euo pipefail
+          {
+            echo "### honk-core \`$SHORT_SHA\`"
+            echo ""
+            echo "- artifact: \`$ARTIFACT_NAME.tar.gz\`"
+            echo "- size: $(du -h "$ARTIFACT_NAME.tar.gz" | cut -f1)"
+            echo "- sha256: \`$(sha256sum "$ARTIFACT_NAME.tar.gz" | cut -d' ' -f1)\`"
+            echo "- kept for 30 days"
+            echo ""
+            echo "Fetch it with \`gh/fetch.sh\`, or from this run's Artifacts list."
+          } >> "$GITHUB_STEP_SUMMARY"
