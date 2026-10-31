@@ -62,6 +62,7 @@ pub fn udp_via_tun(tun: &str, source: IpAddr) -> io::Result<std::net::UdpSocket>
     };
     let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, None)?;
     socket.set_nonblocking(true)?;
+    mark_control_plane(&socket)?;
     bind_tunnel(&socket, tun, source)?;
     Ok(socket.into())
 }
@@ -76,7 +77,23 @@ fn new_socket(target: SocketAddr) -> io::Result<socket2::Socket> {
     socket.set_nonblocking(true)?;
     socket.set_tcp_nodelay(true)?;
     socket.set_keepalive(true)?;
+    mark_control_plane(&socket)?;
     Ok(socket)
+}
+
+/// Carry the control-plane mark, like every other socket honk originates.
+///
+/// The packets themselves leave through the TUN device rather than the WAN
+/// interface, but the mark still protects against any eBPF hook that
+/// classifies by socket mark instead of by device.
+#[cfg(target_os = "linux")]
+fn mark_control_plane(socket: &socket2::Socket) -> io::Result<()> {
+    crate::util::set_mark_best_effort(socket, crate::util::bypass_mark())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mark_control_plane(_socket: &socket2::Socket) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
