@@ -91,7 +91,12 @@ impl MasqueRuntime {
     ) -> anyhow::Result<Arc<http2::MasqueTunnel>> {
         let mut guard = self.tunnel.lock().await;
         if let Some(tunnel) = guard.as_ref() {
-            return Ok(Arc::clone(tunnel));
+            if tunnel.is_alive() {
+                return Ok(Arc::clone(tunnel));
+            }
+            // The carrier died: drop the tunnel so its TUN device goes with
+            // it, then rebuild. Cached TUN devices outlive their endpoint.
+            guard.take();
         }
         let tunnel = Arc::new(carrier::open_tunnel(node, connect_timeout).await?);
         *guard = Some(Arc::clone(&tunnel));
@@ -102,7 +107,8 @@ impl MasqueRuntime {
     /// while another task is mid-CONNECT.
     pub fn tunnel_count(&self) -> Option<usize> {
         let guard = self.tunnel.try_lock().ok()?;
-        Some(if guard.is_some() { 1 } else { 0 })
+        let live = guard.as_ref().is_some_and(|tunnel| tunnel.is_alive());
+        Some(usize::from(live))
     }
 
     /// Drop the tunnel, deleting its TUN device.

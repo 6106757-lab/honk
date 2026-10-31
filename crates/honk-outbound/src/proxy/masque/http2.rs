@@ -13,6 +13,7 @@ use bytes::BytesMut;
 use h2::RecvStream;
 use h2::ext::Protocol;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -24,10 +25,29 @@ const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/*/";
 /// Capsule protocol version 1, per RFC 9297.
 const CAPSULE_PROTOCOL_HEADER: (&str, &str) = ("capsule-protocol", "?1");
 
+/// Clears a tunnel's liveness flag when the task owning it exits, whichever
+/// way it exits.
+struct LivenessGuard(Arc<AtomicBool>);
+
+impl LivenessGuard {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
+    }
+}
+
+impl Drop for LivenessGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 /// An established IP tunnel: a TUN device fed by a MASQUE carrier.
 pub struct MasqueTunnel {
     tun: Arc<TunDevice>,
     assigned: Vec<IpAddr>,
+    /// Cleared by whichever direction notices the carrier is gone, so the
+    /// runtime can rebuild the tunnel instead of handing out a dead one.
+    alive: Arc<AtomicBool>,
 }
 
 impl MasqueTunnel {
@@ -45,16 +65,20 @@ impl MasqueTunnel {
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        let alive = Arc::new(AtomicBool::new(true));
+
         let (mut sender, connection) = h2::client::Builder::new()
             .enable_push(false)
             .max_header_list_size(64 * 1024)
             .handshake(io)
             .await?;
         // The connection driver must run for the stream to make progress.
+        let carrier_alive = Arc::clone(&alive);
         tokio::spawn(async move {
             if let Err(error) = connection.await {
                 tracing::debug!("masque h2 connection closed: {error}");
             }
+            carrier_alive.store(false, Ordering::Relaxed);
         });
 
         let uri = format!("https://{authority}{CONNECT_IP_PATH}");
@@ -87,7 +111,9 @@ impl MasqueTunnel {
 
         // TUN -> endpoint.
         let upstream = tun.clone();
+        let upstream_alive = LivenessGuard::new(Arc::clone(&alive));
         tokio::spawn(async move {
+            let _alive = upstream_alive;
             let mut packet = vec![0u8; mtu as usize];
             loop {
                 match upstream.recv(&mut packet).await {
@@ -109,7 +135,9 @@ impl MasqueTunnel {
 
         // Endpoint -> TUN.
         let downstream = tun.clone();
+        let downstream_alive = LivenessGuard::new(Arc::clone(&alive));
         tokio::spawn(async move {
+            let _alive = downstream_alive;
             let mut buffer = BytesMut::new();
             while let Some(chunk) = body.data().await {
                 match chunk {
@@ -141,7 +169,18 @@ impl MasqueTunnel {
             }
         });
 
-        Ok(Self { tun, assigned })
+        Ok(Self {
+            tun,
+            assigned,
+            alive,
+        })
+    }
+
+    /// Whether the carrier is still running. A tunnel whose carrier died is
+    /// unusable: the runtime replaces it rather than dialling through a TUN
+    /// device that no longer forwards packets.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
     }
 
     /// Interface name of the TUN device backing this tunnel.

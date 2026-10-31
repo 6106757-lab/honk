@@ -32,8 +32,8 @@ pub use admission::{DialPermit, DialScope};
 #[cfg(any(feature = "rprx", test))]
 pub use vless::VlessRuntime;
 
-use honk_config::node::Node;
 pub use crate::proxy::masque::MasqueRuntime;
+use honk_config::node::Node;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;

@@ -102,14 +102,7 @@ impl TunDevice {
             // `replace` keeps a reconfigured device from failing on a route
             // the previous generation left behind.
             vec![
-                family,
-                "route",
-                "replace",
-                "default",
-                "dev",
-                &self.name,
-                "metric",
-                &metric,
+                family, "route", "replace", "default", "dev", &self.name, "metric", &metric,
             ],
         ] {
             ip(&args)?;
