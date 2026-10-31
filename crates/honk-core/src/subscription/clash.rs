@@ -490,7 +490,7 @@ fn apply_stream(mapping: &Mapping, node: &mut Node, udp: Option<bool>) -> Result
             return Err("gRPC options require gRPC transport");
         }
     }
-    if let Some(value) = yaml_value(mapping, "xhttp-opts").filter(|value| yaml_active(value)) {
+    if let Some(value) = yaml_value(mapping, "xhttp-opts") {
         let transport = node
             .transport_mut()
             .ok_or("XHTTP options require XHTTP transport")?;
