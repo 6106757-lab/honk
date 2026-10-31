@@ -142,11 +142,7 @@ impl MasqueTunnel {
             }
         });
 
-        Ok(Self {
-            tun,
-            assigned,
-            mtu,
-        })
+        Ok(Self { tun, assigned, mtu })
     }
 
     /// Interface name of the TUN device backing this tunnel.

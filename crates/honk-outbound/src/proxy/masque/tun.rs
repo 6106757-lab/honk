@@ -66,7 +66,9 @@ impl TunDevice {
             .collect::<String>();
 
         Ok(Self {
-            inner: AsyncFd::register(file)?,
+            // SAFETY: `file` is the freshly opened TUN descriptor; nothing else
+            // has a handle to it and it stays owned by the AsyncFd until drop.
+            inner: unsafe { AsyncFd::register(file)? },
             name: resolved,
         })
     }
