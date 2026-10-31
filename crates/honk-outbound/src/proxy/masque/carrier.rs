@@ -10,9 +10,9 @@ use honk_config::node::Node;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use super::CarrierDialer;
 use super::http2::MasqueTunnel;
 use super::warp::WarpIdentity;
-use super::CarrierDialer;
 use crate::proxy::AsyncReadWrite;
 
 /// Default tunnel MTU. IPv6 requires >= 1280 and every MASQUE endpoint we
