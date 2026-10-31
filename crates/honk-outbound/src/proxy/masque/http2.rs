@@ -9,10 +9,9 @@
 //! server-side setting the client only reads, so no `h2` fork is needed.
 
 use crate::proxy::masque::capsule::{self, Capsule, CapsuleError};
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use h2::RecvStream;
 use h2::ext::Protocol;
-use h2::share::SendStream;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -33,7 +32,11 @@ pub struct MasqueTunnel {
 }
 
 impl MasqueTunnel {
-    /// Perform the extended CONNECT and bring up the TUN device.
+    /// Perform the extended CONNECT, learn our assigned address, and start
+    /// shuttling packets between the TUN device and the stream.
+    ///
+    /// The send half is spawned rather than named in a signature: `h2` keeps
+    /// `SendStream` behind a private module, so its type can only be inferred.
     pub async fn open_h2<IO>(
         io: IO,
         authority: &str,
@@ -65,79 +68,30 @@ impl MasqueTunnel {
             .extensions_mut()
             .insert(Protocol::from_static("connect-ip"));
 
-        let (response, send_stream) = sender.send_request(request, false)?;
+        let (response, mut send_stream) = sender.send_request(request, false)?;
         let response = response.await?;
         let status = response.status();
         if !status.is_success() {
             anyhow::bail!("masque endpoint rejected connect-ip with status {status}");
         }
-        let body = response.into_body();
+        let mut body: RecvStream = response.into_body();
 
-        let mut tunnel = MasqueTunnel {
-            tun: Arc::new(TunDevice::create(tun_name)?),
-            assigned: Vec::new(),
-            mtu,
-        };
-        tunnel.exchange_capsules(send_stream, body).await?;
-        Ok(tunnel)
-    }
-
-    /// Read the opening capsules until the endpoint assigns us an address,
-    /// then start shuttling packets both ways.
-    async fn exchange_capsules(
-        &mut self,
-        mut send_stream: SendStream<Bytes>,
-        mut body: RecvStream,
-    ) -> anyhow::Result<()> {
-        let mut buffer = BytesMut::new();
-        let mut saw_address = false;
-
-        while let Some(chunk) = body.data().await {
-            let chunk = chunk?;
-            buffer.extend_from_slice(&chunk);
-            loop {
-                if buffer.is_empty() {
-                    break;
-                }
-                match capsule::decode(&mut buffer) {
-                    Ok(Capsule::AddressAssign { addresses }) => {
-                        for assigned in &addresses {
-                            self.assigned.push(assigned.ip.to_std());
-                        }
-                        saw_address = true;
-                    }
-                    Ok(Capsule::Datagram { .. }) => {
-                        // Packets before the address assignment cannot be
-                        // routed yet; the endpoint should not send any.
-                        tracing::debug!("masque endpoint sent a datagram before ADDRESS_ASSIGN");
-                    }
-                    Ok(_) => {}
-                    Err(CapsuleError::Incomplete) => break,
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            if saw_address {
-                break;
-            }
-        }
-
-        let address = self
-            .assigned
+        let assigned = read_address_assign(&mut body).await?;
+        let address = assigned
             .first()
             .copied()
             .ok_or_else(|| anyhow::anyhow!("masque endpoint sent no ADDRESS_ASSIGN capsule"))?;
-        let prefix_len = match address {
-            IpAddr::V4(_) => 32,
-            IpAddr::V6(_) => 128,
-        };
-        self.tun.configure(address, prefix_len, self.mtu)?;
+        let prefix_len = if address.is_ipv4() { 32 } else { 128 };
 
-        let tun = self.tun.clone();
-        let mtu = self.mtu as usize;
+        let tun = Arc::new(TunDevice::create(tun_name)?);
+        tun.configure(address, prefix_len, mtu)?;
+
+        // TUN -> endpoint.
+        let upstream = tun.clone();
         tokio::spawn(async move {
-            let mut packet = vec![0u8; mtu];
+            let mut packet = vec![0u8; mtu as usize];
             loop {
-                match tun.recv(&mut packet).await {
+                match upstream.recv(&mut packet).await {
                     Ok(0) => break,
                     Ok(length) => {
                         let capsule = capsule::encode_datagram(&packet[..length]).freeze();
@@ -154,7 +108,8 @@ impl MasqueTunnel {
             }
         });
 
-        let tun = self.tun.clone();
+        // Endpoint -> TUN.
+        let downstream = tun.clone();
         tokio::spawn(async move {
             let mut buffer = BytesMut::new();
             while let Some(chunk) = body.data().await {
@@ -171,7 +126,7 @@ impl MasqueTunnel {
                     }
                     match capsule::decode(&mut buffer) {
                         Ok(Capsule::Datagram { payload, .. }) => {
-                            if let Err(error) = tun.send(&payload).await {
+                            if let Err(error) = downstream.send(&payload).await {
                                 tracing::debug!("masque TUN write failed: {error}");
                                 return;
                             }
@@ -187,7 +142,11 @@ impl MasqueTunnel {
             }
         });
 
-        Ok(())
+        Ok(Self {
+            tun,
+            assigned,
+            mtu,
+        })
     }
 
     /// Interface name of the TUN device backing this tunnel.
@@ -199,4 +158,33 @@ impl MasqueTunnel {
     pub fn assigned_address(&self) -> Option<IpAddr> {
         self.assigned.first().copied()
     }
+}
+
+/// Read capsules until the endpoint assigns us an address.
+async fn read_address_assign(body: &mut RecvStream) -> anyhow::Result<Vec<IpAddr>> {
+    let mut assigned = Vec::new();
+    let mut buffer = BytesMut::new();
+    while let Some(chunk) = body.data().await {
+        let chunk = chunk?;
+        buffer.extend_from_slice(&chunk);
+        loop {
+            if buffer.is_empty() {
+                break;
+            }
+            match capsule::decode(&mut buffer) {
+                Ok(Capsule::AddressAssign { addresses }) => {
+                    for address in &addresses {
+                        assigned.push(address.ip.to_std());
+                    }
+                }
+                Ok(_) => {}
+                Err(CapsuleError::Incomplete) => break,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if !assigned.is_empty() {
+            break;
+        }
+    }
+    Ok(assigned)
 }

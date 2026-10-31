@@ -17,6 +17,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::mem;
 use std::net::IpAddr;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::process::Command;
 use tokio::io::unix::AsyncFd;
@@ -65,7 +66,7 @@ impl TunDevice {
             .collect::<String>();
 
         Ok(Self {
-            inner: AsyncFd::new(file)?,
+            inner: AsyncFd::register(file)?,
             name: resolved,
         })
     }
@@ -92,7 +93,10 @@ impl TunDevice {
     pub async fn recv(&self, buffer: &mut [u8]) -> io::Result<usize> {
         loop {
             let mut guard = self.inner.readable().await?;
-            match guard.try_io(|inner| inner.get_ref().read(buffer)) {
+            match guard.try_io(|inner| {
+                let mut file = inner.get_ref();
+                file.read(buffer)
+            }) {
                 Ok(result) => return result,
                 Err(_would_block) => continue,
             }
@@ -103,7 +107,10 @@ impl TunDevice {
     pub async fn send(&self, packet: &[u8]) -> io::Result<usize> {
         loop {
             let mut guard = self.inner.writable().await?;
-            match guard.try_io(|inner| inner.get_ref().write(packet)) {
+            match guard.try_io(|inner| {
+                let mut file = inner.get_ref();
+                file.write(packet)
+            }) {
                 Ok(result) => return result,
                 Err(_would_block) => continue,
             }
