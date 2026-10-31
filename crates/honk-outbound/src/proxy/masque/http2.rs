@@ -18,8 +18,8 @@ use crate::proxy::masque::capsule::{self, Capsule, CapsuleError};
 use bytes::BytesMut;
 use h2::RecvStream;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::tun::TunDevice;

@@ -60,7 +60,10 @@ impl WarpIdentity {
         let certificate = self_signed(&device)?;
 
         let pinned = match config.endpoint_public_key.as_deref() {
-            Some(key) => Some(PKey::public_key_from_der(&decode_base64(key, "public-key")?)?),
+            Some(key) => Some(PKey::public_key_from_der(&decode_base64(
+                key,
+                "public-key",
+            )?)?),
             None => None,
         };
 
@@ -73,10 +76,7 @@ impl WarpIdentity {
         builder.set_private_key(&device)?;
         match pinned {
             Some(pinned) => {
-                builder.set_custom_verify_callback(
-                    SslVerifyMode::PEER,
-                    pin_endpoint_key(pinned),
-                );
+                builder.set_custom_verify_callback(SslVerifyMode::PEER, pin_endpoint_key(pinned));
             }
             None => {
                 tracing::warn!(
