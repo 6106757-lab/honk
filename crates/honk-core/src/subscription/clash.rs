@@ -54,6 +54,9 @@ fn supports_tls(protocol: NodeProtocol) -> bool {
             | NodeProtocol::Tuic
             | NodeProtocol::Juicity
             | NodeProtocol::AnyTLS
+            // MASQUE is always TLS: the carrier is HTTP/2 or HTTP/3, and the
+            // SNI is where the decoy hostname lives.
+            | NodeProtocol::Masque
     )
 }
 
@@ -176,7 +179,11 @@ fn validate_source(mapping: &Mapping) -> Result<ProxySource, &'static str> {
     reject_active_unless(
         mapping,
         &["network"],
-        supports_stream(protocol) || protocol == NodeProtocol::AnyTLS,
+        // MASQUE's network picks the carrier (h2 or quic), not a stream
+        // transport, but it is spelled the same way.
+        supports_stream(protocol)
+            || protocol == NodeProtocol::AnyTLS
+            || protocol == NodeProtocol::Masque,
         "network settings are unsupported for this protocol",
     )?;
     reject_active_unless(
@@ -225,6 +232,8 @@ fn validate_source(mapping: &Mapping) -> Result<ProxySource, &'static str> {
             | NodeProtocol::Tuic
             | NodeProtocol::Juicity
             | NodeProtocol::AnyTLS
+            // MASQUE carries IP packets, so UDP is just another flow.
+            | NodeProtocol::Masque
     );
     let udp_restrictable = matches!(
         protocol,
@@ -272,7 +281,9 @@ fn validate_source(mapping: &Mapping) -> Result<ProxySource, &'static str> {
         protocol == NodeProtocol::Hysteria2,
         "Hysteria2 MTU discovery options are unsupported",
     )?;
+    // MASQUE shares the `mtu` key with the QUIC protocols: it sizes its TUN.
     if !supports_quic(protocol)
+        && protocol != NodeProtocol::Masque
         && (has_active(mapping, QUIC_MTU_KEYS)
             || has_active(mapping, STREAM_WINDOW_KEYS)
             || has_active(mapping, CONN_WINDOW_KEYS))
@@ -297,6 +308,8 @@ fn validate_source(mapping: &Mapping) -> Result<ProxySource, &'static str> {
             | NodeProtocol::Tuic
             | NodeProtocol::Juicity
             | NodeProtocol::AnyTLS
+            // MASQUE's carrier is HTTP/2 or HTTP/3, so TLS is not optional.
+            | NodeProtocol::Masque
     );
     let tls_enabled = tls_explicit.unwrap_or(mandatory_tls);
     if mandatory_tls && !tls_enabled {
