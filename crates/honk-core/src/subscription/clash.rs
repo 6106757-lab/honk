@@ -388,6 +388,16 @@ fn apply_protocol(mapping: &Mapping, node: &mut Node) -> Result<(), &'static str
             config.idle_session_timeout =
                 yaml_duration_alias(mapping, &["idle-session-timeout", "idle_session_timeout"])?;
         }
+        OutboundConfig::Masque(config) => {
+            config.network = yaml_text_alias(mapping, &["network"])?;
+            config.private_key = yaml_text_alias(mapping, &["private-key", "private_key"])?;
+            config.endpoint_public_key = yaml_text_alias(mapping, &["public-key", "public_key"])?;
+            config.local_ipv4 = yaml_text_alias(mapping, &["ip", "local-ipv4"])?;
+            config.local_ipv6 = yaml_text_alias(mapping, &["ipv6", "local-ipv6"])?;
+            config.mtu = yaml_u64_alias(mapping, &["mtu"])?
+                .map(|value| u16::try_from(value).map_err(|_| "masque mtu is too large"))
+                .transpose()?;
+        }
         OutboundConfig::Direct | OutboundConfig::Block => unreachable!(),
     }
     Ok(())

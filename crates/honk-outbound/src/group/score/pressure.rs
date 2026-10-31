@@ -42,6 +42,7 @@ impl GroupManager {
                                 | honk_config::types::NodeProtocol::Hysteria2
                                 | honk_config::types::NodeProtocol::Tuic
                                 | honk_config::types::NodeProtocol::Juicity
+                                | honk_config::types::NodeProtocol::Masque
                         ),
                     quality: Arc::downgrade(&quality),
                 })

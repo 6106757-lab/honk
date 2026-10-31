@@ -385,6 +385,10 @@ impl OutboundConfig {
                 config.password.as_deref().unwrap_or(""),
             ]),
             Self::AnyTls(config) => identity_join(&[config.password.as_deref().unwrap_or("")]),
+            Self::Masque(config) => identity_join(&[
+                config.private_key.as_deref().unwrap_or(""),
+                config.endpoint_public_key.as_deref().unwrap_or(""),
+            ]),
             Self::Direct | Self::Block => String::new(),
         }
     }
