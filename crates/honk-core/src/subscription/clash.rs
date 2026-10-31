@@ -397,6 +397,13 @@ fn apply_protocol(mapping: &Mapping, node: &mut Node) -> Result<(), &'static str
             config.mtu = yaml_u64_alias(mapping, &["mtu"])?
                 .map(|value| u16::try_from(value).map_err(|_| "masque mtu is too large"))
                 .transpose()?;
+            config.remote_dns_resolve =
+                yaml_bool_alias(mapping, &["remote-dns-resolve", "remote_dns_resolve"])?
+                    .unwrap_or(false);
+            config.dns = match yaml_alias(mapping, &["dns"]) {
+                Some(value) => fields::alpn_list(value)?,
+                None => Vec::new(),
+            };
         }
         OutboundConfig::Direct | OutboundConfig::Block => unreachable!(),
     }

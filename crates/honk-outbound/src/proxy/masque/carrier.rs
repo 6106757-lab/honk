@@ -1,15 +1,17 @@
 //! Carrier setup: how a MASQUE node's IP tunnel reaches its endpoint.
 //!
-//! `network: h2`    -> TCP + TLS + HTTP/2 extended CONNECT (`connect-ip`).
-//! `network: quic`  -> HTTP/3, which needs `h3` to expose `connect-ip`; the
-//!                     upstream crate keeps that protocol value private, so
-//!                     this carrier reports the limitation instead of
-//!                     silently opening a plain HTTP/3 stream.
+//! `network: h2`    -> TCP + WARP TLS + HTTP/2 CONNECT-IP.
+//! `network: quic`  -> HTTP/3, which needs `h3` to expose Cloudflare's
+//!                     `cf-connect-ip`; the crate keeps its protocol values
+//!                     private, so this carrier reports the limitation instead
+//!                     of silently opening a plain HTTP/3 stream.
 
 use honk_config::node::Node;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use super::http2::MasqueTunnel;
+use super::warp::WarpIdentity;
 
 /// Default tunnel MTU. IPv6 requires >= 1280 and every MASQUE endpoint we
 /// know advertises WARP-sized packets, so 1280 is the safe floor.
@@ -24,41 +26,50 @@ pub async fn open_tunnel(node: &Node, connect_timeout: Duration) -> anyhow::Resu
     match network {
         "h2" | "http2" | "" => open_h2(node, connect_timeout).await,
         "quic" | "h3" | "http3" => anyhow::bail!(
-            "masque node {}: `network: quic` needs HTTP/3 connect-ip, which the h3 crate \
-             does not expose yet; use `network: h2`",
+            "masque node {}: `network: quic` needs HTTP/3 connect-ip, which honk does not \
+             carry yet; use `network: h2`",
             node.name
         ),
         other => anyhow::bail!("masque node {}: unsupported network {other:?}", node.name),
     }
 }
 
-/// TCP + TLS + HTTP/2 extended CONNECT.
+/// TCP + WARP TLS + HTTP/2 CONNECT-IP.
 async fn open_h2(node: &Node, connect_timeout: Duration) -> anyhow::Result<MasqueTunnel> {
     let config = node
         .masque()
         .ok_or_else(|| anyhow::anyhow!("masque node {} has no masque config", node.name))?;
     let address = format!("{}:{}", node.host(), node.port);
     let tcp = crate::util::connect_outbound(&address, connect_timeout).await?;
-
-    let connector = crate::tls::build_connector(node)?;
-    let server_name = config
-        .tls
-        .sni
-        .clone()
-        .unwrap_or_else(|| node.host().to_string());
-    let tls = tokio::time::timeout(connect_timeout, connector.connect(&server_name, tcp))
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!("masque TLS handshake timed out after {connect_timeout:?}")
-        })??;
+    let identity = WarpIdentity::build(node)?;
+    let tls = identity.connect(tcp, connect_timeout).await?;
     let io = crate::tls::BatchRead::new(tls);
 
     let mtu = config.mtu.map(u32::from).unwrap_or(DEFAULT_MTU);
     let tun_name = tun_name(node);
+    let preferred = tunnel_addresses(node);
     tracing::debug!(
-        "masque: opening connect-ip tunnel to {address} via h2 on {tun_name} (mtu {mtu})"
+        "masque: opening connect-ip tunnel to {address} via h2 on {tun_name} \
+         (mtu {mtu}, addresses {preferred:?})"
     );
-    MasqueTunnel::open_h2(io, &server_name, mtu, &tun_name).await
+    MasqueTunnel::open_h2(io, mtu, &tun_name, &preferred).await
+}
+
+/// The addresses the node expects the tunnel to carry, from its `ip` and
+/// `ipv6` settings. Both may carry a CIDR suffix (`172.16.0.2/32`), which is
+/// what subscriptions emit; only the address part is needed here because the
+/// TUN gets a host route.
+fn tunnel_addresses(node: &Node) -> Vec<IpAddr> {
+    let config = match node.masque() {
+        Some(config) => config,
+        None => return Vec::new(),
+    };
+    [&config.local_ipv4, &config.local_ipv6]
+        .iter()
+        .filter_map(|value| value.as_deref())
+        .filter_map(|value| value.split('/').next())
+        .filter_map(|value| value.parse().ok())
+        .collect()
 }
 
 /// Interface name for a node's TUN device. `IFNAMSIZ` is 16 including the

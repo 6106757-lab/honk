@@ -21,6 +21,7 @@ pub mod capsule;
 pub mod carrier;
 pub mod http2;
 pub mod tun;
+pub mod warp;
 
 use async_trait::async_trait;
 use honk_config::node::Node;
@@ -157,10 +158,11 @@ impl TcpOutbound for MasqueHandler {
         let tunnel = masque
             .tunnel(runtime.node.as_ref(), connect_timeout)
             .await?;
-        let source = tunnel.assigned_address().ok_or_else(|| {
+        let source = tunnel.source_for(target).ok_or_else(|| {
             anyhow::anyhow!(
-                "masque node {} has no assigned address; the endpoint sent none",
-                runtime.node.name
+                "masque node {} has no {} source address for {target}",
+                runtime.node.name,
+                if target.is_ipv4() { "IPv4" } else { "IPv6" },
             )
         })?;
         let stream = bind::connect_via_tun(tunnel.tun_name(), source, target, connect_timeout)
@@ -209,10 +211,11 @@ impl PacketOutbound for MasqueHandler {
         let tunnel = masque
             .tunnel(runtime.node.as_ref(), connect_timeout)
             .await?;
-        let source = tunnel.assigned_address().ok_or_else(|| {
+        let source = tunnel.source_for(target).ok_or_else(|| {
             anyhow::anyhow!(
-                "masque node {} has no assigned address; the endpoint sent none",
-                runtime.node.name
+                "masque node {} has no {} source address for UDP {target}",
+                runtime.node.name,
+                if target.is_ipv4() { "IPv4" } else { "IPv6" },
             )
         })?;
         let socket = bind::udp_via_tun(tunnel.tun_name(), source)?;

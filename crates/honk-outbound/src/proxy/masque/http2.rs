@@ -1,26 +1,32 @@
 //! MASQUE connect-ip carrier over HTTP/2.
 //!
-//! Uses extended CONNECT (RFC 8441) with `:protocol = connect-ip`. Because
-//! HTTP/2 has no unreliable datagram, IP packets travel as DATAGRAM capsules
-//! (RFC 9297) inside ordinary DATA frames — reliable and ordered, which costs
-//! some latency but needs no QUIC DATAGRAM support from the endpoint.
+//! Uses the extended CONNECT shape (RFC 8441) with Cloudflare's endpoint
+//! conventions. Because HTTP/2 has no unreliable datagram, IP packets travel
+//! as DATAGRAM capsules (RFC 9297) inside ordinary DATA frames — reliable and
+//! ordered, which costs some latency but needs no QUIC DATAGRAM support.
 //!
-//! The endpoint must advertise `SETTINGS_ENABLE_CONNECT_PROTOCOL`; that is a
-//! server-side setting the client only reads, so no `h2` fork is needed.
+//! Two details differ from a textbook connect-ip client, both dictated by
+//! Cloudflare's endpoints (and mirrored by `usque` and mihomo):
+//!
+//! * the request goes to `https://cloudflareaccess.com/`, **not** to
+//!   `/.well-known/masque/ip/*/`, and carries `cf-connect-proto:
+//!   cf-connect-ip` instead of relying on the `:protocol` pseudo-header;
+//! * the tunnel addresses come from the node's configuration (`ip` / `ipv6`);
+//!   the endpoint's ADDRESS_ASSIGN capsule is only a fallback.
 
 use crate::proxy::masque::capsule::{self, Capsule, CapsuleError};
 use bytes::BytesMut;
 use h2::RecvStream;
-use h2::ext::Protocol;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::tun::TunDevice;
 
-/// Default path template for an IP tunnel accepting any destination.
-const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/*/";
+/// Authority of the CONNECT-IP request. Cloudflare's endpoints answer on their
+/// Access host regardless of which edge handled the TLS connection.
+const CONNECT_AUTHORITY: &str = "cloudflareaccess.com";
 
 /// Capsule protocol version 1, per RFC 9297.
 const CAPSULE_PROTOCOL_HEADER: (&str, &str) = ("capsule-protocol", "?1");
@@ -44,23 +50,25 @@ impl Drop for LivenessGuard {
 /// An established IP tunnel: a TUN device fed by a MASQUE carrier.
 pub struct MasqueTunnel {
     tun: Arc<TunDevice>,
-    assigned: Vec<IpAddr>,
+    /// Source addresses the kernel may use: as many of IPv4 and IPv6 as the
+    /// endpoint (or the configuration) gave us.
+    addresses: Vec<IpAddr>,
     /// Cleared by whichever direction notices the carrier is gone, so the
     /// runtime can rebuild the tunnel instead of handing out a dead one.
     alive: Arc<AtomicBool>,
 }
 
 impl MasqueTunnel {
-    /// Perform the extended CONNECT, learn our assigned address, and start
-    /// shuttling packets between the TUN device and the stream.
+    /// Perform the CONNECT, set the tunnel addresses up, and start shuttling
+    /// packets between the TUN device and the stream.
     ///
     /// The send half is spawned rather than named in a signature: `h2` keeps
     /// `SendStream` behind a private module, so its type can only be inferred.
     pub async fn open_h2<IO>(
         io: IO,
-        authority: &str,
         mtu: u32,
         tun_name: &str,
+        preferred: &[IpAddr],
     ) -> anyhow::Result<Self>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -81,15 +89,16 @@ impl MasqueTunnel {
             carrier_alive.store(false, Ordering::Relaxed);
         });
 
-        let uri = format!("https://{authority}{CONNECT_IP_PATH}");
+        let uri = format!("https://{CONNECT_AUTHORITY}/");
         let mut request = http::Request::builder()
             .method(http::Method::CONNECT)
             .uri(&uri)
             .header(CAPSULE_PROTOCOL_HEADER.0, CAPSULE_PROTOCOL_HEADER.1)
+            .header("cf-connect-proto", "cf-connect-ip")
+            // Post-quantum key agreement is not implemented here.
+            .header("pq-enabled", "false")
+            .header("user-agent", "")
             .body(())?;
-        request
-            .extensions_mut()
-            .insert(Protocol::from_static("connect-ip"));
 
         let (response, mut send_stream) = sender.send_request(request, false)?;
         let response = response.await?;
@@ -100,14 +109,17 @@ impl MasqueTunnel {
         let mut body: RecvStream = response.into_body();
 
         let assigned = read_address_assign(&mut body).await?;
-        let address = assigned
-            .first()
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("masque endpoint sent no ADDRESS_ASSIGN capsule"))?;
-        let prefix_len = if address.is_ipv4() { 32 } else { 128 };
+        let addresses = if preferred.is_empty() {
+            assigned
+        } else {
+            preferred.to_vec()
+        };
+        if addresses.is_empty() {
+            anyhow::bail!("masque endpoint assigned no address and the node configures none");
+        }
 
         let tun = Arc::new(TunDevice::create(tun_name)?);
-        tun.configure(address, prefix_len, mtu)?;
+        tun.configure(&addresses, mtu)?;
 
         // TUN -> endpoint.
         let upstream = tun.clone();
@@ -171,7 +183,7 @@ impl MasqueTunnel {
 
         Ok(Self {
             tun,
-            assigned,
+            addresses,
             alive,
         })
     }
@@ -188,9 +200,14 @@ impl MasqueTunnel {
         self.tun.name()
     }
 
-    /// Source address the endpoint assigned, which dialled sockets must bind.
-    pub fn assigned_address(&self) -> Option<IpAddr> {
-        self.assigned.first().copied()
+    /// Source address of the same family as `target`, which dialled sockets
+    /// must bind: the endpoint routes by source, so a mismatched family is a
+    /// dead flow.
+    pub fn source_for(&self, target: std::net::SocketAddr) -> Option<IpAddr> {
+        self.addresses
+            .iter()
+            .copied()
+            .find(|address| address.is_ipv4() == target.is_ipv4())
     }
 }
 
