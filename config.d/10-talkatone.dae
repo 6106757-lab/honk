@@ -1,0 +1,124 @@
+# Talkatone 分流规则
+#
+# 来源：https://gist.github.com/354770288/cec09308dc77df9ad8f4723cf5126710
+# 原文件是 Loon/Surge 方言，这里已转写为 honk(dae) 方言。
+#
+# 策略映射（广告不变，其余全部走代理）：
+#   DOMAIN-SUFFIX,...,REJECT,DROP  -> block       沿用原去广告策略
+#   DOMAIN-SUFFIX,...,PROXY        -> Talkatone   走代理
+#   DOMAIN-SUFFIX,...,DIRECT       -> Talkatone   原为直连，按要求改为代理
+#   IP-CIDR,...,DIRECT,NO-RESOLVE  -> dip(...)    按目的 IP 匹配，走代理
+#
+# 顺序不可调换：去广告必须排在代理规则之前。crashlytics.com、inmobi.com、
+# inner-active.mobi、mobilefuse.com 这四个父域同时出现在两份清单里，若代理
+# 规则在先，其广告子域（例如 firebase-settings.crashlytics.com）会先命中代理
+# 而永远拦不掉。
+#
+# 注意：原清单把 firebaselogging-pa.googleapis.com 和 firebaseinstallations.
+# googleapis.com 也计入广告。它们并非 Talkatone 专用，任何依赖 Firebase 的
+# App 都会受影响。按要求保留原样，若发现别的应用异常，删掉对应行即可。
+
+group {
+    Talkatone {
+        filter: group(Final)
+        final: NodeKR
+        policy: fallback
+        interrupt_connections: false
+    }
+}
+
+routing {
+    # ---- 去广告：沿用原策略，直接丢弃 ----
+    domain(
+        suffix: aax.amazon-adsystem.com,
+        suffix: aax-fe.amazon-adsystem.com,
+        suffix: aax-fe-sin.amazon-adsystem.com,
+        suffix: ads.inmobi.com,
+        suffix: ads.pubmatic.com,
+        suffix: adsappier.com,
+        suffix: amazon-adsystem.com,
+        suffix: app-analytics-services.com,
+        suffix: appier.net,
+        suffix: appiersig.com,
+        suffix: au.w.inmobi.com,
+        suffix: b.de.inmobi.com,
+        suffix: bidder.criteo.com,
+        suffix: c.amazon-adsystem.com,
+        suffix: cdn.liftoff-creatives.io,
+        suffix: cdn.mobilefuse.com,
+        suffix: cdn2.inner-active.mobi,
+        suffix: cdn-f.adsmoloco.com,
+        suffix: config.inmobi.com,
+        suffix: cr.adsappier.com,
+        suffix: criteo.com,
+        suffix: dspbeacons.ihasdsp.inmobi.com,
+        suffix: dspbeacons.old.ihasdsp.inmobi.com,
+        suffix: ep7.facebook.com,
+        suffix: et-eus.w.inmobi.com,
+        suffix: ets-ap-southeast-1.track.smaato.net,
+        suffix: exchange-b-events.inner-active.mobi,
+        suffix: firebaseinstallations.googleapis.com,
+        suffix: firebaselogging-pa.googleapis.com,
+        suffix: firebaseremoteconfig.googleapis.com,
+        suffix: firebase-settings.crashlytics.com,
+        suffix: fundingchoicesmessages.google.com,
+        suffix: googleads.g.doubleclick.net,
+        suffix: googleads.g.doubleclick-cn.net,
+        suffix: googlesyndication.com,
+        suffix: gum.criteo.com,
+        suffix: i.l.inmobicdn.net,
+        suffix: i.l-dsp.inmobicdn.net,
+        suffix: ic.de.inmobi.com,
+        suffix: impression.link,
+        suffix: impression-asia.liftoff.io,
+        suffix: ins.track.tappx.com,
+        suffix: lh3.googleadsserving.cn,
+        suffix: mads.amazon-adsystem.com,
+        suffix: mfx.mobilefuse.com,
+        suffix: mt-usw.appiersig.com,
+        suffix: pagead2.googlesyndication-cn.com,
+        suffix: pubmatic.com,
+        suffix: sdk-dnt.ad.smaato.net,
+        suffix: sdk-events.inner-active.mobi,
+        suffix: sdk-files.smaato.net,
+        suffix: sdk-hb-cfg.smaato.net,
+        suffix: skadnetworks.fyber.com,
+        suffix: smaato.net,
+        suffix: ssp.api.tappx.com,
+        suffix: supply.inmobicdn.net,
+        suffix: taboola.com,
+        suffix: tappx.com,
+        suffix: tpc.googlesyndication-cn.com,
+        suffix: tr-asia.adsmoloco.com,
+        suffix: view.adjust.com,
+        suffix: vst.c.appier.net,
+        suffix: wv.inner-active.mobi,
+        suffix: www.googletagservices-cn.com
+    ) -> block
+
+    # ---- 业务域名：原 PROXY 与 DIRECT 合并，全部走代理 ----
+    domain(
+        suffix: tktn.at,
+        suffix: tktn.be,
+        suffix: vm.talkatone.com,
+        suffix: tenor.com,
+        suffix: agkn.com,
+        suffix: cohere.com,
+        suffix: crashlytics.com,
+        suffix: inmobi.com,
+        suffix: inner-active.mobi,
+        suffix: ip-api.com,
+        suffix: kochava.com,
+        suffix: mobilefuse.com,
+        suffix: talkatone.com
+    ) -> Talkatone
+
+    # ---- 业务地址段：原为直连，按要求改为走代理 ----
+    dip(
+        205.164.56.0/24,
+        216.172.154.0/24,
+        50.117.27.0/24,
+        63.251.124.0/24,
+        69.46.75.0/24
+    ) -> Talkatone
+}
