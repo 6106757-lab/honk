@@ -109,9 +109,11 @@ impl MasqueTunnel {
         }
         let mut body: RecvStream = response.into_body();
 
-        let assigned = read_address_assign(&mut body).await?;
+        // A node that configures its tunnel addresses needs no assignment, and
+        // waiting for one stalls: endpoints that hand out addresses on their
+        // own schedule (or not at all, as WARP's does here) never answer it.
         let addresses = if preferred.is_empty() {
-            assigned
+            read_address_assign(&mut body).await?
         } else {
             preferred.to_vec()
         };
