@@ -22,7 +22,8 @@ pub async fn open_tunnel(node: &Node, connect_timeout: Duration) -> anyhow::Resu
     let config = node
         .masque()
         .ok_or_else(|| anyhow::anyhow!("masque node {} has no masque config", node.name))?;
-    let network = config.network.as_deref().unwrap_or("h2");
+    // Matches mihomo: an absent `network` means HTTP/3.
+    let network = config.network.as_deref().unwrap_or("quic");
     match network {
         "h2" | "http2" | "" => open_h2(node, connect_timeout).await,
         "quic" | "h3" | "http3" => anyhow::bail!(
@@ -39,7 +40,7 @@ async fn open_h2(node: &Node, connect_timeout: Duration) -> anyhow::Result<Masqu
     let config = node
         .masque()
         .ok_or_else(|| anyhow::anyhow!("masque node {} has no masque config", node.name))?;
-    let address = format!("{}:{}", node.host(), node.port);
+    let address = endpoint_address(node);
     let tcp = crate::util::connect_outbound(&address, connect_timeout).await?;
     let identity = WarpIdentity::build(node)?;
     let tls = identity.connect(tcp, connect_timeout).await?;
@@ -53,6 +54,16 @@ async fn open_h2(node: &Node, connect_timeout: Duration) -> anyhow::Result<Masqu
          (mtu {mtu}, addresses {preferred:?})"
     );
     MasqueTunnel::open_h2(io, mtu, &tun_name, &preferred).await
+}
+
+/// The node's `host:port`, bracketed when the endpoint is an IPv6 literal.
+fn endpoint_address(node: &Node) -> String {
+    let host = node.host();
+    if host.contains(':') {
+        format!("[{host}]:{}", node.port)
+    } else {
+        format!("{host}:{}", node.port)
+    }
 }
 
 /// The addresses the node expects the tunnel to carry, from its `ip` and
