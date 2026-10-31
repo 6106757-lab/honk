@@ -32,6 +32,11 @@ const CONNECT_AUTHORITY: &str = "cloudflareaccess.com";
 /// Capsule protocol version 1, per RFC 9297.
 const CAPSULE_PROTOCOL_HEADER: (&str, &str) = ("capsule-protocol", "?1");
 
+/// Receive window for the carrier, in bytes. An IP tunnel is a steady flow
+/// rather than a request/response exchange, so the 64 KiB HTTP/2 default
+/// would stall it every few dozen packets.
+const WINDOW_SIZE: u32 = 1024 * 1024;
+
 /// Clears a tunnel's liveness flag when the task owning it exits, whichever
 /// way it exits.
 struct LivenessGuard(Arc<AtomicBool>);
@@ -91,6 +96,11 @@ impl MasqueTunnel {
         let (mut sender, connection) = h2::client::Builder::new()
             .enable_push(false)
             .max_header_list_size(64 * 1024)
+            // A tunnel is one long stream, not a burst of request/response
+            // bodies: give it a window that a download can actually fill
+            // instead of the 64 KiB default.
+            .initial_window_size(WINDOW_SIZE)
+            .initial_connection_window_size(WINDOW_SIZE)
             .handshake(io)
             .await?;
         // The connection driver must run for the stream to make progress.
@@ -188,6 +198,10 @@ impl MasqueTunnel {
         let downstream_alive = LivenessGuard::new(Arc::clone(&alive));
         let downstream_shutdown = Arc::clone(&shutdown);
         let tun_label = tun_name.to_string();
+        // HTTP/2 makes the reader release capacity by hand. Without this the
+        // endpoint runs out of window after the first few dozen packets and
+        // the tunnel becomes one-way: packets still leave, nothing comes back.
+        let mut flow_control = body.flow_control().clone();
         tokio::spawn(async move {
             let _alive = downstream_alive;
             let mut buffer = BytesMut::new();
@@ -201,7 +215,11 @@ impl MasqueTunnel {
                 };
                 let Some(chunk) = chunk else { break };
                 match chunk {
-                    Ok(chunk) => buffer.extend_from_slice(&chunk),
+                    Ok(chunk) => {
+                        let length = chunk.len();
+                        buffer.extend_from_slice(&chunk);
+                        flow_control.release_capacity(length);
+                    }
                     Err(error) => {
                         tracing::debug!("masque downstream closed: {error}");
                         break;
@@ -274,9 +292,12 @@ impl MasqueTunnel {
 async fn read_address_assign(body: &mut RecvStream) -> anyhow::Result<Vec<IpAddr>> {
     let mut assigned = Vec::new();
     let mut buffer = BytesMut::new();
+    let mut flow_control = body.flow_control().clone();
     while let Some(chunk) = body.data().await {
         let chunk = chunk?;
+        let length = chunk.len();
         buffer.extend_from_slice(&chunk);
+        flow_control.release_capacity(length);
         loop {
             if buffer.is_empty() {
                 break;
