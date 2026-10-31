@@ -358,6 +358,20 @@ impl OutboundConfig {
         }
     }
 
+    pub fn masque(&self) -> Option<&MasqueConfig> {
+        match self {
+            Self::Masque(config) => Some(config),
+            _ => None,
+        }
+    }
+
+    pub fn masque_mut(&mut self) -> Option<&mut MasqueConfig> {
+        match self {
+            Self::Masque(config) => Some(config),
+            _ => None,
+        }
+    }
+
     pub(crate) fn credential_fingerprint(&self) -> String {
         match self {
             Self::Shadowsocks(config) => identity_join(&[

@@ -24,6 +24,11 @@ use tokio::io::unix::AsyncFd;
 
 const TUN_PATH: &str = "/dev/net/tun";
 
+/// Metric for the tunnel's default route. Far above any real default route
+/// (LAN/WAN metrics are typically 0-600), so only `SO_BINDTODEVICE` sockets —
+/// whose lookup is constrained to the tunnel — ever select it.
+const TUN_ROUTE_METRIC: u32 = 20_000;
+
 /// A TUN device carrying IP packets (no packet information header).
 pub struct TunDevice {
     inner: AsyncFd<File>,
@@ -77,14 +82,35 @@ impl TunDevice {
         &self.name
     }
 
-    /// Assign an address, set the MTU and bring the interface up.
+    /// Assign an address, set the MTU, bring the interface up, and install a
+    /// last-resort default route through it.
+    ///
+    /// The default route is what makes arbitrary destinations reachable from a
+    /// socket pinned with `SO_BINDTODEVICE`: the kernel still performs a route
+    /// lookup for such a socket, constrained to the bound device. Its metric is
+    /// deliberately enormous so it never outranks the system's real default
+    /// route — only sockets bound to this device pick it.
     pub fn configure(&self, address: IpAddr, prefix_len: u8, mtu: u32) -> io::Result<()> {
         let address = format!("{address}/{prefix_len}");
         let mtu = mtu.to_string();
+        let metric = TUN_ROUTE_METRIC.to_string();
+        let family = if address.contains(':') { "-6" } else { "-4" };
         for args in [
             vec!["addr", "add", &address, "dev", &self.name],
             vec!["link", "set", "dev", &self.name, "mtu", &mtu],
             vec!["link", "set", "dev", &self.name, "up"],
+            // `replace` keeps a reconfigured device from failing on a route
+            // the previous generation left behind.
+            vec![
+                family,
+                "route",
+                "replace",
+                "default",
+                "dev",
+                &self.name,
+                "metric",
+                &metric,
+            ],
         ] {
             ip(&args)?;
         }

@@ -33,6 +33,7 @@ pub use admission::{DialPermit, DialScope};
 pub use vless::VlessRuntime;
 
 use honk_config::node::Node;
+pub use crate::proxy::masque::MasqueRuntime;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
@@ -54,6 +55,8 @@ pub enum GenerationRuntime {
     AnyTls,
     Vless,
     Quic,
+    /// One MASQUE IP tunnel (TUN device + carrier) per node.
+    Masque,
 }
 
 impl GenerationRuntime {
@@ -76,6 +79,7 @@ impl GenerationRuntime {
                 ProtocolRuntime::None
             }
             Self::Quic => ProtocolRuntime::Quic(QuicRuntime::new(metrics_enabled, quality)),
+            Self::Masque => ProtocolRuntime::Masque(MasqueRuntime::new()),
         }
     }
 }
@@ -94,6 +98,8 @@ pub enum ProtocolRuntime {
     /// Type-erased TUIC, Juicity, or Hysteria2 client slot. Policy warm
     /// ownership may release the cached client before generation retirement.
     Quic(QuicRuntime),
+    /// One MASQUE IP tunnel for the node.
+    Masque(MasqueRuntime),
 }
 
 /// A protocol client stored in [`QuicRuntime`]. Implemented by the
@@ -607,6 +613,9 @@ impl NodeRuntime {
                 ProtocolRuntime::Quic(runtime) => {
                     runtime.client_count().is_none_or(|count| count != 0)
                 }
+                ProtocolRuntime::Masque(runtime) => {
+                    runtime.tunnel_count().is_none_or(|count| count != 0)
+                }
                 _ => true,
             }
     }
@@ -619,6 +628,7 @@ impl NodeRuntime {
             sessions: self.pooled_session_count(),
             clients: match &self.runtime {
                 ProtocolRuntime::Quic(runtime) => runtime.client_count(),
+                ProtocolRuntime::Masque(runtime) => runtime.tunnel_count(),
                 _ => Some(0),
             },
         }
@@ -628,7 +638,10 @@ impl NodeRuntime {
     pub(crate) fn tls_connector_loaded(&self) -> bool {
         match &self.runtime {
             ProtocolRuntime::AnyTls(runtime) => runtime.tls.is_loaded(),
-            ProtocolRuntime::None | ProtocolRuntime::Vless(_) | ProtocolRuntime::Quic(_) => false,
+            ProtocolRuntime::None
+            | ProtocolRuntime::Vless(_)
+            | ProtocolRuntime::Quic(_)
+            | ProtocolRuntime::Masque(_) => false,
         }
     }
 }

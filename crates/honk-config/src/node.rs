@@ -287,6 +287,14 @@ impl Node {
         }
     }
 
+    pub fn masque(&self) -> Option<&MasqueConfig> {
+        self.outbound.masque()
+    }
+
+    pub fn masque_mut(&mut self) -> Option<&mut MasqueConfig> {
+        self.outbound.masque_mut()
+    }
+
     pub fn tls(&self) -> Option<&TlsOptions> {
         self.outbound.tls()
     }

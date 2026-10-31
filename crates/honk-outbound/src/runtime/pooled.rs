@@ -93,7 +93,7 @@ impl NodeRuntime {
             ProtocolRuntime::AnyTls(runtime) => Some(runtime),
             #[cfg(any(feature = "rprx", test))]
             ProtocolRuntime::Vless(runtime) => Some(runtime),
-            ProtocolRuntime::None | ProtocolRuntime::Quic(_) => None,
+            ProtocolRuntime::None | ProtocolRuntime::Quic(_) | ProtocolRuntime::Masque(_) => None,
         }
     }
 
@@ -224,6 +224,8 @@ impl NodeRuntime {
         match &self.runtime {
             ProtocolRuntime::AnyTls(runtime) => runtime.tls.close(),
             ProtocolRuntime::Quic(runtime) => runtime.force_close().await,
+            // Dropping the tunnel deletes its TUN device and route.
+            ProtocolRuntime::Masque(runtime) => runtime.close().await,
             _ => {}
         }
         #[cfg(feature = "owned-tasks")]

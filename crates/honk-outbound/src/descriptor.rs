@@ -199,7 +199,7 @@ static DESCRIPTORS: &[ProtocolDescriptor] = &[
         pool_ready_streams: never,
         pool_bare_tcp: never,
         supports_warm: pooled_supports_warm,
-        generation_runtime: GenerationRuntime::Quic,
+        generation_runtime: GenerationRuntime::Masque,
         share_link_schemes: &["masque"],
     },
     // Each direct flow owns a socket carrying its own rule or global mark; a

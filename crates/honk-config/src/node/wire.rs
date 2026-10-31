@@ -177,6 +177,18 @@ struct FlatNode {
     #[serde(default)]
     anytls_idle_session_timeout: Option<u64>,
     #[serde(default)]
+    masque_private_key: Option<String>,
+    #[serde(default)]
+    masque_endpoint_public_key: Option<String>,
+    #[serde(default)]
+    masque_local_ipv4: Option<String>,
+    #[serde(default)]
+    masque_local_ipv6: Option<String>,
+    #[serde(default)]
+    masque_remote_dns_resolve: Option<bool>,
+    #[serde(default)]
+    masque_dns: Vec<String>,
+    #[serde(default)]
     mark: Option<u32>,
     #[serde(default)]
     tags: Vec<String>,
@@ -421,8 +433,11 @@ impl FlatNode {
             self.protocol,
             NodeProtocol::Hysteria2 | NodeProtocol::Tuic | NodeProtocol::Juicity
         );
+        // MASQUE carries a TUN MTU in the same field: like the QUIC protocols
+        // it is an IP-ish transport whose packet size must be configurable.
+        let masque = self.protocol == NodeProtocol::Masque;
         strip!(self.tls_pin_sha256.is_some() && !tls, tls_pin_sha256);
-        strip!(self.quic_mtu.is_some() && !quic, quic_mtu);
+        strip!(self.quic_mtu.is_some() && !(quic || masque), quic_mtu);
 
         let tuic = self.protocol == NodeProtocol::Tuic;
         strip!(self.tuic_uuid.is_some() && !tuic, tuic_uuid);
@@ -459,6 +474,28 @@ impl FlatNode {
             self.anytls_idle_session_timeout.is_some() && !anytls,
             anytls_idle_session_timeout
         );
+
+        strip!(
+            self.masque_private_key.is_some() && !masque,
+            masque_private_key
+        );
+        strip!(
+            self.masque_endpoint_public_key.is_some() && !masque,
+            masque_endpoint_public_key
+        );
+        strip!(
+            self.masque_local_ipv4.is_some() && !masque,
+            masque_local_ipv4
+        );
+        strip!(
+            self.masque_local_ipv6.is_some() && !masque,
+            masque_local_ipv6
+        );
+        strip!(
+            self.masque_remote_dns_resolve.is_some() && !masque,
+            masque_remote_dns_resolve
+        );
+        strip!(!self.masque_dns.is_empty() && !masque, masque_dns);
 
         if !dropped.is_empty() {
             diagnostics.push(DetailedDiagnostic::warning(
@@ -678,9 +715,14 @@ impl FlatNode {
                 let tls = flat.take_tls();
                 OutboundConfig::Masque(MasqueConfig {
                     network: flat.network.take(),
+                    private_key: flat.masque_private_key.take(),
+                    endpoint_public_key: flat.masque_endpoint_public_key.take(),
+                    local_ipv4: flat.masque_local_ipv4.take(),
+                    local_ipv6: flat.masque_local_ipv6.take(),
                     mtu: flat.quic_mtu,
+                    remote_dns_resolve: flat.masque_remote_dns_resolve.unwrap_or(false),
+                    dns: std::mem::take(&mut flat.masque_dns),
                     tls,
-                    ..Default::default()
                 })
             }
             NodeProtocol::Direct => OutboundConfig::Direct,
@@ -779,6 +821,18 @@ struct WireOptions<'a> {
     anytls_min_idle_session: Option<usize>,
     anytls_idle_session_check_interval: Option<u64>,
     anytls_idle_session_timeout: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    masque_private_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    masque_endpoint_public_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    masque_local_ipv4: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    masque_local_ipv6: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    masque_remote_dns_resolve: Option<bool>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    masque_dns: &'a [String],
     mark: Option<u32>,
     tags: &'a [String],
     subscription_id: Option<uuid::Uuid>,
@@ -912,6 +966,12 @@ impl<'a> WireOptions<'a> {
             OutboundConfig::Masque(config) => {
                 wire.network = config.network.as_deref();
                 wire.quic_mtu = config.mtu;
+                wire.masque_private_key = config.private_key.as_deref();
+                wire.masque_endpoint_public_key = config.endpoint_public_key.as_deref();
+                wire.masque_local_ipv4 = config.local_ipv4.as_deref();
+                wire.masque_local_ipv6 = config.local_ipv6.as_deref();
+                wire.masque_remote_dns_resolve = Some(config.remote_dns_resolve);
+                wire.masque_dns = config.dns.as_slice();
                 wire.set_tls(&config.tls);
             }
             OutboundConfig::Direct | OutboundConfig::Block => {}

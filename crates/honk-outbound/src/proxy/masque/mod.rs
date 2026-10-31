@@ -14,26 +14,31 @@
 //! TUN device and lets the **kernel** own TCP and UDP. A dialled socket is
 //! bound to the TUN device (`SO_BINDTODEVICE`) and to the assigned source
 //! address, so the kernel routes it through the tunnel with full BBR, window
-//! scaling and retransmit behaviour. See [`tun`] and [`carrier`].
+//! scaling and retransmit behaviour. See [`tun`] and [`bind`].
 
 pub mod bind;
 pub mod capsule;
+pub mod carrier;
 pub mod http2;
 pub mod tun;
 
 use async_trait::async_trait;
 use honk_config::node::Node;
+use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 use super::{
-    PacketOutbound, PacketTransport, ProbeableOutbound, ProxyStream, TcpOutbound, WarmRequirement,
-    WarmableOutbound,
+    PacketOutbound, PacketTransport, ProbeableOutbound, ProxyStream, TcpOutbound,
+    UdpSocketTransport, WarmRequirement, WarmableOutbound,
 };
-use crate::runtime::NodeRuntime;
+use crate::runtime::{NodeRuntime, ProtocolRuntime};
 
-/// MASQUE outbound handler.
+/// MASQUE outbound handler. Stateless: the tunnel itself lives in the node's
+/// generation runtime ([`MasqueRuntime`]) so a reload tears down the old TUN
+/// device instead of leaking it.
 #[derive(Default)]
 pub struct MasqueHandler;
 
@@ -43,16 +48,132 @@ impl MasqueHandler {
     }
 }
 
+/// Generation-owned MASQUE state: one IP tunnel per node.
+///
+/// Every flow on the node shares this tunnel — a MASQUE endpoint assigns one
+/// address per CONNECT, and each dialled socket simply binds it as its source.
+/// Establishing it lazily keeps a node that never carries traffic from owning
+/// a TUN device.
+pub struct MasqueRuntime {
+    tunnel: Mutex<Option<Arc<http2::MasqueTunnel>>>,
+}
+
+impl Default for MasqueRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for MasqueRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let established = self.tunnel_count().is_some_and(|count| count != 0);
+        formatter
+            .debug_struct("MasqueRuntime")
+            .field("established", &established)
+            .finish()
+    }
+}
+
+impl MasqueRuntime {
+    pub fn new() -> Self {
+        Self {
+            tunnel: Mutex::new(None),
+        }
+    }
+
+    /// The node's tunnel, opening it on first use. Concurrent callers share one
+    /// CONNECT: a second TUN device for the same node would fight over the
+    /// assigned address.
+    pub async fn tunnel(
+        &self,
+        node: &Node,
+        connect_timeout: Duration,
+    ) -> anyhow::Result<Arc<http2::MasqueTunnel>> {
+        let mut guard = self.tunnel.lock().await;
+        if let Some(tunnel) = guard.as_ref() {
+            return Ok(Arc::clone(tunnel));
+        }
+        let tunnel = Arc::new(carrier::open_tunnel(node, connect_timeout).await?);
+        *guard = Some(Arc::clone(&tunnel));
+        Ok(tunnel)
+    }
+
+    /// `Some(1)` when the tunnel is up, `Some(0)` when it is not, and `None`
+    /// while another task is mid-CONNECT.
+    pub fn tunnel_count(&self) -> Option<usize> {
+        let guard = self.tunnel.try_lock().ok()?;
+        Some(if guard.is_some() { 1 } else { 0 })
+    }
+
+    /// Drop the tunnel, deleting its TUN device.
+    pub async fn close(&self) {
+        self.tunnel.lock().await.take();
+    }
+}
+
+/// Resolve the node's MASQUE runtime, so both dial paths share one message
+/// when a node is dispatched without its generation.
+fn masque_runtime(runtime: &NodeRuntime) -> anyhow::Result<&MasqueRuntime> {
+    match &runtime.runtime {
+        ProtocolRuntime::Masque(runtime) => Ok(runtime),
+        _ => anyhow::bail!(
+            "masque node {} has no masque runtime; it cannot be dialled without its generation",
+            runtime.node.name
+        ),
+    }
+}
+
 #[async_trait]
 impl TcpOutbound for MasqueHandler {
     async fn dial(
         &self,
-        _node: &Node,
+        node: &Node,
         target: SocketAddr,
         _target_domain: Option<&str>,
         _connect_timeout: Duration,
     ) -> anyhow::Result<ProxyStream> {
-        anyhow::bail!("masque tunnel is not established yet for {target}")
+        anyhow::bail!(
+            "masque node {} needs a generation runtime to own its tunnel; target {target} not dialled",
+            node.name
+        )
+    }
+
+    /// Kernel TCP through the tunnel: bind the socket to the TUN device and to
+    /// the address the endpoint assigned, then connect normally.
+    async fn dial_runtime(
+        &self,
+        runtime: Arc<NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: Duration,
+    ) -> anyhow::Result<ProxyStream> {
+        let masque = masque_runtime(runtime.as_ref())?;
+        let tunnel = masque
+            .tunnel(runtime.node.as_ref(), connect_timeout)
+            .await?;
+        let source = tunnel.assigned_address().ok_or_else(|| {
+            anyhow::anyhow!(
+                "masque node {} has no assigned address; the endpoint sent none",
+                runtime.node.name
+            )
+        })?;
+        let stream = bind::connect_via_tun(tunnel.tun_name(), source, target, connect_timeout)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "masque node {} cannot reach {target} through {}: {error}",
+                    runtime.node.name,
+                    tunnel.tun_name()
+                )
+            })?;
+        crate::runtime::flow_observation::milestone(
+            crate::runtime::flow_observation::Milestone::TransportReady,
+        );
+        Ok(ProxyStream {
+            stream: Box::new(stream),
+            target_addr: target,
+            target_domain: target_domain.map(str::to_string),
+        })
     }
 }
 
@@ -60,25 +181,55 @@ impl TcpOutbound for MasqueHandler {
 impl PacketOutbound for MasqueHandler {
     async fn dial_udp_transport(
         &self,
-        _node: &Node,
+        node: &Node,
         target: SocketAddr,
         _target_domain: Option<&str>,
         _connect_timeout: Duration,
     ) -> anyhow::Result<Arc<dyn PacketTransport>> {
-        anyhow::bail!("masque UDP tunnel is not established yet for {target}")
+        anyhow::bail!(
+            "masque node {} needs a generation runtime to own its tunnel; UDP {target} not dialled",
+            node.name
+        )
+    }
+
+    async fn dial_udp_transport_runtime(
+        &self,
+        runtime: Arc<NodeRuntime>,
+        target: SocketAddr,
+        _target_domain: Option<&str>,
+        connect_timeout: Duration,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        let masque = masque_runtime(runtime.as_ref())?;
+        let tunnel = masque
+            .tunnel(runtime.node.as_ref(), connect_timeout)
+            .await?;
+        let source = tunnel.assigned_address().ok_or_else(|| {
+            anyhow::anyhow!(
+                "masque node {} has no assigned address; the endpoint sent none",
+                runtime.node.name
+            )
+        })?;
+        let socket = bind::udp_via_tun(tunnel.tun_name(), source)?;
+        let socket = tokio::net::UdpSocket::from_std(socket)?;
+        socket.connect(target).await?;
+        Ok(Arc::new(UdpSocketTransport::new(Arc::new(socket), target)))
     }
 }
 
 #[async_trait]
 impl WarmableOutbound for MasqueHandler {
+    /// Establish the tunnel ahead of the first flow. UDP needs nothing extra:
+    /// the kernel owns UDP exactly as it owns TCP once the interface exists.
     async fn warm(
         &self,
-        _runtime: Arc<NodeRuntime>,
-        _connect_timeout: Duration,
+        runtime: Arc<NodeRuntime>,
+        connect_timeout: Duration,
         _requirement: WarmRequirement,
     ) -> anyhow::Result<()> {
-        // The tunnel is owned per generation; until the carrier is wired the
-        // warm pass has nothing to establish.
+        let masque = masque_runtime(runtime.as_ref())?;
+        masque
+            .tunnel(runtime.node.as_ref(), connect_timeout)
+            .await?;
         Ok(())
     }
 }
