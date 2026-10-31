@@ -98,6 +98,11 @@ impl WarpIdentity {
         })
     }
 
+    /// The name presented as the decoy SNI.
+    pub fn sni(&self) -> &str {
+        &self.server_name
+    }
+
     /// Run the TLS handshake. `server_name` reaches the edge as the decoy SNI.
     pub async fn connect<S>(
         &self,

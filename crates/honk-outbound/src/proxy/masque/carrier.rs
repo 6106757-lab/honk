@@ -76,6 +76,7 @@ async fn open_h2(
     };
     let identity = WarpIdentity::build(node)?;
     let tls = identity.connect(tcp, connect_timeout).await?;
+    tracing::debug!("masque: TLS to {address} established (sni {})", identity.sni());
     let io = crate::tls::BatchRead::new(tls);
 
     let mtu = config.mtu.map(u32::from).unwrap_or(DEFAULT_MTU);

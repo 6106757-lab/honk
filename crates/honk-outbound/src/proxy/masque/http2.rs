@@ -103,6 +103,7 @@ impl MasqueTunnel {
         let (response, mut send_stream) = sender.send_request(request, false)?;
         let response = response.await?;
         let status = response.status();
+        tracing::debug!("masque: connect-ip on {tun_name} answered {status}");
         if !status.is_success() {
             anyhow::bail!("masque endpoint rejected connect-ip with status {status}");
         }
