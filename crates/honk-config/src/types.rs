@@ -14,6 +14,8 @@ pub enum NodeProtocol {
     Tuic,
     Juicity,
     AnyTLS,
+    /// MASQUE connect-ip (RFC 9484) IP tunnel over HTTP/2 or HTTP/3.
+    Masque,
     /// Built-in bypass outbound; reserved, not a configurable protocol.
     Direct,
     /// Built-in reject outbound; reserved, not a configurable protocol.
@@ -32,6 +34,7 @@ impl NodeProtocol {
             NodeProtocol::Tuic => "tuic",
             NodeProtocol::Juicity => "juicity",
             NodeProtocol::AnyTLS => "anytls",
+            NodeProtocol::Masque => "masque",
             NodeProtocol::Direct => "direct",
             NodeProtocol::Block => "block",
         }
@@ -52,6 +55,7 @@ impl std::str::FromStr for NodeProtocol {
             "tuic" => Ok(NodeProtocol::Tuic),
             "juicity" => Ok(NodeProtocol::Juicity),
             "anytls" => Ok(NodeProtocol::AnyTLS),
+            "masque" => Ok(NodeProtocol::Masque),
             "direct" => Ok(NodeProtocol::Direct),
             "block" => Ok(NodeProtocol::Block),
             _ => Err(crate::ConfigError::UnknownProtocol(s.to_string())),

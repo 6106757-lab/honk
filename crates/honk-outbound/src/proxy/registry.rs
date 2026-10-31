@@ -9,6 +9,7 @@ use super::block::BlockHandler;
 use super::direct::DirectHandler;
 use super::hysteria2::Hysteria2Handler;
 use super::juicity::JuicityHandler;
+use super::masque::MasqueHandler;
 use super::shadowsocks::ShadowsocksHandler;
 use super::socks5::Socks5Handler;
 use super::trojan::TrojanHandler;
@@ -185,6 +186,13 @@ impl ProxyRegistry {
                 .with_packet(tuic.clone())
                 .with_warmable(tuic.clone())
                 .with_probeable(tuic),
+        );
+        let masque = Arc::new(MasqueHandler::new());
+        registry.register(
+            ProtocolEntry::new(NodeProtocol::Masque, masque.clone())
+                .with_packet(masque.clone())
+                .with_warmable(masque.clone())
+                .with_probeable(masque),
         );
         let juicity = Arc::new(JuicityHandler::new());
         registry.register(

@@ -8,6 +8,7 @@ pub mod block;
 pub mod direct;
 pub mod hysteria2;
 pub mod juicity;
+pub mod masque;
 pub mod shadowsocks;
 pub mod socks5;
 pub(crate) mod transport;

@@ -11,7 +11,7 @@ use crate::options::vocab::{coalesce_equal, optional_flow, packet_network};
 use crate::types::NodeProtocol;
 
 use super::{
-    AnyTlsConfig, Hysteria2Config, JuicityConfig, Node, OutboundConfig, QuicOptions,
+    AnyTlsConfig, Hysteria2Config, JuicityConfig, MasqueConfig, Node, OutboundConfig, QuicOptions,
     ShadowsocksConfig, Socks5Config, StreamTransportOptions, TlsOptions, TrojanConfig, TuicConfig,
     VlessConfig, VlessMultiplex, VlessUdpEncoding, VmessConfig,
 };
@@ -259,6 +259,7 @@ impl FlatNode {
                 | NodeProtocol::Tuic
                 | NodeProtocol::Juicity
                 | NodeProtocol::AnyTLS
+                | NodeProtocol::Masque
         );
         let reality = matches!(
             self.protocol,
@@ -673,6 +674,15 @@ impl FlatNode {
                     tls,
                 })
             }
+            NodeProtocol::Masque => {
+                let tls = flat.take_tls();
+                OutboundConfig::Masque(MasqueConfig {
+                    network: flat.network.take(),
+                    mtu: flat.quic_mtu,
+                    tls,
+                    ..Default::default()
+                })
+            }
             NodeProtocol::Direct => OutboundConfig::Direct,
             NodeProtocol::Block => OutboundConfig::Block,
         };
@@ -897,6 +907,11 @@ impl<'a> WireOptions<'a> {
                 wire.anytls_min_idle_session = config.min_idle_session;
                 wire.anytls_idle_session_check_interval = config.idle_session_check_interval;
                 wire.anytls_idle_session_timeout = config.idle_session_timeout;
+                wire.set_tls(&config.tls);
+            }
+            OutboundConfig::Masque(config) => {
+                wire.network = config.network.as_deref();
+                wire.quic_mtu = config.mtu;
                 wire.set_tls(&config.tls);
             }
             OutboundConfig::Direct | OutboundConfig::Block => {}

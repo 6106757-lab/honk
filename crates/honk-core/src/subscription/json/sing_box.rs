@@ -25,6 +25,7 @@ pub(super) fn normalize(value: Value) -> NodeResult {
         "tuic" => NodeProtocol::Tuic,
         "juicity" => NodeProtocol::Juicity,
         "anytls" => NodeProtocol::AnyTLS,
+        "masque" => NodeProtocol::Masque,
         "selector" | "urltest" | "direct" | "block" | "dns" => {
             return Ok(NormalizedEntry::Profile(
                 "sing-box non-proxy profile outbound",
@@ -76,6 +77,7 @@ pub(super) fn normalize(value: Value) -> NodeResult {
         NodeProtocol::Tuic => normalize_tuic(source, proxy),
         NodeProtocol::Juicity => normalize_juicity(source, proxy),
         NodeProtocol::AnyTLS => normalize_anytls(source, proxy),
+        NodeProtocol::Masque => normalize_masque(source, proxy),
         NodeProtocol::Direct | NodeProtocol::Block => unreachable!(),
     }
     .map(NormalizedEntry::Node)
@@ -333,6 +335,11 @@ fn normalize_anytls(mut source: Mapping, mut proxy: Mapping) -> Result<Mapping, 
         "multiplex",
         "sing-box AnyTLS multiplex settings are unsupported",
     )?;
+    normalize_tls(&mut source, &mut proxy)?;
+    Ok(proxy)
+}
+
+fn normalize_masque(mut source: Mapping, mut proxy: Mapping) -> Result<Mapping, &'static str> {
     normalize_tls(&mut source, &mut proxy)?;
     Ok(proxy)
 }

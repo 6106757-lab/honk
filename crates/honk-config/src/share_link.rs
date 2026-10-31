@@ -191,6 +191,7 @@ fn node_from_url(url: &url::Url, source: &SourceRef) -> Result<Node, DetailedCon
         "hysteria2" | "hysteria" | "hy2" => OutboundConfig::Hysteria2(Default::default()),
         "tuic" => OutboundConfig::Tuic(Default::default()),
         "juicity" => OutboundConfig::Juicity(Default::default()),
+        "masque" => OutboundConfig::Masque(Default::default()),
         _ => {
             return Err(DetailedConfigError::new(
                 ErrorCategory::UnknownProtocol,
@@ -255,7 +256,12 @@ fn node_from_url(url: &url::Url, source: &SourceRef) -> Result<Node, DetailedCon
                 config.uuid = single()?;
                 config.encryption = Some("auto".into());
             }
-            OutboundConfig::Shadowsocks(_) | OutboundConfig::Direct | OutboundConfig::Block => {}
+            // MASQUE carries no userinfo credentials; key material arrives as
+            // query parameters handled by the options pass.
+            OutboundConfig::Shadowsocks(_)
+            | OutboundConfig::Masque(_)
+            | OutboundConfig::Direct
+            | OutboundConfig::Block => {}
         }
     }
     Ok(node)

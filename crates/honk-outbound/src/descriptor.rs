@@ -189,6 +189,19 @@ static DESCRIPTORS: &[ProtocolDescriptor] = &[
         generation_runtime: GenerationRuntime::AnyTls,
         share_link_schemes: &["anytls"],
     },
+    // MASQUE connect-ip: the tunnel is an IP interface, so every flow is a
+    // real kernel socket bound to the TUN source address. Nothing can be
+    // pooled (a pooled socket would carry another flow's source address), and
+    // the tunnel itself is owned by a generation-scoped runtime.
+    ProtocolDescriptor {
+        protocol: NodeProtocol::Masque,
+        supports_udp: always,
+        pool_ready_streams: never,
+        pool_bare_tcp: never,
+        supports_warm: pooled_supports_warm,
+        generation_runtime: GenerationRuntime::Quic,
+        share_link_schemes: &["masque"],
+    },
     // Each direct flow owns a socket carrying its own rule or global mark; a
     // pooled socket would hand one flow another flow's mark.
     ProtocolDescriptor {
@@ -240,6 +253,7 @@ mod tests {
             NodeProtocol::Tuic,
             NodeProtocol::Juicity,
             NodeProtocol::AnyTLS,
+            NodeProtocol::Masque,
             NodeProtocol::Direct,
             NodeProtocol::Block,
         ] {

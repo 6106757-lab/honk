@@ -205,6 +205,32 @@ pub struct AnyTlsConfig {
     pub tls: TlsOptions,
 }
 
+/// MASQUE connect-ip (RFC 9484): an IP-layer tunnel carried over HTTP/2
+/// extended CONNECT (RFC 8441) or HTTP/3.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MasqueConfig {
+    /// Tunnel carrier: `h2` (HTTP/2 + DATAGRAM capsule) or `quic` (HTTP/3 +
+    /// QUIC DATAGRAM). Defaults to `h2` when absent.
+    pub network: Option<String>,
+    /// Base64 SEC1 ECDSA P-256 device private key, as used by WARP-style
+    /// endpoints. Optional: plain endpoints need no key material.
+    pub private_key: Option<String>,
+    /// Base64 SEC1 ECDSA P-256 endpoint public key, when the server pins one.
+    pub endpoint_public_key: Option<String>,
+    /// IPv4 address the tunnel is expected to assign, e.g. `172.16.0.2` or
+    /// `100.96.0.6/32`. When absent the address comes from ADDRESS_ASSIGN.
+    pub local_ipv4: Option<String>,
+    /// IPv6 address the tunnel is expected to assign.
+    pub local_ipv6: Option<String>,
+    /// MTU for the TUN device. 1280 is the usual WARP value.
+    pub mtu: Option<u16>,
+    /// Let the endpoint resolve names instead of resolving locally.
+    pub remote_dns_resolve: bool,
+    /// DNS servers to use inside the tunnel.
+    pub dns: Vec<String>,
+    pub tls: TlsOptions,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutboundConfig {
     Shadowsocks(ShadowsocksConfig),
@@ -216,6 +242,7 @@ pub enum OutboundConfig {
     Tuic(TuicConfig),
     Juicity(JuicityConfig),
     AnyTls(AnyTlsConfig),
+    Masque(MasqueConfig),
     Direct,
     Block,
 }
@@ -238,6 +265,7 @@ impl OutboundConfig {
             NodeProtocol::Tuic => Self::Tuic(TuicConfig::default()),
             NodeProtocol::Juicity => Self::Juicity(JuicityConfig::default()),
             NodeProtocol::AnyTLS => Self::AnyTls(AnyTlsConfig::default()),
+            NodeProtocol::Masque => Self::Masque(MasqueConfig::default()),
             NodeProtocol::Direct => Self::Direct,
             NodeProtocol::Block => Self::Block,
         }
@@ -254,6 +282,7 @@ impl OutboundConfig {
             Self::Tuic(_) => NodeProtocol::Tuic,
             Self::Juicity(_) => NodeProtocol::Juicity,
             Self::AnyTls(_) => NodeProtocol::AnyTLS,
+            Self::Masque(_) => NodeProtocol::Masque,
             Self::Direct => NodeProtocol::Direct,
             Self::Block => NodeProtocol::Block,
         }
@@ -268,6 +297,7 @@ impl OutboundConfig {
             Self::Tuic(config) => Some(&config.quic.tls),
             Self::Juicity(config) => Some(&config.quic.tls),
             Self::AnyTls(config) => Some(&config.tls),
+            Self::Masque(config) => Some(&config.tls),
             Self::Shadowsocks(_) | Self::Socks5(_) | Self::Direct | Self::Block => None,
         }
     }
@@ -281,6 +311,7 @@ impl OutboundConfig {
             Self::Tuic(config) => Some(&mut config.quic.tls),
             Self::Juicity(config) => Some(&mut config.quic.tls),
             Self::AnyTls(config) => Some(&mut config.tls),
+            Self::Masque(config) => Some(&mut config.tls),
             Self::Shadowsocks(_) | Self::Socks5(_) | Self::Direct | Self::Block => None,
         }
     }

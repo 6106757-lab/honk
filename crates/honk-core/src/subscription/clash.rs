@@ -117,6 +117,8 @@ fn protocol_from_name(proxy_type: &str) -> Result<NodeProtocol, &'static str> {
         Ok(NodeProtocol::Juicity)
     } else if proxy_type.eq_ignore_ascii_case("anytls") {
         Ok(NodeProtocol::AnyTLS)
+    } else if proxy_type.eq_ignore_ascii_case("masque") {
+        Ok(NodeProtocol::Masque)
     } else {
         Err("unsupported proxy type")
     }
