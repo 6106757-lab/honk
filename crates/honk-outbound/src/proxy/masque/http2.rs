@@ -10,9 +10,9 @@
 
 use crate::proxy::masque::capsule::{self, Capsule, CapsuleError};
 use bytes::{Bytes, BytesMut};
-use futures_util::StreamExt;
-use h2::ext::Protocol;
 use h2::RecvStream;
+use h2::ext::Protocol;
+use h2::share::SendStream;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -86,13 +86,13 @@ impl MasqueTunnel {
     /// then start shuttling packets both ways.
     async fn exchange_capsules(
         &mut self,
-        mut send_stream: h2::client::SendStream<Bytes>,
+        mut send_stream: SendStream<Bytes>,
         mut body: RecvStream,
     ) -> anyhow::Result<()> {
         let mut buffer = BytesMut::new();
         let mut saw_address = false;
 
-        while let Some(chunk) = body.next().await {
+        while let Some(chunk) = body.data().await {
             let chunk = chunk?;
             buffer.extend_from_slice(&chunk);
             loop {
@@ -157,7 +157,7 @@ impl MasqueTunnel {
         let tun = self.tun.clone();
         tokio::spawn(async move {
             let mut buffer = BytesMut::new();
-            while let Some(chunk) = body.next().await {
+            while let Some(chunk) = body.data().await {
                 match chunk {
                     Ok(chunk) => buffer.extend_from_slice(&chunk),
                     Err(error) => {
