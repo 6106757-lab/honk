@@ -16,11 +16,10 @@
 
 use crate::proxy::masque::capsule::{self, Capsule, CapsuleError};
 use bytes::BytesMut;
-use h2::{Ping, RecvStream};
+use h2::RecvStream;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 
@@ -37,11 +36,6 @@ const CAPSULE_PROTOCOL_HEADER: (&str, &str) = ("capsule-protocol", "?1");
 /// rather than a request/response exchange, so the 64 KiB HTTP/2 default
 /// would stall it every few dozen packets.
 const WINDOW_SIZE: u32 = 1024 * 1024;
-
-/// How often the carrier is pinged while no packets cross it. Endpoints tear
-/// down a connect-ip stream that goes quiet, which would leave the node with
-/// a TUN device nothing feeds until the next dial rebuilds it.
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Clears a tunnel's liveness flag when the task owning it exits, whichever
 /// way it exits.
@@ -143,38 +137,16 @@ impl MasqueTunnel {
         }
         let mut body: RecvStream = response.into_body();
 
-        // Pings keep an idle tunnel from being torn down, and holding the
-        // request handle keeps h2 from deciding the connection has no user
-        // left. The task ends — and takes the carrier with it — as soon as a
-        // ping goes unanswered.
-        let keepalive_shutdown = Arc::clone(&shutdown);
-        let keepalive_alive = Arc::clone(&alive);
-        let keepalive_label = tun_label.clone();
-        if let Some(mut pings) = sender.ping_pong() {
-            tokio::spawn(async move {
-                let _carrier = sender;
-                let mut ticker = tokio::time::interval(KEEPALIVE_INTERVAL);
-                loop {
-                    tokio::select! {
-                        _ = ticker.tick() => {}
-                        _ = keepalive_shutdown.notified() => break,
-                    }
-                    match pings.ping(Ping::opaque()).await {
-                        Ok(()) => {}
-                        Err(error) => {
-                            tracing::debug!(
-                                "masque: keepalive ping unanswered on {keepalive_label}: {error}"
-                            );
-                            break;
-                        }
-                    }
-                }
-                keepalive_alive.store(false, Ordering::Relaxed);
-                keepalive_shutdown.notify_waiters();
-            });
-        } else {
-            drop(sender);
-        }
+        // Dropping the request handle is how a client tells h2 no further
+        // requests will follow, and h2 answers by winding the connection
+        // down. The tunnel is one request that lasts as long as the node
+        // does, so park the handle in a task that just waits for the tunnel
+        // to end.
+        let parked_shutdown = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            let _carrier = sender;
+            parked_shutdown.notified().await;
+        });
 
         // A node that configures its tunnel addresses needs no assignment, and
         // waiting for one stalls: endpoints that hand out addresses on their
