@@ -71,7 +71,6 @@ pub struct MasqueTunnel {
     /// wakeup for whichever task was mid-packet at that moment, and that
     /// task then holds its TUN device forever.
     shutdown: watch::Sender<bool>,
-    shutdown_signal: watch::Receiver<bool>,
 }
 
 impl Drop for MasqueTunnel {
@@ -242,7 +241,7 @@ impl MasqueTunnel {
                     Ok(chunk) => {
                         let length = chunk.len();
                         buffer.extend_from_slice(&chunk);
-                        flow_control.release_capacity(length);
+                        let _ = flow_control.release_capacity(length);
                     }
                     Err(error) => {
                         tracing::debug!("masque downstream closed: {error}");
@@ -286,7 +285,6 @@ impl MasqueTunnel {
             addresses,
             alive,
             shutdown,
-            shutdown_signal,
         })
     }
 
@@ -322,7 +320,7 @@ async fn read_address_assign(body: &mut RecvStream) -> anyhow::Result<Vec<IpAddr
         let chunk = chunk?;
         let length = chunk.len();
         buffer.extend_from_slice(&chunk);
-        flow_control.release_capacity(length);
+        let _ = flow_control.release_capacity(length);
         loop {
             if buffer.is_empty() {
                 break;

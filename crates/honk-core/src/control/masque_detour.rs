@@ -7,12 +7,10 @@
 
 use honk_config::node::Node;
 use honk_config::types::NodeProtocol;
-use honk_outbound::proxy::masque::CarrierDialer;
-use honk_outbound::proxy::{AsyncReadWrite, ProxyRegistry};
+use honk_outbound::proxy::ProxyRegistry;
+use honk_outbound::proxy::masque::{CarrierDialer, DetourConnect};
 use honk_outbound::runtime::OutboundRuntimeRegistry;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,11 +25,7 @@ struct DetourDialer {
 }
 
 impl CarrierDialer for DetourDialer {
-    fn connect(
-        &self,
-        endpoint: SocketAddr,
-        timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Box<dyn AsyncReadWrite>>> + Send>> {
+    fn connect(&self, endpoint: SocketAddr, timeout: Duration) -> DetourConnect {
         let proxies = Arc::clone(&self.proxies);
         let generation = Arc::clone(&self.generation);
         let node_id = self.node_id;

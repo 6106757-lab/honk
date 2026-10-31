@@ -39,6 +39,11 @@ use super::{
 };
 use crate::runtime::{NodeRuntime, ProtocolRuntime};
 
+/// A dial through a detour node, boxed because the trait stays object-safe
+/// and so cannot name its future with `async fn`.
+pub type DetourConnect =
+    Pin<Box<dyn Future<Output = anyhow::Result<Box<dyn AsyncReadWrite>>> + Send>>;
+
 /// Reaches the MASQUE endpoint through another node.
 ///
 /// An endpoint that the direct path out cannot reach is often reachable from
@@ -47,11 +52,7 @@ use crate::runtime::{NodeRuntime, ProtocolRuntime};
 /// the node set is known.
 pub trait CarrierDialer: Send + Sync {
     /// Connect to `endpoint` through the detour node.
-    fn connect(
-        &self,
-        endpoint: SocketAddr,
-        timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Box<dyn AsyncReadWrite>>> + Send>>;
+    fn connect(&self, endpoint: SocketAddr, timeout: Duration) -> DetourConnect;
 }
 
 /// MASQUE outbound handler. Stateless: the tunnel itself lives in the node's
