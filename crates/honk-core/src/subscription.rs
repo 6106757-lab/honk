@@ -34,7 +34,8 @@ pub(crate) use supervisor::SubscriptionMergeReply;
 pub(crate) use supervisor::same_subscription_source_spec;
 pub(crate) use supervisor::{
     AuthorizedSubscription, SubscriptionAuthorizations, SubscriptionSupervisor,
-    SubscriptionSupervisorHandle, same_subscription_worker_set, validate_subscription_ids,
+    SubscriptionSupervisorHandle, drop_nodes_published_elsewhere, same_subscription_worker_set,
+    validate_subscription_ids,
 };
 #[cfg(feature = "native-api")]
 pub(crate) use supervisor::{ProviderLoad, RefreshRefusal, RefreshReport};

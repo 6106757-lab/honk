@@ -149,7 +149,7 @@ Startup restores nodes before refreshing subscriptions:
 
 A later accepted refresh replaces the SQLite body row, not a legacy file.
 
-If a restored or first-fetched body contains a node ID already used by an inline node or another subscription, startup excludes that subscription instead of failing. Runtime publication rejects the same collision. A body may still replace its own subscription's nodes.
+If a restored or first-fetched body contains a node ID already used by an inline node, startup excludes that subscription instead of failing, and runtime publication rejects the same collision. A node whose ID another subscription already published is dropped from this subscription with a warning, and its other nodes are published; the first subscription keeps the node. A body may still replace its own subscription's nodes.
 
 The native API provider reports `last_error.code` as `publication_rejected` and `last_error.details.diagnostic_code` as `duplicate-node-id`. A restored body rejected this way still counts as restored: it skips the first-fetch wait. Background refresh still runs and repeats the check.
 
@@ -158,6 +158,7 @@ On SIGHUP, subscriptions with the same fetch identity (URL + configured `ua` + h
 Failure handling preserves a usable runtime rather than clearing it:
 
 - HTTP, invalid UTF-8 encoding, parse, or no-usable-node failure publishes no replacement nodes and performs no write, so the active nodes and last valid stored body remain. Accepted bodies are persisted byte-for-byte, without repairing encoding.
+- Fetch failures first retry after the smaller of 30 seconds and `interval`, then double the delay up to the smaller of 10 minutes and `interval`; `interval: 0` disables automatic retries. Publication acceptance or rejection clears existing backoff and resumes the normal interval.
 - A persistence-write failure is non-fatal after parsing: the newly parsed nodes are still returned for publication, while the atomic path never installs a partially written body. The next restart can therefore restore whichever complete valid body remains on disk.
 - An unsupported or malformed node is skipped individually. The shared node builder's warning includes a one-based proxy index and a static rejection reason, never the raw record or its credentials. The whole body fails only when no usable nodes remain; an empty result never clears the previous generation.
 
