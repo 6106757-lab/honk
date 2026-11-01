@@ -296,7 +296,10 @@ impl<C: Send + Sync + 'static> QuicClient<C> {
                         let conn = self
                             .handshake(&endpoint, server_addr, connect_timeout)
                             .await?;
-                        Ok((conn, endpoint, ipv6))
+                        // The race infers its error type from this block, and
+                        // nothing else here names one; say `anyhow::Error` so
+                        // the `?` conversions above have a single answer.
+                        Ok::<_, anyhow::Error>((conn, endpoint, ipv6))
                     }
                 })
                 .await;
