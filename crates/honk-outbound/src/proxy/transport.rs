@@ -245,14 +245,10 @@ pub(crate) async fn maybe_tls_wrap_concrete(
                             Some(path) => ObservedTcp::new_carrier(
                                 crate::transport_quality::tcp::Carrier::Chained(
                                     path.connect(peer, budget).await.map_err(|error| {
-                                        std::io::Error::new(
-                                            std::io::ErrorKind::Other,
-                                            format!(
-                                                "node {}: detour could not re-dial {peer}: \
-                                                 {error}",
-                                                node.name
-                                            ),
-                                        )
+                                        std::io::Error::other(format!(
+                                            "node {}: detour could not re-dial {peer}: {error}",
+                                            node.name
+                                        ))
                                     })?,
                                 ),
                             ),

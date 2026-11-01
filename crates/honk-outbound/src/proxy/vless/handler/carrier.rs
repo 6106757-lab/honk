@@ -216,15 +216,6 @@ impl VLessHandler {
         target_domain: Option<&str>,
         connect_timeout: std::time::Duration,
     ) -> anyhow::Result<(ProxyStream, crate::proxy::transport::TransportPreparation)> {
-        let vless = runtime.node.vless().unwrap();
-        let uuid = Self::parse_uuid(vless.uuid.as_deref().unwrap_or(""))?;
-        let header = Self::build_request_header(
-            &uuid,
-            CMD_TCP,
-            Some(target),
-            target_domain,
-            vless.wire_flow(),
-        )?;
         self.prepare_retained_base_detoured(runtime, target, target_domain, connect_timeout, None)
             .await
     }
