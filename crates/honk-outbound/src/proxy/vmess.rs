@@ -507,11 +507,12 @@ impl TcpOutbound for VmessHandler {
         connect_timeout: std::time::Duration,
     ) -> anyhow::Result<ProxyStream> {
         let uuid = uuid(&runtime.node)?;
+        let detour = runtime.detour();
         let stream = super::transport::wrap_transport_runtime(
             &runtime,
             None,
             connect_timeout,
-            runtime.detour().map(Arc::as_ref),
+            detour.as_deref(),
         )
         .await?;
         Self::perform_handshake(uuid.as_bytes(), stream, target, target_domain)

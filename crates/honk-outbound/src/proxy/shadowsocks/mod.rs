@@ -433,10 +433,7 @@ impl TcpOutbound for ShadowsocksHandler {
         target_domain: Option<&str>,
         connect_timeout: std::time::Duration,
     ) -> anyhow::Result<ProxyStream> {
-        crate::proxy::detour::ensure_bound(
-            runtime.node.as_ref(),
-            runtime.detour().map(Arc::as_ref),
-        )?;
+        crate::proxy::detour::ensure_bound(runtime.node.as_ref(), runtime.detour().as_deref())?;
         anyhow::ensure!(
             runtime.detour().is_none(),
             "node {}: Shadowsocks cannot be dialled through a detour yet",

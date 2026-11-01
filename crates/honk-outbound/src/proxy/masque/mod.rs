@@ -86,6 +86,10 @@ pub struct MasqueRuntime {
 struct TunnelSlot {
     slot: usize,
     tunnel: Arc<http2::MasqueTunnel>,
+    /// The front node the carrier was opened over. A group can switch its
+    /// member while the tunnel is still alive; the cache must then rebuild
+    /// instead of handing every new flow the old front's connection.
+    carrier: Option<uuid::Uuid>,
 }
 
 impl Default for MasqueRuntime {
@@ -121,7 +125,8 @@ impl MasqueRuntime {
         runtime: &NodeRuntime,
         connect_timeout: Duration,
     ) -> anyhow::Result<Arc<http2::MasqueTunnel>> {
-        self.tunnel_for(runtime, connect_timeout, runtime.detour().map(Arc::as_ref))
+        let detour = runtime.detour();
+        self.tunnel_for(runtime, connect_timeout, detour.as_deref())
             .await
     }
 
@@ -137,12 +142,20 @@ impl MasqueRuntime {
         detour: Option<&crate::proxy::detour::DetourPath>,
     ) -> anyhow::Result<Arc<http2::MasqueTunnel>> {
         let key = detour.map(|path| path.key());
+        let carrier = detour.and_then(|path| path.carrier_id());
         let mut guard = self.tunnels.lock().await;
-        if guard.get(&key).is_some_and(|entry| entry.tunnel.is_alive()) {
+        // Reclaim dead tunnels even when their path is never dialled again:
+        // their TUN devices and default routes live in the kernel, not in this
+        // map, and would otherwise stay behind until a restart.
+        guard.retain(|_, entry| entry.tunnel.is_alive());
+        if guard
+            .get(&key)
+            .is_some_and(|entry| entry.carrier == carrier)
+        {
             return Ok(Arc::clone(&guard[&key].tunnel));
         }
-        // The carrier died: drop the tunnel so its TUN device goes with it,
-        // then rebuild. Cached TUN devices outlive their endpoint.
+        // The carrier died or the front changed: drop the tunnel so its TUN
+        // device goes with it, then rebuild over the current path.
         guard.remove(&key);
         // A generation's own tunnel is slot 0 and the detours it carries are the
         // small slots 1, 2, …; those names and route metrics must stay free for
@@ -168,6 +181,7 @@ impl MasqueRuntime {
             TunnelSlot {
                 slot,
                 tunnel: Arc::clone(&tunnel),
+                carrier,
             },
         );
         Ok(tunnel)

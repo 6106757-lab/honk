@@ -216,8 +216,8 @@ impl XhttpRuntime {
             let setup = scope.scope(quality.scope(async move {
                 let permit = runtime.acquire_carrier_permit()?;
                 let tcp = tcp.lock().take();
-                let stream =
-                    maybe_tls_wrap(&node, tcp, timeout, runtime.detour().map(Arc::as_ref)).await?;
+                let detour = runtime.detour();
+                let stream = maybe_tls_wrap(&node, tcp, timeout, detour.as_deref()).await?;
                 let stream: Box<dyn AsyncReadWrite> = match permit {
                     Some(permit) => Box::new(crate::proxy::RuntimeOwnedIo {
                         inner: stream,

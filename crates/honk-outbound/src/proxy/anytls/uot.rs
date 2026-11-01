@@ -388,7 +388,7 @@ impl AnyTlsHandler {
                 let inbound_payload_budget = Arc::clone(&inbound_payload_budget);
                 async move {
                     let tls_connector = runtime.anytls_tls_connector()?;
-                    let detour = runtime.detour().cloned();
+                    let detour = runtime.detour();
                     runtime
                         .transport_quality()
                         .scope(dial_session(
@@ -433,7 +433,7 @@ impl AnyTlsHandler {
                 Some(Arc::clone(&runtime)),
                 move || async move {
                     let tls_connector = dial_runtime.anytls_tls_connector()?;
-                    let detour = dial_runtime.detour().cloned();
+                    let detour = dial_runtime.detour();
                     let padding_state = Arc::clone(&padding_state);
                     let inbound_payload_budget = Arc::clone(&inbound_payload_budget);
                     dial_runtime

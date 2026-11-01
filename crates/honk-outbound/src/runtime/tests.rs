@@ -791,4 +791,39 @@ mod fallible_factory_tests {
             0,
         );
     }
+
+    /// A reload reuses the runtime of a node whose own config did not change,
+    /// but the detour belongs to the generation. A one-shot binding silently
+    /// kept the previous front, so switching the front had no effect until a
+    /// full restart.
+    #[test]
+    fn a_reused_runtime_accepts_a_replacement_detour_binding() {
+        let node = canonical_node("chained-endpoint");
+        let registry = Arc::new(OutboundRuntimeRegistry::build(&[node.clone()]).unwrap());
+        let runtime = registry.get(&node.id).unwrap();
+        let proxies = Arc::new(crate::proxy::ProxyRegistry::new());
+        let first = uuid::Uuid::new_v4();
+        let second = uuid::Uuid::new_v4();
+
+        runtime.bind_detour(Arc::new(crate::proxy::detour::DetourPath::new(
+            Arc::clone(&proxies),
+            Arc::clone(&registry),
+            first,
+        )));
+        assert!(format!("{:?}", runtime.detour()).contains(&first.to_string()));
+
+        runtime.bind_detour(Arc::new(crate::proxy::detour::DetourPath::new(
+            Arc::clone(&proxies),
+            Arc::clone(&registry),
+            second,
+        )));
+        let bound = runtime.detour().expect("the detour stays bound");
+        let debug = format!("{bound:?}");
+        assert!(debug.contains(&second.to_string()), "{debug}");
+        assert!(!debug.contains(&first.to_string()), "{debug}");
+
+        // A generation that drops the detour must not inherit the old front.
+        runtime.clear_detour();
+        assert!(runtime.detour().is_none());
+    }
 }

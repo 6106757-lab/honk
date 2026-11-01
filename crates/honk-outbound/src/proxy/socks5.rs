@@ -711,9 +711,10 @@ impl TcpOutbound for Socks5Handler {
         target_domain: Option<&str>,
         connect_timeout: std::time::Duration,
     ) -> anyhow::Result<ProxyStream> {
+        let detour = runtime.detour();
         let server = crate::proxy::detour::connect_server(
             runtime.node.as_ref(),
-            runtime.detour().map(Arc::as_ref),
+            detour.as_deref(),
             connect_timeout,
         )
         .await?;

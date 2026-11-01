@@ -25,6 +25,10 @@ use std::sync::Arc;
 /// The name may be a node or a group. A group is resolved on each dial, so the
 /// front follows the group's current choice instead of whichever node happened
 /// to be selected when the generation was built.
+///
+/// This runs again on every reload. A node whose own config did not change
+/// reuses its runtime, so rebinding (and clearing a binding the new config no
+/// longer names) is what makes a switched front take effect without a restart.
 pub(crate) fn bind_node_detours(
     registry: &Arc<OutboundRuntimeRegistry>,
     nodes: &[Node],
@@ -34,6 +38,7 @@ pub(crate) fn bind_node_detours(
 ) {
     for node in nodes {
         let Some(name) = node.detour_name() else {
+            registry.clear_detour(node.id);
             continue;
         };
         let path = match (
@@ -49,6 +54,7 @@ pub(crate) fn bind_node_detours(
                          nest tunnels; ignored",
                         node.name
                     );
+                    registry.clear_detour(node.id);
                     continue;
                 }
                 DetourPath::new(Arc::clone(proxies), Arc::clone(registry), target.id)
@@ -66,6 +72,7 @@ pub(crate) fn bind_node_detours(
                      configuration",
                     node.name
                 );
+                registry.clear_detour(node.id);
                 continue;
             }
         };

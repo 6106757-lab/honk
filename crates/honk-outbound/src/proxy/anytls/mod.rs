@@ -1468,9 +1468,7 @@ impl AnyTlsHandler {
                     .as_ref()
                     .map(|runtime| runtime.anytls_tls_connector())
                     .transpose()?;
-                let detour = runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.detour().cloned());
+                let detour = runtime.as_ref().and_then(|runtime| runtime.detour());
                 let dial = dial_session(
                     &node,
                     &label,
@@ -1687,7 +1685,7 @@ impl WarmableOutbound for AnyTlsHandler {
         let inbound_payload_budget = pool.inbound_payload_budget();
         Self::warm_pool_with(runtime, move || async move {
             let tls_connector = dial_runtime.anytls_tls_connector()?;
-            let detour = dial_runtime.detour().cloned();
+            let detour = dial_runtime.detour();
             dial_runtime
                 .transport_quality()
                 .scope(dial_session(
@@ -1749,7 +1747,7 @@ impl TcpOutbound for AnyTlsHandler {
                     let inbound_payload_budget = Arc::clone(&inbound_payload_budget);
                     async move {
                         let tls_connector = runtime.anytls_tls_connector()?;
-                        let detour = runtime.detour().cloned();
+                        let detour = runtime.detour();
                         runtime
                             .transport_quality()
                             .scope(dial_session(

@@ -263,7 +263,11 @@ impl JuicityHandler {
         let profiles = runtime.quic_flow_control_profiles()?;
         runtime
             .quic_client(|| {
-                self.build_client(runtime.node.as_ref(), Some(profiles), runtime.detour())
+                self.build_client(
+                    runtime.node.as_ref(),
+                    Some(profiles),
+                    runtime.detour().as_ref(),
+                )
             })
             .await
     }
@@ -365,7 +369,11 @@ impl JuicityHandler {
         }
         let profiles = runtime.quic_flow_control_profiles()?;
         let client = self
-            .build_client(runtime.node.as_ref(), Some(profiles), runtime.detour())
+            .build_client(
+                runtime.node.as_ref(),
+                Some(profiles),
+                runtime.detour().as_ref(),
+            )
             .await?;
         super::prepare_detached_quic_transport(runtime, client, |client| async move {
             let transport = self
@@ -513,7 +521,11 @@ impl PacketOutbound for JuicityHandler {
     ) -> anyhow::Result<super::PreparedUdpTransport> {
         let profiles = runtime.quic_flow_control_profiles()?;
         let client = self
-            .build_client(runtime.node.as_ref(), Some(profiles), runtime.detour())
+            .build_client(
+                runtime.node.as_ref(),
+                Some(profiles),
+                runtime.detour().as_ref(),
+            )
             .await?;
         super::prepare_detached_quic_transport(runtime, client, |client| async move {
             let transport = self

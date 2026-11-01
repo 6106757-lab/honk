@@ -174,7 +174,8 @@ impl VLessHandler {
         Box<dyn AsyncReadWrite>,
         crate::proxy::transport::TransportPreparation,
     )> {
-        let detour = detour.or_else(|| runtime.detour().map(Arc::as_ref));
+        let bound = runtime.detour();
+        let detour = detour.or_else(|| bound.as_deref());
         if runtime.xhttp.is_none() {
             let permit = runtime.acquire_vless_carrier()?;
             let stream = runtime

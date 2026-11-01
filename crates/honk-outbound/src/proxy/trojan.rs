@@ -121,11 +121,12 @@ impl TrojanHandler {
     )> {
         match runtime {
             Some(runtime) => {
+                let detour = runtime.detour();
                 super::transport::prepare_transport_runtime(
                     runtime,
                     tcp,
                     timeout,
-                    runtime.detour().map(Arc::as_ref),
+                    detour.as_deref(),
                 )
                 .await
             }

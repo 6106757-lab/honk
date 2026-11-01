@@ -370,7 +370,13 @@ pub struct NodeRuntime {
     warm_retention: Arc<tokio::sync::Mutex<u8>>,
     /// The node this one dials through, resolved once the generation knows the
     /// whole node set. Absent for every node on the direct path.
-    detour: std::sync::OnceLock<Arc<crate::proxy::detour::DetourPath>>,
+    ///
+    /// A reload may reuse this runtime when the node's own config is unchanged,
+    /// but the detour is configuration of the *generation*, not of the node: a
+    /// front group can name a different member while this runtime survives.
+    /// The binding therefore has to be replaceable, otherwise the reused
+    /// runtime keeps dialling through the previous generation's front.
+    detour: parking_lot::RwLock<Option<Arc<crate::proxy::detour::DetourPath>>>,
     #[cfg(any(feature = "rprx", test))]
     vless_carriers: Arc<tokio::sync::Semaphore>,
 }
@@ -385,14 +391,22 @@ impl NodeRuntime {
     }
 
     /// Give the node the path it dials through. The generation resolves the
-    /// name once the whole node set is known; binding twice is a no-op.
+    /// name once the whole node set is known; rebinding replaces the previous
+    /// generation's path so a reused runtime follows the new front.
     pub fn bind_detour(&self, path: Arc<crate::proxy::detour::DetourPath>) {
-        let _ = self.detour.set(path);
+        *self.detour.write() = Some(path);
+    }
+
+    /// Forget a binding the new generation no longer names. Without this a
+    /// reused runtime whose node dropped its detour would keep riding the old
+    /// one, which is as wrong as keeping a stale member.
+    pub fn clear_detour(&self) {
+        *self.detour.write() = None;
     }
 
     /// The node this one dials through, or `None` on the direct path.
-    pub fn detour(&self) -> Option<&Arc<crate::proxy::detour::DetourPath>> {
-        self.detour.get()
+    pub fn detour(&self) -> Option<Arc<crate::proxy::detour::DetourPath>> {
+        self.detour.read().clone()
     }
 
     fn build(
@@ -415,7 +429,7 @@ impl NodeRuntime {
                 #[cfg(feature = "owned-tasks")]
                 task_owner: task_owner.clone(),
                 warm_retention: Arc::new(tokio::sync::Mutex::new(0)),
-                detour: std::sync::OnceLock::new(),
+                detour: parking_lot::RwLock::new(None),
                 #[cfg(any(feature = "rprx", test))]
                 vless_carriers,
             })
@@ -809,6 +823,17 @@ impl OutboundRuntimeRegistry {
             return false;
         };
         runtime.bind_detour(path);
+        true
+    }
+
+    /// Drop a detour binding the new generation no longer names. A reused
+    /// runtime keeps every other piece of its state, so without this a node
+    /// whose detour was removed would keep riding the previous front.
+    pub fn clear_detour(&self, node_id: uuid::Uuid) -> bool {
+        let Some(runtime) = self.nodes.get(&node_id) else {
+            return false;
+        };
+        runtime.clear_detour();
         true
     }
 

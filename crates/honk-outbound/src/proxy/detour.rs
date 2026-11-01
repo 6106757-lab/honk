@@ -129,17 +129,36 @@ impl DetourPath {
         }
     }
 
-    /// A stable name for the path this detour takes.
+    /// A stable name for the logical path this detour takes.
     ///
     /// Something a node owns one of — a MASQUE tunnel, say — has to be one
     /// per path rather than one per node, because the one that was opened
     /// over this path is not the one a flow on another path may use. A group
-    /// is keyed by name: it is resolved per dial, so a tunnel outlives a
-    /// change of member rather than being rebuilt under the flows riding it.
+    /// is keyed by name: which member carries it is resolved per dial, so the
+    /// owner of a long-lived resource compares `carrier_id` as well before
+    /// reusing the one it built for a previous member.
     pub(crate) fn key(&self) -> String {
         match &self.target {
             DetourTarget::Node(node_id) => format!("node:{node_id}"),
             DetourTarget::Group { name, .. } => format!("group:{name}"),
+        }
+    }
+
+    /// The node that will carry the next dial, read without advancing group
+    /// state (round-robin cursors, URLTest caches, marks).
+    ///
+    /// A MASQUE tunnel is not like an ordinary stream: it dials its server
+    /// once and every later flow rides that same carrier. A group's current
+    /// member can therefore change while the tunnel is still alive, and the
+    /// cache must notice that the tunnel belongs to the old front.
+    pub(crate) fn carrier_id(&self) -> Option<uuid::Uuid> {
+        match &self.target {
+            DetourTarget::Node(node_id) => Some(*node_id),
+            DetourTarget::Group { name, manager } => manager
+                .peek_selection_plan_for_domain(name, ProbeDomain::Tcp, IpVersion::V4)
+                .nodes
+                .first()
+                .map(|node| node.id),
         }
     }
 
@@ -329,5 +348,49 @@ mod tests {
             .expect_err("an empty group carries nothing")
             .to_string();
         assert!(error.contains("empty"), "{error}");
+    }
+
+    /// A MASQUE tunnel is a long-lived carrier, so its owner must see the
+    /// front it was opened over change. Keying the tunnel by group name alone
+    /// used to hand every later flow the old member's connection until a full
+    /// restart — even after a reload had already switched the front.
+    #[test]
+    fn a_switched_front_changes_the_reported_carrier() {
+        use honk_config::node::{Group, GroupPolicy};
+
+        let first = uuid::Uuid::new_v4();
+        let second = uuid::Uuid::new_v4();
+        let nodes = vec![
+            Node {
+                id: first,
+                name: "front-a".into(),
+                ..Default::default()
+            },
+            Node {
+                id: second,
+                name: "front-b".into(),
+                ..Default::default()
+            },
+        ];
+        let group = Group {
+            name: "fronts".into(),
+            policy: GroupPolicy::Selector,
+            nodes: vec![first, second],
+            ..Default::default()
+        };
+        let manager = Arc::new(GroupManager::new(&[group], &nodes));
+        let path = DetourPath::to_group(
+            Arc::new(ProxyRegistry::new()),
+            Arc::new(OutboundRuntimeRegistry::build(&[]).unwrap()),
+            "fronts",
+            Arc::clone(&manager),
+            NodeProtocol::Trojan,
+        );
+
+        assert_eq!(path.carrier_id(), Some(first));
+        manager
+            .set_selector_choice("fronts", "front-b", crate::group::SelectorNetworks::Both)
+            .unwrap();
+        assert_eq!(path.carrier_id(), Some(second));
     }
 }
