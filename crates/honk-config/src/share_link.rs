@@ -166,6 +166,11 @@ impl Node {
             source,
             emit,
         )?;
+        // The detour names the node this one dials through. It belongs to the
+        // path rather than to the protocol, so it is read last: whichever
+        // dialect the link used, the node now leaves through the same name a
+        // subscription would have given it.
+        node.detour = options::detour(&query).map(ToOwned::to_owned);
         Ok(node)
     }
 }

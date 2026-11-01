@@ -146,6 +146,27 @@ pub(super) fn parse_query(
     Ok(query)
 }
 
+/// The node this one dials through, as links spell it.
+///
+/// A subscription reads the same names through its own parser, so a link
+/// written into a configuration rides a detour exactly as the same link in a
+/// subscription does. Generators emit these empty as a matter of course, so a
+/// blank name means no detour rather than a detour named "".
+pub(super) fn detour(query: &Query) -> Option<&str> {
+    [
+        "dialer-proxy",
+        "dialer_proxy",
+        "detour",
+        "underlying-proxy",
+        "underlying_proxy",
+    ]
+    .iter()
+    .find_map(|key| query.get(*key))
+    .map(String::as_str)
+    .map(str::trim)
+    .filter(|name| !name.is_empty())
+}
+
 pub(super) fn apply_tls(
     node: &mut Node,
     query: &Query,

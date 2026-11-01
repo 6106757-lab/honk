@@ -3385,3 +3385,51 @@ mod assets_block {
         }
     }
 }
+
+#[cfg(test)]
+mod node_detour {
+    use crate::Config;
+    use crate::diagnostic::DetailedDiagnostic;
+    use crate::parser::parse_dae_config_with_detailed_diagnostics;
+
+    fn parse(input: &str) -> (Config, Vec<DetailedDiagnostic>) {
+        let mut diagnostics = Vec::new();
+        let config = parse_dae_config_with_detailed_diagnostics(input, &mut diagnostics).unwrap();
+        (config, diagnostics)
+    }
+
+    /// A node written into the configuration rides the same detour a
+    /// subscription's node would: the parameter is a property of the link, so
+    /// both reach it the same way.
+    #[test]
+    fn a_node_entry_names_the_detour_it_dials_through() {
+        let (config, _) = parse(
+            "node {\n front: 'trojan://secret@front.example.com:443'\n \
+             back: 'trojan://secret@back.example.com:443?dialer-proxy=front'\n}\n",
+        );
+        let detours: Vec<_> = config
+            .nodes
+            .iter()
+            .map(|node| (node.name.as_str(), node.detour_name()))
+            .collect();
+        assert_eq!(
+            detours,
+            [("front", None), ("back", Some("front"))],
+            "the chained node must name its front"
+        );
+    }
+
+    /// Nothing about a plain node changes: no parameter, no detour, and the
+    /// front node keeps its own path out.
+    #[test]
+    fn a_node_entry_without_the_parameter_keeps_its_own_path() {
+        let (config, diagnostics) =
+            parse("node {\n plain: 'trojan://secret@plain.example.com:443'\n}\n");
+        assert_eq!(config.nodes.len(), 1);
+        assert_eq!(config.nodes[0].detour_name(), None);
+        assert!(
+            diagnostics.is_empty(),
+            "a plain node must not warn: {diagnostics:?}"
+        );
+    }
+}

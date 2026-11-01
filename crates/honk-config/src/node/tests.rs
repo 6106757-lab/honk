@@ -446,3 +446,53 @@ fn test_validate_redacts_vless_path_context_name() {
     let rendered = format!("{error} {error:?}");
     assert!(!rendered.contains(CANARY), "{rendered}");
 }
+
+/// A link written into a configuration spells its detour the same way a
+/// subscription's does, so the two agree on what a node rides out through.
+#[test]
+fn a_share_link_carries_the_detour_it_dials_through() {
+    let node = Node::from_share_link("trojan://secret@example.com:443?dialer-proxy=front").unwrap();
+    assert_eq!(node.detour_name(), Some("front"));
+}
+
+/// Links in the wild disagree on the parameter name; all of them mean the
+/// same thing and none of them is protocol-specific.
+#[test]
+fn every_dialect_of_the_detour_name_is_read() {
+    for key in [
+        "dialer-proxy",
+        "dialer_proxy",
+        "detour",
+        "underlying-proxy",
+        "underlying_proxy",
+    ] {
+        let node =
+            Node::from_share_link(&format!("trojan://secret@example.com:443?{key}=front")).unwrap();
+        assert_eq!(node.detour_name(), Some("front"), "key {key}");
+    }
+}
+
+/// Generators emit an empty value as a matter of course, which is not a node
+/// name anywhere else in the configuration.
+#[test]
+fn a_blank_detour_name_is_no_detour_at_all() {
+    for value in ["", "   "] {
+        let node = Node::from_share_link(&format!(
+            "trojan://secret@example.com:443?dialer-proxy={value}"
+        ))
+        .unwrap();
+        assert_eq!(node.detour_name(), None, "value {value:?}");
+    }
+    let plain = Node::from_share_link("trojan://secret@example.com:443").unwrap();
+    assert_eq!(plain.detour_name(), None);
+}
+
+/// The detour is part of what makes a node the node it is, so the same server
+/// reached two ways is two nodes rather than one with a switch on it.
+#[test]
+fn a_detour_gives_the_node_an_identity_of_its_own() {
+    let direct = Node::from_share_link("trojan://secret@example.com:443").unwrap();
+    let chained =
+        Node::from_share_link("trojan://secret@example.com:443?dialer-proxy=front").unwrap();
+    assert_ne!(direct.derive_id(), chained.derive_id());
+}
