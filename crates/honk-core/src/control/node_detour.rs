@@ -403,16 +403,21 @@ mod tests {
         };
         // Flow mappings keep the body flat, so no indentation carries a meaning
         // the reader has to work out before the assertions.
-        let body = format!(
-            "proxies:/n/
-             - {{name: front, type: socks5, server: {}, port: {}}}\n\
-             - {{name: back, type: trojan, server: {}, port: {}, password: {PASSWORD}, \
-                dialer-proxy: front}}\n",
-            front.address.ip(),
-            front.address.port(),
-            back.address.ip(),
-            back.address.port(),
-        );
+        let body = [
+            "proxies:".to_string(),
+            format!(
+                "  - {{name: front, type: socks5, server: {}, port: {}}}",
+                front.address.ip(),
+                front.address.port()
+            ),
+            format!(
+                "  - {{name: back, type: socks5, server: {}, port: {}, dialer-proxy: front}}",
+                back.address.ip(),
+                back.address.port()
+            ),
+            String::new(),
+        ]
+        .join("\n");
 
         let nodes = crate::subscription::parse_subscription_content(&subscription, &body)
             .expect("a Clash subscription naming a dialer-proxy must parse");

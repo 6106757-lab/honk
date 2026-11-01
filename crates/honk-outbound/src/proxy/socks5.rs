@@ -6,9 +6,11 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tracing::debug;
+
+use crate::transport_quality::tcp::Carrier;
 
 use super::{
     MultiTargetTransport, PacketOutbound, PacketTransport, PreparedUdpTransport, ProbeableOutbound,
@@ -58,9 +60,46 @@ impl Socks5Handler {
         Ok(request)
     }
 
+    /// Handshake over a server connection that is already open, whatever it
+    /// rides on, and hand the stream back as the proxy connection.
+    ///
+    /// Every entry point funnels through here so that "how the handshake goes"
+    /// is written once and "where the connection came from" is the only thing
+    /// that differs.
+    async fn dial_with_stream(
+        &self,
+        node: &Node,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        mut server: Carrier,
+    ) -> anyhow::Result<ProxyStream> {
+        let config = node.socks5().unwrap();
+        crate::runtime::flow_observation::milestone(
+            crate::runtime::flow_observation::Milestone::TransportReady,
+        );
+        Self::handshake(
+            &mut server,
+            target,
+            target_domain,
+            config.username.as_deref(),
+            config.password.as_deref(),
+        )
+        .await?;
+        Ok(ProxyStream {
+            stream: Box::new(server),
+            target_addr: target,
+            target_domain: target_domain.map(|s| s.to_string()),
+        })
+    }
+
     /// Perform full SOCKS5 handshake.
-    async fn handshake(
-        stream: &mut TcpStream,
+    ///
+    /// It runs over whatever the server rides on: a socket this node dialled,
+    /// or the byte stream a detour handed back. Both are just bytes to a
+    /// handshake, and pinning it to `TcpStream` is what kept SOCKS5 from ever
+    /// riding a detour.
+    async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+        stream: &mut S,
         target: SocketAddr,
         target_domain: Option<&str>,
         username: Option<&str>,
@@ -643,10 +682,10 @@ impl TcpOutbound for Socks5Handler {
         target_domain: Option<&str>,
         connect_timeout: std::time::Duration,
     ) -> anyhow::Result<ProxyStream> {
-        let addr = format!("{}:{}", node.host(), node.port);
+        let addr = crate::proxy::transport::endpoint_address(node);
         debug!("SOCKS5: connecting to {} for target {}", addr, target);
         let stream = crate::util::connect_outbound(&addr, connect_timeout).await?;
-        self.dial_with_tcp(node, target, target_domain, stream, connect_timeout)
+        self.dial_with_stream(node, target, target_domain, Carrier::Socket(stream))
             .await
     }
 
@@ -655,26 +694,31 @@ impl TcpOutbound for Socks5Handler {
         node: &Node,
         target: SocketAddr,
         target_domain: Option<&str>,
-        mut stream: TcpStream,
+        stream: TcpStream,
         _connect_timeout: std::time::Duration,
     ) -> anyhow::Result<ProxyStream> {
-        let config = node.socks5().unwrap();
-        crate::runtime::flow_observation::milestone(
-            crate::runtime::flow_observation::Milestone::TransportReady,
-        );
-        Self::handshake(
-            &mut stream,
-            target,
-            target_domain,
-            config.username.as_deref(),
-            config.password.as_deref(),
+        self.dial_with_stream(node, target, target_domain, Carrier::Socket(stream))
+            .await
+    }
+
+    /// Dial inside a generation, so a node that names a detour is carried by
+    /// it. SOCKS5 keeps no state between dials, so this is the same handshake
+    /// over a connection that came from somewhere else.
+    async fn dial_runtime(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+    ) -> anyhow::Result<ProxyStream> {
+        let server = crate::proxy::detour::connect_server(
+            runtime.node.as_ref(),
+            runtime.detour().map(Arc::as_ref),
+            connect_timeout,
         )
         .await?;
-        Ok(ProxyStream {
-            stream: Box::new(stream),
-            target_addr: target,
-            target_domain: target_domain.map(|s| s.to_string()),
-        })
+        self.dial_with_stream(runtime.node.as_ref(), target, target_domain, server)
+            .await
     }
 }
 

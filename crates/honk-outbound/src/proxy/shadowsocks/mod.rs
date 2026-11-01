@@ -421,6 +421,36 @@ impl TcpOutbound for ShadowsocksHandler {
             .await
     }
 
+    /// Shadowsocks cannot ride a detour yet: its ciphers are built around a
+    /// real socket and the transport-quality sampling that reads one. Refuse
+    /// rather than dialling the server directly, which would send the node's
+    /// traffic out of the real interface while looking like any other
+    /// connection — the one thing a detour is meant to rule out.
+    async fn dial_runtime(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+    ) -> anyhow::Result<ProxyStream> {
+        crate::proxy::detour::ensure_bound(
+            runtime.node.as_ref(),
+            runtime.detour().map(Arc::as_ref),
+        )?;
+        anyhow::ensure!(
+            runtime.detour().is_none(),
+            "node {}: Shadowsocks cannot be dialled through a detour yet",
+            runtime.node.name
+        );
+        self.dial(
+            runtime.node.as_ref(),
+            target,
+            target_domain,
+            connect_timeout,
+        )
+        .await
+    }
+
     async fn dial_with_tcp(
         &self,
         node: &Node,

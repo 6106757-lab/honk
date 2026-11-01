@@ -27,7 +27,7 @@ use crate::proxy::detour::DetourPath;
 use crate::transport_quality::tcp::{Carrier, ObservedTcp};
 
 /// The node's server as a `host:port` literal, bracketed when it is IPv6.
-fn endpoint_address(node: &Node) -> String {
+pub(crate) fn endpoint_address(node: &Node) -> String {
     let host = node.host();
     if host.contains(':') {
         format!("[{host}]:{}", node.port)

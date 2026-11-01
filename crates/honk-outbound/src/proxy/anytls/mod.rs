@@ -1351,13 +1351,21 @@ async fn dial_session(
     tls_connector: Option<Arc<TlsConnector>>,
     padding_state: Arc<PaddingState>,
     inbound_payload_budget: Arc<InboundPayloadBudget>,
+    detour: Option<Arc<crate::proxy::detour::DetourPath>>,
 ) -> anyhow::Result<Arc<AnyTlsSession>> {
     let timeout = connect_timeout.saturating_mul(3);
     tokio::time::timeout(timeout, async {
         let padding = padding_state.snapshot();
         let settings = padding.settings_payload();
-        let (read, write, auth) =
-            connect_transport(node, addr, connect_timeout, tls_connector, &padding).await?;
+        let (read, write, auth) = connect_transport(
+            node,
+            addr,
+            connect_timeout,
+            tls_connector,
+            &padding,
+            detour.as_deref(),
+        )
+        .await?;
         AnyTlsSession::establish(
             addr,
             read,
@@ -1389,11 +1397,15 @@ async fn connect_transport(
     connect_timeout: Duration,
     tls_connector: Option<Arc<TlsConnector>>,
     padding: &PaddingScheme,
+    detour: Option<&crate::proxy::detour::DetourPath>,
 ) -> anyhow::Result<(BoxedReader, BoxedWriter, Vec<u8>)> {
     let password = node.anytls().unwrap().password.as_deref().unwrap_or("");
     let auth = authentication_payload(password, padding);
-    let tcp = crate::util::connect_outbound(addr, connect_timeout).await?;
-    let tcp = crate::transport_quality::tcp::ObservedTcp::new(tcp);
+    // Through the detour when the node names one: AnyTLS keeps its own
+    // session pool, but the connection under a session is still just the path
+    // to the node's server, and that is what a detour replaces.
+    let tcp = crate::proxy::detour::connect_server(node, detour, connect_timeout).await?;
+    let tcp = crate::transport_quality::tcp::ObservedTcp::new_carrier(tcp);
     debug!("AnyTLS: TCP connected to {}", addr);
 
     let connector = match tls_connector {
@@ -1456,6 +1468,9 @@ impl AnyTlsHandler {
                     .as_ref()
                     .map(|runtime| runtime.anytls_tls_connector())
                     .transpose()?;
+                let detour = runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.detour().cloned());
                 let dial = dial_session(
                     &node,
                     &label,
@@ -1463,6 +1478,7 @@ impl AnyTlsHandler {
                     tls_connector,
                     padding_state,
                     inbound_payload_budget,
+                    detour,
                 );
                 match runtime {
                     Some(runtime) => runtime.transport_quality().scope(dial).await,
@@ -1671,6 +1687,7 @@ impl WarmableOutbound for AnyTlsHandler {
         let inbound_payload_budget = pool.inbound_payload_budget();
         Self::warm_pool_with(runtime, move || async move {
             let tls_connector = dial_runtime.anytls_tls_connector()?;
+            let detour = dial_runtime.detour().cloned();
             dial_runtime
                 .transport_quality()
                 .scope(dial_session(
@@ -1680,6 +1697,7 @@ impl WarmableOutbound for AnyTlsHandler {
                     Some(tls_connector),
                     padding_state,
                     inbound_payload_budget,
+                    detour,
                 ))
                 .await
         })
@@ -1731,6 +1749,7 @@ impl TcpOutbound for AnyTlsHandler {
                     let inbound_payload_budget = Arc::clone(&inbound_payload_budget);
                     async move {
                         let tls_connector = runtime.anytls_tls_connector()?;
+                        let detour = runtime.detour().cloned();
                         runtime
                             .transport_quality()
                             .scope(dial_session(
@@ -1740,6 +1759,7 @@ impl TcpOutbound for AnyTlsHandler {
                                 Some(tls_connector),
                                 padding_state,
                                 inbound_payload_budget,
+                                detour,
                             ))
                             .await
                     }

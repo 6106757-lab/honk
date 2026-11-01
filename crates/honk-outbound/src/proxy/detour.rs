@@ -122,6 +122,39 @@ impl DetourPath {
     }
 }
 
+/// Open the connection to a node's own server: through its detour when the
+/// node names one, and to the real network when it does not.
+///
+/// Every protocol that reaches its server over a socket of its own has to come
+/// through here rather than connecting directly. One that connects directly
+/// ignores a detour the operator configured and sends the node's traffic out
+/// of the real interface, which looks exactly like an ordinary connection —
+/// the one outcome this feature exists to prevent.
+pub(crate) async fn connect_server(
+    node: &Node,
+    detour: Option<&DetourPath>,
+    connect_timeout: Duration,
+) -> anyhow::Result<crate::transport_quality::tcp::Carrier> {
+    ensure_bound(node, detour)?;
+    let address = crate::proxy::transport::endpoint_address(node);
+    let Some(path) = detour else {
+        return Ok(crate::transport_quality::tcp::Carrier::Socket(
+            crate::util::connect_outbound(&address, connect_timeout).await?,
+        ));
+    };
+    let endpoint = resolve_endpoint(&address).await?;
+    let stream = path
+        .connect(endpoint, connect_timeout)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "node {}: detour could not reach {address}: {error}",
+                node.name
+            )
+        })?;
+    Ok(crate::transport_quality::tcp::Carrier::Chained(stream))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
