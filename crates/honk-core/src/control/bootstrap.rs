@@ -163,11 +163,7 @@ impl ControlPlane {
             "Control-plane descriptor budget"
         );
         let outbound_runtime = runtime_registry.read().clone();
-        super::masque_detour::bind_masque_detours(
-            &outbound_runtime,
-            &config.nodes,
-            &proxy_registry,
-        );
+        super::node_detour::bind_node_detours(&outbound_runtime, &config.nodes, &proxy_registry);
         dns_upstream_pool.set_runtime_generation(Arc::clone(&outbound_runtime))?;
         install_url_member_resolver(
             &alive_set,

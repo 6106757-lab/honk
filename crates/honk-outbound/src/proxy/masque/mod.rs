@@ -26,34 +26,16 @@ pub mod warp;
 use async_trait::async_trait;
 use honk_config::node::Node;
 use std::fmt;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
 use super::{
-    AsyncReadWrite, PacketOutbound, PacketTransport, ProbeableOutbound, ProxyStream, TcpOutbound,
+    PacketOutbound, PacketTransport, ProbeableOutbound, ProxyStream, TcpOutbound,
     UdpSocketTransport, WarmRequirement, WarmableOutbound,
 };
 use crate::runtime::{NodeRuntime, ProtocolRuntime};
-
-/// A dial through a detour node, boxed because the trait stays object-safe
-/// and so cannot name its future with `async fn`.
-pub type DetourConnect =
-    Pin<Box<dyn Future<Output = anyhow::Result<Box<dyn AsyncReadWrite>>> + Send>>;
-
-/// Reaches the MASQUE endpoint through another node.
-///
-/// An endpoint that the direct path out cannot reach is often reachable from
-/// an existing node, so a node may name a detour and ride it. Only the
-/// generation can turn that name into a dial, so it supplies the dialer once
-/// the node set is known.
-pub trait CarrierDialer: Send + Sync {
-    /// Connect to `endpoint` through the detour node.
-    fn connect(&self, endpoint: SocketAddr, timeout: Duration) -> DetourConnect;
-}
 
 /// MASQUE outbound handler. Stateless: the tunnel itself lives in the node's
 /// generation runtime ([`MasqueRuntime`]) so a reload tears down the old TUN
@@ -75,9 +57,6 @@ impl MasqueHandler {
 /// a TUN device.
 pub struct MasqueRuntime {
     tunnel: Mutex<Option<Arc<http2::MasqueTunnel>>>,
-    /// Dialer for the node's detour, bound once the generation knows the node
-    /// the detour names.
-    detour: std::sync::OnceLock<Arc<dyn CarrierDialer>>,
 }
 
 impl Default for MasqueRuntime {
@@ -100,22 +79,19 @@ impl MasqueRuntime {
     pub fn new() -> Self {
         Self {
             tunnel: Mutex::new(None),
-            detour: std::sync::OnceLock::new(),
         }
-    }
-
-    /// Give the runtime the dialer for the node's detour. Ignored when the
-    /// node names none, or when the generation binds twice.
-    pub fn bind_detour(&self, dialer: Arc<dyn CarrierDialer>) {
-        let _ = self.detour.set(dialer);
     }
 
     /// The node's tunnel, opening it on first use. Concurrent callers share one
     /// CONNECT: a second TUN device for the same node would fight over the
     /// assigned address.
+    ///
+    /// The detour is read from the node's runtime rather than kept here: the
+    /// generation binds it in one place, so a carrier can only ever take the
+    /// path once.
     pub async fn tunnel(
         &self,
-        node: &Node,
+        runtime: &NodeRuntime,
         connect_timeout: Duration,
     ) -> anyhow::Result<Arc<http2::MasqueTunnel>> {
         let mut guard = self.tunnel.lock().await;
@@ -128,7 +104,12 @@ impl MasqueRuntime {
             guard.take();
         }
         let tunnel = Arc::new(
-            carrier::open_tunnel(node, connect_timeout, self.detour.get().map(Arc::as_ref)).await?,
+            carrier::open_tunnel(
+                runtime.node.as_ref(),
+                connect_timeout,
+                runtime.detour().map(Arc::as_ref),
+            )
+            .await?,
         );
         *guard = Some(Arc::clone(&tunnel));
         Ok(tunnel)
@@ -185,9 +166,7 @@ impl TcpOutbound for MasqueHandler {
         connect_timeout: Duration,
     ) -> anyhow::Result<ProxyStream> {
         let masque = masque_runtime(runtime.as_ref())?;
-        let tunnel = masque
-            .tunnel(runtime.node.as_ref(), connect_timeout)
-            .await?;
+        let tunnel = masque.tunnel(runtime.as_ref(), connect_timeout).await?;
         let source = tunnel.source_for(target).ok_or_else(|| {
             anyhow::anyhow!(
                 "masque node {} has no {} source address for {target}",
@@ -238,9 +217,7 @@ impl PacketOutbound for MasqueHandler {
         connect_timeout: Duration,
     ) -> anyhow::Result<Arc<dyn PacketTransport>> {
         let masque = masque_runtime(runtime.as_ref())?;
-        let tunnel = masque
-            .tunnel(runtime.node.as_ref(), connect_timeout)
-            .await?;
+        let tunnel = masque.tunnel(runtime.as_ref(), connect_timeout).await?;
         let source = tunnel.source_for(target).ok_or_else(|| {
             anyhow::anyhow!(
                 "masque node {} has no {} source address for UDP {target}",
@@ -266,9 +243,7 @@ impl WarmableOutbound for MasqueHandler {
         _requirement: WarmRequirement,
     ) -> anyhow::Result<()> {
         let masque = masque_runtime(runtime.as_ref())?;
-        masque
-            .tunnel(runtime.node.as_ref(), connect_timeout)
-            .await?;
+        masque.tunnel(runtime.as_ref(), connect_timeout).await?;
         Ok(())
     }
 }

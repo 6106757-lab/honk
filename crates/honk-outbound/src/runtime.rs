@@ -367,6 +367,9 @@ pub struct NodeRuntime {
     /// Serializes warm establishment and release while tracking independent
     /// selector/UDP owners across runtime reuse on reload.
     warm_retention: Arc<tokio::sync::Mutex<u8>>,
+    /// The node this one dials through, resolved once the generation knows the
+    /// whole node set. Absent for every node on the direct path.
+    detour: std::sync::OnceLock<Arc<crate::proxy::detour::DetourPath>>,
     #[cfg(any(feature = "rprx", test))]
     vless_carriers: Arc<tokio::sync::Semaphore>,
 }
@@ -378,6 +381,17 @@ impl NodeRuntime {
             return None;
         }
         crate::proxy::transport::xhttp::XhttpRuntime::new(node)
+    }
+
+    /// Give the node the path it dials through. The generation resolves the
+    /// name once the whole node set is known; binding twice is a no-op.
+    pub fn bind_detour(&self, path: Arc<crate::proxy::detour::DetourPath>) {
+        let _ = self.detour.set(path);
+    }
+
+    /// The node this one dials through, or `None` on the direct path.
+    pub fn detour(&self) -> Option<&Arc<crate::proxy::detour::DetourPath>> {
+        self.detour.get()
     }
 
     fn build(
@@ -400,6 +414,7 @@ impl NodeRuntime {
                 #[cfg(feature = "owned-tasks")]
                 task_owner: task_owner.clone(),
                 warm_retention: Arc::new(tokio::sync::Mutex::new(0)),
+                detour: std::sync::OnceLock::new(),
                 #[cfg(any(feature = "rprx", test))]
                 vless_carriers,
             })
@@ -782,20 +797,17 @@ pub type SharedRuntimeRegistry = Arc<parking_lot::RwLock<Arc<OutboundRuntimeRegi
 
 impl OutboundRuntimeRegistry {
     /// Build and validate a registry from the generation's node set.
-    /// Give a MASQUE node's runtime the dialer for its configured detour.
-    /// Returns false when the node is unknown or is not a MASQUE node.
-    pub fn bind_masque_detour(
+    /// Give a node the path it dials through. Returns false when the node is
+    /// unknown to this generation.
+    pub fn bind_detour(
         &self,
         node_id: uuid::Uuid,
-        dialer: Arc<dyn crate::proxy::masque::CarrierDialer>,
+        path: Arc<crate::proxy::detour::DetourPath>,
     ) -> bool {
         let Some(runtime) = self.nodes.get(&node_id) else {
             return false;
         };
-        let ProtocolRuntime::Masque(masque) = &runtime.runtime else {
-            return false;
-        };
-        masque.bind_detour(dialer);
+        runtime.bind_detour(path);
         true
     }
 

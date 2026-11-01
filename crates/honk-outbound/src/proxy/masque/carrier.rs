@@ -1,19 +1,25 @@
 //! Carrier setup: how a MASQUE node's IP tunnel reaches its endpoint.
 //!
 //! `network: h2`    -> TCP + WARP TLS + HTTP/2 CONNECT-IP.
-//! `network: quic`  -> HTTP/3, which needs `h3` to expose Cloudflare's
-//!                     `cf-connect-ip`; the crate keeps its protocol values
-//!                     private, so this carrier reports the limitation instead
-//!                     of silently opening a plain HTTP/3 stream.
+//! `network: quic`  -> HTTP/3, which this carrier does not carry yet.
+//!                     MASQUE over H3 needs extended CONNECT with
+//!                     `:protocol = connect-ip`, and the pinned `h3` 0.0.8
+//!                     refuses that value at the HEADERS layer (upstream added
+//!                     it later), so opening it would mean vendoring a patched
+//!                     `h3`. It also needs QUIC DATAGRAM framing, whose layout
+//!                     differs from the HTTP/2 capsule this carrier already
+//!                     gets right — a second chance to get the wire format
+//!                     wrong. Reported instead of silently dialling a plain
+//!                     HTTP/3 stream.
 
 use honk_config::node::Node;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use super::CarrierDialer;
 use super::http2::MasqueTunnel;
 use super::warp::WarpIdentity;
 use crate::proxy::AsyncReadWrite;
+use crate::proxy::detour::DetourPath;
 
 /// Default tunnel MTU. IPv6 requires >= 1280 and every MASQUE endpoint we
 /// know advertises WARP-sized packets, so 1280 is the safe floor.
@@ -27,7 +33,7 @@ pub const DEFAULT_MTU: u32 = 1280;
 pub async fn open_tunnel(
     node: &Node,
     connect_timeout: Duration,
-    detour: Option<&dyn CarrierDialer>,
+    detour: Option<&DetourPath>,
 ) -> anyhow::Result<MasqueTunnel> {
     let config = node
         .masque()
@@ -48,7 +54,7 @@ pub async fn open_tunnel(
 async fn open_h2(
     node: &Node,
     connect_timeout: Duration,
-    detour: Option<&dyn CarrierDialer>,
+    detour: Option<&DetourPath>,
 ) -> anyhow::Result<MasqueTunnel> {
     let config = node
         .masque()

@@ -476,7 +476,7 @@ impl ControlPlane {
                 }
             };
         new_group_manager.bind_transport_quality(&new_runtime_registry);
-        super::super::masque_detour::bind_masque_detours(
+        super::super::node_detour::bind_node_detours(
             &new_runtime_registry,
             &new_config.nodes,
             &self.proxy_registry,
