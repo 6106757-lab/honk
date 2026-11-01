@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Fetch the doona release pinned in .github/ci/pins.env for the native-ui feature.
+# This fork builds its own doona, so the embedded UI ships our fixes (MASQUE
+# latency tests, for one) instead of the upstream release.
 #
 #   ci/fetch-doona.sh [DIR]            extract standard into DIR (default
 #                                      target/doona-<version>), lite into DIR-lite;
@@ -11,7 +13,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck disable=SC1091
 source "$root/.github/ci/pins.env"
-repo=https://github.com/Zakkaus/doona
+repo=https://github.com/6106757-lab/doona
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 

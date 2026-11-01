@@ -60,7 +60,7 @@ for value in ['<summary>Added (1)</summary>', '<summary>Fixed (2)</summary>',
               '<summary>Internal (1)</summary>', '- Serve a local UI. (#12)',
               '- Keep quoted node names. (#13)', '- Preserve cached answers. (#14)',
               '- Collect release entries from fragments. (#15)',
-              'https://github.com/Zakkaus/doona/releases/tag/v0.1.0-rc.1',
+              'https://github.com/6106757-lab/doona/releases/tag/v0.1.0-rc.1',
               'https://github.com/o/r/compare/v0.1.0-beta.1...v0.1.0-beta.2',
               'honk 0.1.0-beta.2. This is a pre-release.', '## Downloads\n\nAsset table.',
               '[OpenWrt feed](https://openwrt.daeuniverse.org/)']:

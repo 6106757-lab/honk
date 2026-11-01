@@ -28,7 +28,7 @@ for group in re.finditer(r'^### ([^\n]+)\n(.*?)(?=^### |\Z)', section[1], re.M |
         continue
     count = len(re.findall(r'^- ', body, re.M))
     print(f'\n<details>\n<summary>{group[1]} ({count})</summary>\n\n{body}\n\n</details>')
-print(f'\n## Pairing with doona\n\nThe full builds embed [doona {pin[1]}](https://github.com/Zakkaus/doona/releases/tag/v{pin[1]}), pinned in `.github/ci/pins.env` at this tag.')
+print(f'\n## Pairing with doona\n\nThe full builds embed [doona {pin[1]}](https://github.com/6106757-lab/doona/releases/tag/v{pin[1]}), pinned in `.github/ci/pins.env` at this tag.')
 PY
 )
 stage=' This is a stable release.'
@@ -38,6 +38,6 @@ if [[ -n $assets ]]; then
   downloads=$(<"$assets")
   printf '\n%s\n' "$downloads"
 fi
-links="[Documentation](https://github.com/$repo/blob/$tag/doc/README.md) | [doona](https://github.com/Zakkaus/doona) | [OpenWrt feed](https://openwrt.daeuniverse.org/)"
+links="[Documentation](https://github.com/$repo/blob/$tag/doc/README.md) | [doona](https://github.com/6106757-lab/doona) | [OpenWrt feed](https://openwrt.daeuniverse.org/)"
 [[ -z $prev ]] || links="[Full changelog](https://github.com/$repo/compare/$prev...$tag) | $links"
 printf '\n%s\n' "$links"

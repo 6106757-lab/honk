@@ -229,7 +229,7 @@ async fn attempt_wire(
     // member.
     let detour = plan.group.as_ref().and_then(|group| {
         crate::control::node_detour::group_detour(
-            &*plan.config,
+            &plan.config,
             &state.proxy_registry,
             &plan.registry,
             &plan.manager,
