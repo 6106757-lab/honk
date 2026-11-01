@@ -175,7 +175,7 @@ impl VLessHandler {
         crate::proxy::transport::TransportPreparation,
     )> {
         let bound = runtime.detour();
-        let detour = detour.or_else(|| bound.as_deref());
+        let detour = detour.or(bound.as_deref());
         if runtime.xhttp.is_none() {
             let permit = runtime.acquire_vless_carrier()?;
             let stream = runtime

@@ -799,7 +799,8 @@ mod fallible_factory_tests {
     #[test]
     fn a_reused_runtime_accepts_a_replacement_detour_binding() {
         let node = canonical_node("chained-endpoint");
-        let registry = Arc::new(OutboundRuntimeRegistry::build(&[node.clone()]).unwrap());
+        let registry =
+            Arc::new(OutboundRuntimeRegistry::build(std::slice::from_ref(&node)).unwrap());
         let runtime = registry.get(&node.id).unwrap();
         let proxies = Arc::new(crate::proxy::ProxyRegistry::new());
         let first = uuid::Uuid::new_v4();
