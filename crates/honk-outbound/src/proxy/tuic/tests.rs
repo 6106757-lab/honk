@@ -480,3 +480,18 @@ fn test_fragmentation_small_packet_not_fragmented() {
 }
 
 mod source_udp;
+
+/// QUIC rides a detour the same way TCP does, so the binding rule holds here
+/// too: a named detour with no path bound must fail the dial rather than fall
+/// back to a socket of this node's own.
+#[tokio::test]
+async fn a_named_detour_must_be_bound_for_quic_too() {
+    let mut node = test_node(1, TEST_PASSWORD);
+    node.detour = Some("front".into());
+    let error = TuicHandler::new()
+        .build_client(&node, None, None)
+        .await
+        .expect_err("an unbound detour must not dial")
+        .to_string();
+    assert!(error.contains("is not bound in this generation"), "{error}");
+}

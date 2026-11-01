@@ -69,7 +69,11 @@ async fn observed_tcp_loopback_preserves_cancelled_reads_payload_and_half_close(
         observed.flush().await.unwrap();
         peer.read_exact(&mut output).await.unwrap();
         assert_eq!(output, [17; 8192]);
-        let sample = read_sample(&observed.inner, Instant::now());
+        let socket = observed
+            .inner
+            .socket()
+            .expect("a fresh ObservedTcp carries a real socket");
+        let sample = read_sample(socket, Instant::now());
         assert!(sample.rtt.is_some_and(|rtt| !rtt.is_zero()));
         assert!(sample.rx_bytes.is_none_or(|bytes| bytes >= 8192));
         assert!(sample.tx_bytes.is_none_or(|bytes| bytes >= 8192));

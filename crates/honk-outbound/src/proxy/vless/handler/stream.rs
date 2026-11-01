@@ -771,7 +771,9 @@ impl VisionSplice {
         if !self.stream.raw_ready() {
             return None;
         }
-        Some(self.stream.inner.inner.get_mut().raw_parts())
+        // `raw_parts` is already optional: a chained carrier has no socket to
+        // lend, so this stays `None` instead of wrapping `None` in `Some`.
+        self.stream.inner.inner.get_mut().raw_parts()
     }
 
     /// Which directions have switched to Direct: `(uplink, downlink)`.

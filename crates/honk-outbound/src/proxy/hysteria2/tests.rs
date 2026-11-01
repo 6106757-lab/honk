@@ -1556,3 +1556,27 @@ fn test_hop_state_rotation() {
 }
 
 mod source_udp;
+
+/// Salamander wraps the datagrams on this client's own socket and port hopping
+/// rotates their destination. A detour owns that socket, so the two cannot be
+/// combined: refusing is better than sending plain QUIC while the configuration
+/// says it is obfuscated.
+#[tokio::test]
+async fn obfs_cannot_ride_a_detour() {
+    let mut node = test_node(1, TEST_PASSWORD);
+    node.hysteria2_mut().unwrap().obfs = Some("obfs-secret".to_string());
+    let generation =
+        std::sync::Arc::new(crate::runtime::OutboundRuntimeRegistry::build(&[]).unwrap());
+    let path = std::sync::Arc::new(crate::proxy::detour::DetourPath::new(
+        std::sync::Arc::new(crate::proxy::ProxyRegistry::new()),
+        generation,
+        uuid::Uuid::new_v4(),
+    ));
+    let error = Hysteria2Handler::new()
+        .build_client(&node, None, Some(&path))
+        .await
+        .expect_err("obfs and a detour cannot both apply")
+        .to_string();
+    assert!(error.contains("cannot ride a detour"), "{error}");
+    assert!(error.contains(&node.name), "{error}");
+}

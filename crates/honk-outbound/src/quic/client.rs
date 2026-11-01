@@ -8,12 +8,14 @@ use anyhow::{Context as _, anyhow};
 use quinn::{ClientConfig, Connection, Endpoint, VarInt};
 use tokio::sync::Mutex;
 
+use crate::proxy::detour::DetourPath;
 use crate::transport_quality::TransportQuality;
 
 use super::endpoint::{clamp_quic_payload_size, client_endpoint_with_mtu};
 use super::metrics::{QuicClientConnectionMonitor, spawn_quic_client_connection_monitor};
 use super::{
-    AdaptiveFlowProfiles, QUIC_SAMPLE_INTERVAL, QuicClient, QuicConnState, State, TrackedConnection,
+    AdaptiveFlowProfiles, PacketTransportEndpoint, QUIC_SAMPLE_INTERVAL, QuicClient, QuicConnState,
+    State, TrackedConnection,
 };
 
 impl<C> State<C> {
@@ -100,11 +102,13 @@ impl<C: Send + Sync + 'static> QuicClient<C> {
             server_name: server_name.into(),
             config,
             endpoint_factory: None,
+            detour: None,
             mtu: 1252,
             flow_control_profiles: Arc::new(AdaptiveFlowProfiles::default()),
             task_scope: crate::runtime::TaskScope::capture(),
             state: Arc::new(Mutex::new(State {
                 endpoint: None,
+                detour_endpoint: None,
                 conn: None,
                 connections: Vec::new(),
                 next_connection_id: 1,
@@ -121,6 +125,16 @@ impl<C: Send + Sync + 'static> QuicClient<C> {
         if let Some(profiles) = profiles {
             self.flow_control_profiles = profiles;
         }
+        self
+    }
+
+    /// Ride out through another node instead of binding a socket here.
+    ///
+    /// The detour is dialled once per handshake, so a redial also gets a fresh
+    /// path; unlike a socket it cannot be built by the synchronous
+    /// [`Self::with_endpoint_factory`], and it takes precedence over it.
+    pub(crate) fn with_detour(mut self, detour: Option<Arc<DetourPath>>) -> Self {
+        self.detour = detour;
         self
     }
 
@@ -250,78 +264,50 @@ impl<C: Send + Sync + 'static> QuicClient<C> {
             anyhow::bail!("resolve {host}: no addresses");
         }
 
-        let raced = crate::address_race::race_resolved_addrs(&addrs, |server_addr| {
-            let ipv6 = server_addr.is_ipv6();
-            let dial_config = self.config.clone();
-            let selection = selection.as_ref();
-            async move {
-                // Every dial binds a fresh socket, so a redial does not inherit the
-                // local port of a black-holed flow: middleboxes keep dropping its NAT
-                // mapping for later connections.
-                let endpoint =
-                    crate::runtime::new_owned_quic_endpoint(|| match &self.endpoint_factory {
-                        Some(factory) => factory(ipv6),
-                        None => client_endpoint_with_mtu(ipv6, self.mtu),
-                    })
-                    .with_context(|| format!("create QUIC endpoint (ipv6={ipv6})"))?;
-                if let Some(selection) = selection {
-                    selection.selected_ip(server_addr.ip());
-                }
-                let mut last_error = None;
-                // Keep retries inside one address job: the shared scheduler
-                // races addresses for this node, never protocol attempts or nodes.
-                for attempt in 1..=3u8 {
-                    let mut observation = crate::runtime::flow_observation::TransportAttempt::start(
-                        Some(server_addr), crate::runtime::flow_observation::ResolutionLocation::Unknown);
-                    let connecting = match endpoint.connect_with(
-                        dial_config.clone(),
-                        server_addr,
-                        &self.server_name,
-                    ) {
-                        Ok(connecting) => connecting,
-                        Err(error) => {
-                            if let Some(observation) = observation.as_mut() {
-                                observation.finish(crate::runtime::flow_observation::TransportStatus::Failed, Some(crate::runtime::flow_observation::TransportError::QuicConnectFailed));
-                            }
-                            return Err(error.into());
-                        }
-                    };
-                    match tokio::time::timeout(connect_timeout, connecting).await {
-                        Err(_) => {
-                            if let Some(observation) = observation.as_mut() {
-                                observation.finish(crate::runtime::flow_observation::TransportStatus::Failed, Some(crate::runtime::flow_observation::TransportError::QuicConnectTimeout));
-                            }
-                            last_error = Some(anyhow!(
-                                "QUIC connect to {server_addr} timed out (attempt {attempt})"
-                            ));
-                        }
-                        Ok(Err(error)) => {
-                            if let Some(observation) = observation.as_mut() {
-                                observation.finish(crate::runtime::flow_observation::TransportStatus::Failed, Some(crate::runtime::flow_observation::TransportError::QuicConnectFailed));
-                            }
-                            last_error = Some(
-                                crate::proxy::NodeFailure(anyhow::Error::new(error).context(
-                                    format!("QUIC connect to {server_addr} (attempt {attempt})"),
-                                ))
-                                .into(),
-                            );
-                        }
-                        Ok(Ok(connection)) => {
-                            if let Some(observation) = observation.as_mut() {
-                                observation.finish(crate::runtime::flow_observation::TransportStatus::Succeeded, None);
-                            }
-                            return Ok((connection, endpoint, ipv6));
-                        }
-                    }
-                }
-                Err(last_error.unwrap_or_else(|| anyhow!("QUIC connect to {server_addr} failed")))
+        // A detour is dialled to one address and hands back a transport pinned
+        // to it, so it replaces the address race rather than joining it: there
+        // is no set of local paths to try, just the one the detour carries.
+        let (conn, endpoint, ipv6, detour) = match self.detour.as_deref() {
+            Some(path) => {
+                let server_addr = *addrs.first().expect("address list checked non-empty");
+                let (packet, conn, endpoint, ipv6) = self
+                    .detour_handshake(path, server_addr, selection.as_ref(), connect_timeout)
+                    .await?;
+                (conn, endpoint, ipv6, Some(packet))
             }
-        })
-        .await;
-        let (conn, endpoint, ipv6) = match raced {
-            Some(result) => result?,
-            None => anyhow::bail!("resolve {host}: no addresses"),
+            None => {
+                let raced = crate::address_race::race_resolved_addrs(&addrs, |server_addr| {
+                    let ipv6 = server_addr.is_ipv6();
+                    let selection = selection.as_ref();
+                    async move {
+                        // Every dial binds a fresh socket, so a redial does not inherit the
+                        // local port of a black-holed flow: middleboxes keep dropping its NAT
+                        // mapping for later connections.
+                        let endpoint = crate::runtime::new_owned_quic_endpoint(|| {
+                            match &self.endpoint_factory {
+                                Some(factory) => factory(ipv6),
+                                None => client_endpoint_with_mtu(ipv6, self.mtu),
+                            }
+                        })
+                        .with_context(|| format!("create QUIC endpoint (ipv6={ipv6})"))?;
+                        if let Some(selection) = selection {
+                            selection.selected_ip(server_addr.ip());
+                        }
+                        let conn = self
+                            .handshake(&endpoint, server_addr, connect_timeout)
+                            .await?;
+                        Ok((conn, endpoint, ipv6))
+                    }
+                })
+                .await;
+                let (conn, endpoint, ipv6) = match raced {
+                    Some(result) => result?,
+                    None => anyhow::bail!("resolve {host}: no addresses"),
+                };
+                (conn, endpoint, ipv6, None)
+            }
         };
+        state.detour_endpoint = detour;
         state.endpoint = Some(endpoint.clone());
         let mut close_guard = ConnectionCloseGuard::new(conn.clone());
         let ctx = match setup(conn.clone()).await {
@@ -350,10 +336,14 @@ impl<C: Send + Sync + 'static> QuicClient<C> {
             owner.clone(),
             state.quality.clone(),
         ));
+        // The detour's adapter workers have to live as long as any connection
+        // that reads through them, so a tracked connection takes its own claim.
+        let detour_keepalive = state.detour_endpoint.clone();
         state.connections.push(TrackedConnection {
             id,
             connection: conn.clone(),
             _endpoint: endpoint.clone(),
+            _detour: detour_keepalive,
             state: owner.clone(),
             monitor: Arc::clone(&monitor),
         });
@@ -366,6 +356,124 @@ impl<C: Send + Sync + 'static> QuicClient<C> {
         );
         state.conn = Some((conn.clone(), Arc::clone(&ctx)));
         Ok((conn, ctx))
+    }
+
+    /// Complete the QUIC handshake on an endpoint already pointed at
+    /// `server_addr`.
+    ///
+    /// Retries stay inside one address job: the shared scheduler races
+    /// addresses for this node, never protocol attempts or nodes.
+    async fn handshake(
+        &self,
+        endpoint: &Endpoint,
+        server_addr: SocketAddr,
+        connect_timeout: Duration,
+    ) -> anyhow::Result<Connection> {
+        let mut last_error = None;
+        for attempt in 1..=3u8 {
+            let mut observation = crate::runtime::flow_observation::TransportAttempt::start(
+                Some(server_addr),
+                crate::runtime::flow_observation::ResolutionLocation::Unknown,
+            );
+            let connecting =
+                match endpoint.connect_with(self.config.clone(), server_addr, &self.server_name) {
+                    Ok(connecting) => connecting,
+                    Err(error) => {
+                        if let Some(observation) = observation.as_mut() {
+                            observation.finish(
+                            crate::runtime::flow_observation::TransportStatus::Failed,
+                            Some(
+                                crate::runtime::flow_observation::TransportError::QuicConnectFailed,
+                            ),
+                        );
+                        }
+                        return Err(error.into());
+                    }
+                };
+            match tokio::time::timeout(connect_timeout, connecting).await {
+                Err(_) => {
+                    if let Some(observation) = observation.as_mut() {
+                        observation.finish(crate::runtime::flow_observation::TransportStatus::Failed, Some(crate::runtime::flow_observation::TransportError::QuicConnectTimeout));
+                    }
+                    last_error = Some(anyhow!(
+                        "QUIC connect to {server_addr} timed out (attempt {attempt})"
+                    ));
+                }
+                Ok(Err(error)) => {
+                    if let Some(observation) = observation.as_mut() {
+                        observation.finish(
+                            crate::runtime::flow_observation::TransportStatus::Failed,
+                            Some(
+                                crate::runtime::flow_observation::TransportError::QuicConnectFailed,
+                            ),
+                        );
+                    }
+                    last_error =
+                        Some(
+                            crate::proxy::NodeFailure(anyhow::Error::new(error).context(format!(
+                                "QUIC connect to {server_addr} (attempt {attempt})"
+                            )))
+                            .into(),
+                        );
+                }
+                Ok(Ok(connection)) => {
+                    if let Some(observation) = observation.as_mut() {
+                        observation.finish(
+                            crate::runtime::flow_observation::TransportStatus::Succeeded,
+                            None,
+                        );
+                    }
+                    return Ok(connection);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("QUIC connect to {server_addr} failed")))
+    }
+
+    /// Run QUIC over the framed UDP transport a detour hands back for
+    /// `server_addr`.
+    ///
+    /// The transport is pinned to that one address and owned by the endpoint
+    /// built on it, so both are returned: dropping the packet endpoint stops
+    /// the adapter workers the socket reads and writes through.
+    ///
+    /// The endpoint carries the safe 1252-byte payload cap rather than the
+    /// protocol's advertised MTU: a detour adds framing of its own, and an
+    /// oversized datagram that the path silently drops costs more than the
+    /// bytes a larger one would save.
+    async fn detour_handshake(
+        &self,
+        detour: &crate::proxy::detour::DetourPath,
+        server_addr: SocketAddr,
+        selection: Option<&crate::runtime::flow_observation::LookupSelection>,
+        connect_timeout: Duration,
+    ) -> anyhow::Result<(
+        Arc<PacketTransportEndpoint>,
+        Connection,
+        crate::runtime::RuntimeEndpoint,
+        bool,
+    )> {
+        if let Some(selection) = selection {
+            selection.selected_ip(server_addr.ip());
+        }
+        let transport = detour
+            .connect_udp(
+                server_addr,
+                Some(self.server_host.as_str()),
+                connect_timeout,
+            )
+            .await
+            .with_context(|| format!("detour could not carry UDP to {server_addr}"))?;
+        let packet = Arc::new(
+            crate::quic::packet_transport_endpoint(transport, server_addr)
+                .with_context(|| format!("QUIC endpoint over the detour to {server_addr}"))?,
+        );
+        let endpoint = crate::runtime::adopt_owned_quic_endpoint(packet.endpoint().clone())
+            .with_context(|| format!("lease the detour endpoint to {server_addr}"))?;
+        let conn = self
+            .handshake(packet.endpoint(), server_addr, connect_timeout)
+            .await?;
+        Ok((packet, conn, endpoint, server_addr.is_ipv6()))
     }
 
     /// Drop the cached connection if it is `conn`, forcing the next
@@ -387,6 +495,7 @@ impl<C: Send + Sync + 'static> QuicClient<C> {
         let mut state = self.state.lock().await;
         state.conn = None;
         state.endpoint = None;
+        state.detour_endpoint = None;
         state.prune_connections();
     }
 
@@ -395,7 +504,7 @@ impl<C: Send + Sync + 'static> QuicClient<C> {
     /// in-flight dial's single-flight section so its late connection is also
     /// closed; a try-lock skip would leak that connection and endpoint driver.
     pub async fn force_close(&self) {
-        let endpoint = {
+        let (endpoint, detour) = {
             let mut state = self.state.lock().await;
             state.closed = true;
             state.conn = None;
@@ -404,10 +513,13 @@ impl<C: Send + Sync + 'static> QuicClient<C> {
                     .connection
                     .close(VarInt::from_u32(0), b"generation shutdown");
             }
-            state.endpoint.take()
+            (state.endpoint.take(), state.detour_endpoint.take())
         };
         if let Some(endpoint) = endpoint {
             endpoint.close(VarInt::from_u32(0), b"generation shutdown");
+        }
+        if let Some(detour) = detour {
+            detour.close(Duration::ZERO).await;
         }
     }
 }

@@ -171,14 +171,7 @@ pub(crate) async fn maybe_tls_wrap_concrete(
     // A node that names a detour must ride it. Dialling the direct path
     // because the binding is missing would send its traffic out of the real
     // interface while looking like a normal connection.
-    if detour.is_none() {
-        if let Some(name) = node.detour_name() {
-            anyhow::bail!(
-                "node {}: detour {name:?} is not bound in this generation",
-                node.name
-            );
-        }
-    }
+    crate::proxy::detour::ensure_bound(node, detour)?;
     let address = endpoint_address(node);
     let initial_tcp = async {
         if let Some(path) = detour {
@@ -192,7 +185,10 @@ pub(crate) async fn maybe_tls_wrap_concrete(
                         node.name
                     )
                 })?;
-            return Ok(Carrier::Chained(stream));
+            // The block's error type has to be pinned here: the detour dial
+            // returns before the surrounding `?` conversions have anything to
+            // unify against.
+            return Ok::<_, anyhow::Error>(Carrier::Chained(stream));
         }
         match tcp {
             Some(tcp) => {

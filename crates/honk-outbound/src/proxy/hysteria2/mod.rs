@@ -61,6 +61,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 use tracing::debug;
 
+use crate::proxy::detour::DetourPath;
 use crate::quic::defrag::Defragmenter;
 use crate::quic::{QuicClient, QuicConnState, now_secs};
 use crate::transport_quality::TransportQuality;
@@ -573,7 +574,9 @@ impl Hysteria2Handler {
         &self,
         node: &Node,
         profiles: Option<Arc<crate::quic::AdaptiveFlowProfiles>>,
+        detour: Option<&Arc<DetourPath>>,
     ) -> anyhow::Result<Arc<Hy2Client>> {
+        crate::proxy::detour::ensure_bound(node, detour.map(Arc::as_ref))?;
         let hy2 = node.hysteria2().unwrap();
         let password = hy2.auth.as_deref().unwrap_or("");
         let obfs = hy2.obfs.as_deref().filter(|s| !s.is_empty());
@@ -600,6 +603,17 @@ impl Hysteria2Handler {
                 ))
             })
             .transpose()?;
+        // Salamander and port hopping are properties of the socket this client
+        // dials on: obfuscation wraps the UDP datagrams on the wire and hopping
+        // rotates their destination port. A detour owns that socket, so neither
+        // survives the trip — the server would see plain QUIC arriving from the
+        // detour node, which is not what the configuration asked for.
+        anyhow::ensure!(
+            detour.is_none() || (obfs.is_none() && hop.is_none()),
+            "Hysteria2 node {}: obfs and port hopping need a socket of their own, \
+             so they cannot ride a detour",
+            node.name
+        );
         let server_name = hy2
             .quic
             .tls
@@ -634,7 +648,8 @@ impl Hysteria2Handler {
         )
         .await?;
         let quic = QuicClient::new(node.host().to_string(), node.port, server_name, config)
-            .with_flow_control_profiles(profiles);
+            .with_flow_control_profiles(profiles)
+            .with_detour(detour.cloned());
         let mtu = hy2.quic.mtu.unwrap_or(1252);
         let quic = quic.with_max_udp_payload_size(mtu);
         let quic = match (obfs, hop) {
@@ -658,7 +673,9 @@ impl Hysteria2Handler {
     ) -> anyhow::Result<Arc<Hy2Client>> {
         let profiles = runtime.quic_flow_control_profiles()?;
         runtime
-            .quic_client(|| self.build_client(runtime.node.as_ref(), Some(profiles)))
+            .quic_client(|| {
+                self.build_client(runtime.node.as_ref(), Some(profiles), runtime.detour())
+            })
             .await
     }
 }
@@ -793,7 +810,7 @@ impl TcpOutbound for Hysteria2Handler {
         target_domain: Option<&str>,
         connect_timeout: Duration,
     ) -> anyhow::Result<ProxyStream> {
-        let client = self.build_client(node, None).await?;
+        let client = self.build_client(node, None, None).await?;
         self.dial_via_client(client, target, target_domain, connect_timeout)
             .await
     }
@@ -831,7 +848,7 @@ impl PacketOutbound for Hysteria2Handler {
         target_domain: Option<&str>,
         connect_timeout: Duration,
     ) -> anyhow::Result<Arc<dyn PacketTransport>> {
-        let client = self.build_client(node, None).await?;
+        let client = self.build_client(node, None, None).await?;
         Ok(self
             .udp_transport_via_client(client, target, target_domain, connect_timeout)
             .await?)
@@ -873,7 +890,7 @@ impl PacketOutbound for Hysteria2Handler {
 #[async_trait]
 impl ProbeableOutbound for Hysteria2Handler {
     async fn test_connectivity(&self, node: &Node) -> bool {
-        match self.build_client(node, None).await {
+        match self.build_client(node, None, None).await {
             Ok(client) => client.connection(Duration::from_secs(5)).await.is_ok(),
             Err(e) => {
                 debug!(

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use honk_config::node::Node;
 use tracing::debug;
 
+use crate::proxy::detour::DetourPath;
 use crate::quic::{QuicClient, QuicConnState, now_secs, recv_read_exact as read_exact};
 use crate::transport_quality::TransportQuality;
 
@@ -183,7 +184,9 @@ impl JuicityHandler {
         &self,
         node: &Node,
         profiles: Option<Arc<crate::quic::AdaptiveFlowProfiles>>,
+        detour: Option<&Arc<DetourPath>>,
     ) -> anyhow::Result<Arc<JuicityClient>> {
+        crate::proxy::detour::ensure_bound(node, detour.map(Arc::as_ref))?;
         let juicity = node.juicity().unwrap();
         let uuid_str = juicity
             .uuid
@@ -219,6 +222,7 @@ impl JuicityHandler {
         Ok(Arc::new(JuicityClient {
             quic: QuicClient::new(node.host().to_string(), node.port, server_name, config)
                 .with_flow_control_profiles(profiles)
+                .with_detour(detour.cloned())
                 .with_max_udp_payload_size(juicity.quic.mtu.unwrap_or(1252)),
             uuid: *uuid.as_bytes(),
             password,
@@ -258,7 +262,9 @@ impl JuicityHandler {
     ) -> anyhow::Result<Arc<JuicityClient>> {
         let profiles = runtime.quic_flow_control_profiles()?;
         runtime
-            .quic_client(|| self.build_client(runtime.node.as_ref(), Some(profiles)))
+            .quic_client(|| {
+                self.build_client(runtime.node.as_ref(), Some(profiles), runtime.detour())
+            })
             .await
     }
 
@@ -404,7 +410,7 @@ impl TcpOutbound for JuicityHandler {
         target_domain: Option<&str>,
         connect_timeout: Duration,
     ) -> anyhow::Result<ProxyStream> {
-        let client = self.build_client(node, None).await?;
+        let client = self.build_client(node, None, None).await?;
         self.dial_via_client(client, target, target_domain, connect_timeout)
             .await
     }
@@ -457,7 +463,7 @@ impl PacketOutbound for JuicityHandler {
         target_domain: Option<&str>,
         connect_timeout: Duration,
     ) -> anyhow::Result<Arc<dyn PacketTransport>> {
-        let client = self.build_client(node, None).await?;
+        let client = self.build_client(node, None, None).await?;
         Ok(self
             .udp_transport_via_client(client, target, target_domain, connect_timeout, true)
             .await?)
@@ -500,7 +506,7 @@ impl PacketOutbound for JuicityHandler {
 #[async_trait]
 impl ProbeableOutbound for JuicityHandler {
     async fn test_connectivity(&self, node: &Node) -> bool {
-        match self.build_client(node, None).await {
+        match self.build_client(node, None, None).await {
             Ok(client) => match client.connection(Duration::from_secs(5)).await {
                 Ok((conn, _)) => crate::quic::survives_auth_close_window(&conn).await,
                 Err(_) => false,

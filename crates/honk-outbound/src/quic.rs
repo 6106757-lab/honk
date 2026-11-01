@@ -461,6 +461,10 @@ struct TrackedConnection<C> {
     id: u64,
     connection: Connection,
     _endpoint: crate::runtime::RuntimeEndpoint,
+    /// The packet-transport endpoint that carries this connection when the node
+    /// rides a detour. Its worker tasks read and write the socket the
+    /// connection runs on, so they have to outlive it.
+    _detour: Option<Arc<PacketTransportEndpoint>>,
     state: Weak<C>,
     monitor: Arc<QuicClientConnectionMonitor>,
 }
@@ -471,6 +475,10 @@ struct State<C> {
     /// keeps its port bound while the next dial binds, so that dial gets a different
     /// port; [`QuicClient::force_close`] also closes it.
     endpoint: Option<crate::runtime::RuntimeEndpoint>,
+    /// The packet-transport endpoint of the most recent detour dial. Tracked
+    /// connections hold their own clone, so clearing this only ends the
+    /// client's own claim on it.
+    detour_endpoint: Option<Arc<PacketTransportEndpoint>>,
     conn: Option<(Connection, Arc<C>)>,
     connections: Vec<TrackedConnection<C>>,
     next_connection_id: u64,
@@ -503,9 +511,21 @@ pub struct QuicClient<C> {
     /// run QUIC over a salamander-obfuscated socket; when unset the plain
     /// marked socket from [`client_endpoint`] is used.
     endpoint_factory: Option<Arc<dyn Fn(bool) -> io::Result<Endpoint> + Send + Sync>>,
+    /// The node this one rides out through, when it names one. QUIC runs over
+    /// the framed UDP transport that node hands back instead of a socket of
+    /// its own; the dial is async, so it cannot go through the sync factory.
+    detour: Option<Arc<crate::proxy::detour::DetourPath>>,
     /// Advertised `max_udp_payload_size` cap for the default endpoint (see
     /// [`client_endpoint`] for the safe 1252 default).
     mtu: u16,
+    /// The node this one rides out through, when it names one.
+    ///
+    /// QUIC then runs over the framed UDP transport that node hands back
+    /// instead of a socket of its own. The dial is async, so it cannot go
+    /// through [`Self::endpoint_factory`]; when both are set the detour wins,
+    /// because a node that names a path out is not reaching the server on its
+    /// own socket at all.
+    detour: Option<Arc<crate::proxy::detour::DetourPath>>,
     flow_control_profiles: Arc<AdaptiveFlowProfiles>,
     state: Arc<Mutex<State<C>>>,
     task_scope: crate::runtime::TaskScope,
