@@ -49,14 +49,29 @@ impl MasqueHandler {
     }
 }
 
-/// Generation-owned MASQUE state: one IP tunnel per node.
+/// Generation-owned MASQUE state: one IP tunnel per path.
 ///
-/// Every flow on the node shares this tunnel — a MASQUE endpoint assigns one
-/// address per CONNECT, and each dialled socket simply binds it as its source.
-/// Establishing it lazily keeps a node that never carries traffic from owning
-/// a TUN device.
+/// Every flow on the node shares the tunnel for the path it takes — a MASQUE
+/// endpoint assigns one address per CONNECT, and each dialled socket simply
+/// binds it as its source. Establishing it lazily keeps a node that never
+/// carries traffic from owning a TUN device.
+///
+/// One per path rather than one per node, because the tunnel *is* the path:
+/// its carrier is the connection to the endpoint, and a carrier opened over
+/// the node's own path is not one a flow that was told to ride a detour may
+/// use. Each path therefore gets its own TUN device and its own default-route
+/// metric, which is what stops the two from covering each other.
 pub struct MasqueRuntime {
-    tunnel: Mutex<Option<Arc<http2::MasqueTunnel>>>,
+    tunnels: Mutex<std::collections::HashMap<Option<String>, TunnelSlot>>,
+}
+
+/// A live tunnel and the device slot it holds.
+///
+/// The slot is kept so a name and a route metric are never handed out twice
+/// while a live tunnel still answers to them.
+struct TunnelSlot {
+    slot: usize,
+    tunnel: Arc<http2::MasqueTunnel>,
 }
 
 impl Default for MasqueRuntime {
@@ -78,13 +93,11 @@ impl fmt::Debug for MasqueRuntime {
 impl MasqueRuntime {
     pub fn new() -> Self {
         Self {
-            tunnel: Mutex::new(None),
+            tunnels: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
-    /// The node's tunnel, opening it on first use. Concurrent callers share one
-    /// CONNECT: a second TUN device for the same node would fight over the
-    /// assigned address.
+    /// The node's own tunnel, opening it on first use.
     ///
     /// The detour is read from the node's runtime rather than kept here: the
     /// generation binds it in one place, so a carrier can only ever take the
@@ -94,38 +107,60 @@ impl MasqueRuntime {
         runtime: &NodeRuntime,
         connect_timeout: Duration,
     ) -> anyhow::Result<Arc<http2::MasqueTunnel>> {
-        let mut guard = self.tunnel.lock().await;
-        if let Some(tunnel) = guard.as_ref() {
-            if tunnel.is_alive() {
-                return Ok(Arc::clone(tunnel));
-            }
-            // The carrier died: drop the tunnel so its TUN device goes with
-            // it, then rebuild. Cached TUN devices outlive their endpoint.
-            guard.take();
+        self.tunnel_for(runtime, connect_timeout, runtime.detour().map(Arc::as_ref))
+            .await
+    }
+
+    /// The tunnel for a path the caller names, which is how a group's detour
+    /// reaches a MASQUE member.
+    ///
+    /// Callers on the same path share one CONNECT. Callers on different paths
+    /// get different tunnels, each with its own TUN device and route metric.
+    pub async fn tunnel_for(
+        &self,
+        runtime: &NodeRuntime,
+        connect_timeout: Duration,
+        detour: Option<&crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<Arc<http2::MasqueTunnel>> {
+        let key = detour.map(|path| path.key());
+        let mut guard = self.tunnels.lock().await;
+        if guard.get(&key).is_some_and(|entry| entry.tunnel.is_alive()) {
+            return Ok(Arc::clone(&guard[&key].tunnel));
         }
+        // The carrier died: drop the tunnel so its TUN device goes with it,
+        // then rebuild. Cached TUN devices outlive their endpoint.
+        guard.remove(&key);
+        // The lowest slot nobody is holding.
+        let slot = (0..=guard.len())
+            .find(|candidate| !guard.values().any(|entry| entry.slot == *candidate))
+            .unwrap_or(guard.len());
         let tunnel = Arc::new(
-            carrier::open_tunnel(
-                runtime.node.as_ref(),
-                connect_timeout,
-                runtime.detour().map(Arc::as_ref),
-            )
-            .await?,
+            carrier::open_tunnel(runtime.node.as_ref(), connect_timeout, detour, slot).await?,
         );
-        *guard = Some(Arc::clone(&tunnel));
+        guard.insert(
+            key,
+            TunnelSlot {
+                slot,
+                tunnel: Arc::clone(&tunnel),
+            },
+        );
         Ok(tunnel)
     }
 
-    /// `Some(1)` when the tunnel is up, `Some(0)` when it is not, and `None`
-    /// while another task is mid-CONNECT.
+    /// How many tunnels are up, and `None` while another task is mid-CONNECT.
     pub fn tunnel_count(&self) -> Option<usize> {
-        let guard = self.tunnel.try_lock().ok()?;
-        let live = guard.as_ref().is_some_and(|tunnel| tunnel.is_alive());
-        Some(usize::from(live))
+        let guard = self.tunnels.try_lock().ok()?;
+        Some(
+            guard
+                .values()
+                .filter(|entry| entry.tunnel.is_alive())
+                .count(),
+        )
     }
 
-    /// Drop the tunnel, deleting its TUN device.
+    /// Drop the tunnels, deleting their TUN devices.
     pub async fn close(&self) {
-        self.tunnel.lock().await.take();
+        self.tunnels.lock().await.clear();
     }
 }
 
@@ -167,6 +202,51 @@ impl TcpOutbound for MasqueHandler {
     ) -> anyhow::Result<ProxyStream> {
         let masque = masque_runtime(runtime.as_ref())?;
         let tunnel = masque.tunnel(runtime.as_ref(), connect_timeout).await?;
+        let source = tunnel.source_for(target).ok_or_else(|| {
+            anyhow::anyhow!(
+                "masque node {} has no {} source address for {target}",
+                runtime.node.name,
+                if target.is_ipv4() { "IPv4" } else { "IPv6" },
+            )
+        })?;
+        let stream = bind::connect_via_tun(tunnel.tun_name(), source, target, connect_timeout)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "masque node {} cannot reach {target} through {}: {error}",
+                    runtime.node.name,
+                    tunnel.tun_name()
+                )
+            })?;
+        crate::runtime::flow_observation::milestone(
+            crate::runtime::flow_observation::Milestone::TransportReady,
+        );
+        Ok(ProxyStream {
+            stream: Box::new(stream),
+            target_addr: target,
+            target_domain: target_domain.map(str::to_string),
+        })
+    }
+
+    /// The same dial over a detour the caller names.
+    ///
+    /// The tunnel *is* the path — its carrier is the one connection to the
+    /// endpoint that every flow on the node shares — so a flow that was told
+    /// to ride a detour cannot use the tunnel that was opened over the
+    /// node's own path. It gets the tunnel for *this* path, which the node
+    /// opens on its own device if it does not have one yet.
+    async fn dial_runtime_detoured(
+        &self,
+        runtime: Arc<NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<ProxyStream> {
+        let masque = masque_runtime(runtime.as_ref())?;
+        let tunnel = masque
+            .tunnel_for(runtime.as_ref(), connect_timeout, Some(detour.as_ref()))
+            .await?;
         let source = tunnel.source_for(target).ok_or_else(|| {
             anyhow::anyhow!(
                 "masque node {} has no {} source address for {target}",

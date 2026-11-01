@@ -827,6 +827,28 @@ impl TcpOutbound for Hysteria2Handler {
             .await
     }
 
+    async fn dial_runtime_detoured(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: Duration,
+        detour: &Arc<DetourPath>,
+    ) -> anyhow::Result<ProxyStream> {
+        {
+            // A QUIC connection carries every flow that shares it, and the cached
+            // one was opened over the path its own caller had. A detoured dial
+            // therefore builds its own: a handshake per connection rather than a
+            // connection that belongs to somebody else's path.
+            let profiles = Some(runtime.quic_flow_control_profiles()?);
+            let client = self
+                .build_client(runtime.node.as_ref(), profiles, Some(detour))
+                .await?;
+            self.dial_via_client(client, target, target_domain, connect_timeout)
+                .await
+        }
+    }
+
     async fn dial_with_tcp(
         &self,
         _node: &Node,

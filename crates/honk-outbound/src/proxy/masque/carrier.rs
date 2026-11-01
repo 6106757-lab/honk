@@ -34,13 +34,14 @@ pub async fn open_tunnel(
     node: &Node,
     connect_timeout: Duration,
     detour: Option<&DetourPath>,
+    slot: usize,
 ) -> anyhow::Result<MasqueTunnel> {
     let config = node
         .masque()
         .ok_or_else(|| anyhow::anyhow!("masque node {} has no masque config", node.name))?;
     let network = config.network();
     match network {
-        "h2" | "http2" | "" => open_h2(node, connect_timeout, detour).await,
+        "h2" | "http2" | "" => open_h2(node, connect_timeout, detour, slot).await,
         "quic" | "h3" | "http3" => anyhow::bail!(
             "masque node {}: `network: quic` needs HTTP/3 connect-ip, which honk does not \
              carry yet; use `network: h2`",
@@ -55,30 +56,37 @@ async fn open_h2(
     node: &Node,
     connect_timeout: Duration,
     detour: Option<&DetourPath>,
+    slot: usize,
 ) -> anyhow::Result<MasqueTunnel> {
     let config = node
         .masque()
         .ok_or_else(|| anyhow::anyhow!("masque node {} has no masque config", node.name))?;
     let address = endpoint_address(node);
-    let tcp = match (node.detour_name(), detour) {
-        (Some(name), Some(dialer)) => {
+    // The caller's detour wins over the node's, and it counts even when the
+    // node names none. Matching `(None, _)` here used to dial direct, which
+    // quietly dropped a detour a group had asked for — the one outcome this
+    // is meant to make impossible.
+    let tcp = match detour {
+        Some(dialer) => {
             let endpoint = resolve_endpoint(&address).await?;
             dialer
                 .connect(endpoint, connect_timeout)
                 .await
                 .map_err(|error| {
                     anyhow::anyhow!(
-                        "masque node {}: detour {name:?} could not reach {address}: {error}",
+                        "masque node {}: detour could not reach {address}: {error}",
                         node.name
                     )
                 })?
         }
-        (Some(name), None) => anyhow::bail!(
-            "masque node {}: detour {name:?} is not bound in this generation",
-            node.name
-        ),
-        (None, _) => Box::new(crate::util::connect_outbound(&address, connect_timeout).await?)
-            as Box<dyn AsyncReadWrite>,
+        None => match node.detour_name() {
+            Some(name) => anyhow::bail!(
+                "masque node {}: detour {name:?} is not bound in this generation",
+                node.name
+            ),
+            None => Box::new(crate::util::connect_outbound(&address, connect_timeout).await?)
+                as Box<dyn AsyncReadWrite>,
+        },
     };
     let identity = WarpIdentity::build(node)?;
     let tls = identity.connect(tcp, connect_timeout).await?;
@@ -89,13 +97,13 @@ async fn open_h2(
     let io = crate::tls::BatchRead::new(tls);
 
     let mtu = config.mtu.map(u32::from).unwrap_or(DEFAULT_MTU);
-    let tun_name = tun_name(node);
+    let tun_name = tun_name(node, slot);
     let preferred = tunnel_addresses(node);
     tracing::debug!(
         "masque: opening connect-ip tunnel to {address} via h2 on {tun_name} \
          (mtu {mtu}, addresses {preferred:?})"
     );
-    MasqueTunnel::open_h2(io, mtu, &tun_name, &preferred).await
+    MasqueTunnel::open_h2(io, mtu, &tun_name, &preferred, slot).await
 }
 
 /// Resolve the endpoint literal to an address a detour can dial.
@@ -133,9 +141,17 @@ fn tunnel_addresses(node: &Node) -> Vec<IpAddr> {
         .collect()
 }
 
-/// Interface name for a node's TUN device. `IFNAMSIZ` is 16 including the
-/// terminator, so the suffix is trimmed to fit.
-fn tun_name(node: &Node) -> String {
+/// Interface name for one of a node's TUN devices. `IFNAMSIZ` is 16
+/// including the terminator, so the suffix is trimmed to fit.
+///
+/// A node carries one device per path, not one device in total: the tunnel
+/// over its own path and the one a group asked for are different carriers to
+/// the same endpoint, and each needs a device of its own. Slot 0 keeps the
+/// name the node has always had, so a node with a single path is unchanged.
+fn tun_name(node: &Node, slot: usize) -> String {
     let suffix = node.id.as_u128() & 0xffff;
-    format!("masq{suffix:04x}")
+    match slot {
+        0 => format!("masq{suffix:04x}"),
+        other => format!("masq{suffix:04x}{other}"),
+    }
 }

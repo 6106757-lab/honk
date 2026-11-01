@@ -1776,6 +1776,71 @@ impl TcpOutbound for AnyTlsHandler {
             target_domain: target_domain.map(str::to_string),
         })
     }
+
+    /// The same dial carried by a detour the caller names, which is how a
+    /// group's detour reaches an AnyTLS member.
+    ///
+    /// A session is a carrier that many flows ride, and it belongs to the
+    /// path that opened it: taking one from the node's pool would send this
+    /// flow down whichever path that earlier caller had. The detoured dial
+    /// therefore gets a pool of its own and opens its own session, which
+    /// costs a handshake per connection instead of multiplexing. Sharing
+    /// sessions between flows of the same front is a later optimisation;
+    /// sharing them with flows of a different path is not.
+    async fn dial_runtime_detoured(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<ProxyStream> {
+        let pool = Arc::new(AnyTlsPool::new());
+        let node = Arc::clone(&runtime.node);
+        let dial_node = Arc::clone(&node);
+        let dial_addr = format!("{}:{}", node.host(), node.port);
+        let dial_runtime = Arc::clone(&runtime);
+        let padding_state = pool.padding_state();
+        let inbound_payload_budget = pool.inbound_payload_budget();
+        let chained = Arc::clone(detour);
+        let domain = target_domain.map(str::to_string);
+        let stream = pool
+            .open_with(
+                move || {
+                    let node = Arc::clone(&dial_node);
+                    let addr = dial_addr.clone();
+                    let runtime = Arc::clone(&dial_runtime);
+                    let padding_state = Arc::clone(&padding_state);
+                    let inbound_payload_budget = Arc::clone(&inbound_payload_budget);
+                    let chained = Arc::clone(&chained);
+                    async move {
+                        let tls_connector = runtime.anytls_tls_connector()?;
+                        runtime
+                            .transport_quality()
+                            .scope(dial_session(
+                                &node,
+                                &addr,
+                                connect_timeout,
+                                Some(tls_connector),
+                                padding_state,
+                                inbound_payload_budget,
+                                Some(chained),
+                            ))
+                            .await
+                    }
+                },
+                move |session, permit| {
+                    let domain = domain.clone();
+                    async move { session.open_stream(permit, target, domain.as_deref()).await }
+                },
+            )
+            .await?;
+        Ok(ProxyStream {
+            stream: Box::new(stream),
+            target_addr: target,
+            target_domain: target_domain.map(str::to_string),
+        })
+    }
 }
 
 #[async_trait]

@@ -90,6 +90,7 @@ impl MasqueTunnel {
         mtu: u32,
         tun_name: &str,
         preferred: &[IpAddr],
+        slot: usize,
     ) -> anyhow::Result<Self>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -165,7 +166,7 @@ impl MasqueTunnel {
         }
 
         let tun = Arc::new(TunDevice::create(tun_name)?);
-        tun.configure(&addresses, mtu)?;
+        tun.configure(&addresses, mtu, slot)?;
 
         // TUN -> endpoint. Waiting on the device alone is not enough: a quiet
         // tunnel never wakes the reader, so the task also waits to be told the

@@ -81,9 +81,18 @@ impl TunDevice {
     /// lookup for such a socket, constrained to the bound device. Its metric is
     /// deliberately enormous so it never outranks the system's real default
     /// route — only sockets bound to this device pick it.
-    pub fn configure(&self, addresses: &[IpAddr], mtu: u32) -> io::Result<()> {
+    ///
+    /// `slot` separates one node's tunnels from each other. A node may carry
+    /// more than one path — its own, and one a group asked for — and each
+    /// needs a default route of its own: `replace` with a shared metric would
+    /// have the second tunnel overwrite the first's, leaving sockets pinned
+    /// to the first device with nowhere to go. Distinct metrics let the
+    /// lookup, which is already constrained to one device, find that
+    /// device's route.
+    pub fn configure(&self, addresses: &[IpAddr], mtu: u32, slot: usize) -> io::Result<()> {
         let mtu = mtu.to_string();
-        let metric = TUN_ROUTE_METRIC.to_string();
+        let step = u32::try_from(slot).unwrap_or(0);
+        let metric = TUN_ROUTE_METRIC.saturating_add(step).to_string();
         ip(&["link", "set", "dev", &self.name, "mtu", &mtu])?;
         for address in addresses {
             // A host route is all the tunnel needs: it is a source address the

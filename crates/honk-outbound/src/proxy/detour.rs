@@ -129,6 +129,20 @@ impl DetourPath {
         }
     }
 
+    /// A stable name for the path this detour takes.
+    ///
+    /// Something a node owns one of — a MASQUE tunnel, say — has to be one
+    /// per path rather than one per node, because the one that was opened
+    /// over this path is not the one a flow on another path may use. A group
+    /// is keyed by name: it is resolved per dial, so a tunnel outlives a
+    /// change of member rather than being rebuilt under the flows riding it.
+    pub(crate) fn key(&self) -> String {
+        match &self.target {
+            DetourTarget::Node(node_id) => format!("node:{node_id}"),
+            DetourTarget::Group { name, .. } => format!("group:{name}"),
+        }
+    }
+
     /// The node that carries this dial, for this network.
     fn resolve(&self, domain: ProbeDomain) -> anyhow::Result<uuid::Uuid> {
         match &self.target {
