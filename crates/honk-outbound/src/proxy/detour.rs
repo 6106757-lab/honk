@@ -16,6 +16,18 @@ use std::time::Duration;
 use crate::proxy::{AsyncReadWrite, PacketTransport, ProxyRegistry};
 use crate::runtime::OutboundRuntimeRegistry;
 
+/// Resolve a `host:port` pair to an address a detour can dial.
+///
+/// The detour is dialled by address, so the name has to be resolved here
+/// rather than inside the detour node: only this end knows which host the
+/// node's traffic is actually for.
+pub async fn resolve_endpoint(address: &str) -> anyhow::Result<SocketAddr> {
+    tokio::net::lookup_host(address)
+        .await?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("endpoint {address} resolved to nothing"))
+}
+
 /// The node this one dials through, pinned to the generation that built it.
 ///
 /// Dials stay inside that generation: a retired one refuses them, and the node

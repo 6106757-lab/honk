@@ -219,7 +219,8 @@ async fn serve(listener: &TcpListener, reply: Reply, key: &PKey<Private>) -> Cap
 }
 
 async fn exchange(node: &Node, tcp: Option<TcpStream>) -> anyhow::Result<Vec<u8>> {
-    let MaybeTls::Tls(mut tls) = maybe_tls_wrap_concrete(node, tcp, CONNECT_TIMEOUT).await? else {
+    let MaybeTls::Tls(mut tls) = maybe_tls_wrap_concrete(node, tcp, CONNECT_TIMEOUT, None).await?
+    else {
         panic!("REALITY returned plaintext");
     };
     tls.write_all(CLIENT_DATA).await?;
@@ -395,10 +396,9 @@ async fn cancelling_classical_handshake_drops_the_replacement_socket() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let key = PKey::generate(Id::X25519).unwrap();
         let node = node(listener.local_addr().unwrap(), &key, false);
-        let client =
-            tokio::spawn(
-                async move { maybe_tls_wrap_concrete(&node, None, CONNECT_TIMEOUT).await },
-            );
+        let client = tokio::spawn(async move {
+            maybe_tls_wrap_concrete(&node, None, CONNECT_TIMEOUT, None).await
+        });
         serve(&listener, Reply::Mask, &key).await;
         let (mut tcp, _) = listener.accept().await.unwrap();
         read_hello(&mut tcp).await;
@@ -421,7 +421,7 @@ async fn setup_deadline_includes_the_replacement_handshake() {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let client = tokio::spawn(async move {
             started_tx.send(tokio::time::Instant::now()).unwrap();
-            maybe_tls_wrap_concrete(&node, None, CONNECT_TIMEOUT).await
+            maybe_tls_wrap_concrete(&node, None, CONNECT_TIMEOUT, None).await
         });
         let started = started_rx.await.unwrap();
         tokio::time::sleep(CONNECT_TIMEOUT).await;
@@ -463,7 +463,7 @@ async fn setup_deadline_includes_initial_dial_admission() {
     let _occupied = registry.acquire_dial_permit().await;
     let result = timeout(
         4 * CONNECT_TIMEOUT,
-        registry.scope_dials(maybe_tls_wrap_concrete(&node, None, CONNECT_TIMEOUT)),
+        registry.scope_dials(maybe_tls_wrap_concrete(&node, None, CONNECT_TIMEOUT, None)),
     )
     .await
     .expect("REALITY setup must time out before admission becomes available");

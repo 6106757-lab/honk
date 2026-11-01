@@ -210,7 +210,7 @@ impl ProxyStream {
             return Some(tcp.as_raw_fd());
         }
         if let Some(tcp) = any.downcast_ref::<crate::transport_quality::tcp::ObservedTcp>() {
-            return Some(tcp.as_raw_fd());
+            return tcp.raw_fd();
         }
         if let Some(tls) = any.downcast_ref::<tokio_boring::SslStream<tokio::net::TcpStream>>() {
             return Some(tls.get_ref().as_raw_fd());

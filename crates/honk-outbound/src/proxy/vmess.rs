@@ -480,7 +480,7 @@ impl TcpOutbound for VmessHandler {
     ) -> anyhow::Result<ProxyStream> {
         let uuid = uuid(node)?;
 
-        let stream = super::transport::wrap_transport(node, None, connect_timeout).await?;
+        let stream = super::transport::wrap_transport(node, None, connect_timeout, None).await?;
         Self::perform_handshake(uuid.as_bytes(), stream, target, target_domain)
     }
 
@@ -494,7 +494,8 @@ impl TcpOutbound for VmessHandler {
     ) -> anyhow::Result<ProxyStream> {
         let uuid = uuid(node)?;
 
-        let stream = super::transport::wrap_transport(node, Some(tcp), connect_timeout).await?;
+        let stream =
+            super::transport::wrap_transport(node, Some(tcp), connect_timeout, None).await?;
         Self::perform_handshake(uuid.as_bytes(), stream, target, target_domain)
     }
 
@@ -506,8 +507,13 @@ impl TcpOutbound for VmessHandler {
         connect_timeout: std::time::Duration,
     ) -> anyhow::Result<ProxyStream> {
         let uuid = uuid(&runtime.node)?;
-        let stream =
-            super::transport::wrap_transport_runtime(&runtime, None, connect_timeout).await?;
+        let stream = super::transport::wrap_transport_runtime(
+            &runtime,
+            None,
+            connect_timeout,
+            runtime.detour().map(Arc::as_ref),
+        )
+        .await?;
         Self::perform_handshake(uuid.as_bytes(), stream, target, target_domain)
     }
 }

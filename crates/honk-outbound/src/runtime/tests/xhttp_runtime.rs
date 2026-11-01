@@ -542,6 +542,7 @@ async fn exhausted_xhttp_admission_preserves_capacity_and_cancellation_feedback(
                     &runtime,
                     None,
                     Duration::from_secs(30),
+                    None,
                 )
                 .await
             } else {
@@ -549,6 +550,7 @@ async fn exhausted_xhttp_admission_preserves_capacity_and_cancellation_feedback(
                     &runtime,
                     None,
                     Duration::from_secs(30),
+                    None,
                 )
                 .await
                 .map(|stream| {
@@ -790,6 +792,7 @@ async fn one_dial_credit_opens_two_limit_one_carriers_without_retaining_setup_ad
                         &runtime,
                         None,
                         Duration::from_secs(2),
+                        None,
                     )
                     .await
                 } else {
@@ -797,6 +800,7 @@ async fn one_dial_credit_opens_two_limit_one_carriers_without_retaining_setup_ad
                         &runtime,
                         None,
                         Duration::from_secs(2),
+                        None,
                     )
                     .await
                     .map(|stream| {

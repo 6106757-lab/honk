@@ -105,7 +105,7 @@ async fn ws_transport_roundtrip(path: &str, expected: &str) {
     transport.ws_path = Some(path.into());
     transport.ws_host = Some("cdn.example.com".into());
 
-    let mut stream = wrap_transport(&node, None, std::time::Duration::from_secs(3))
+    let mut stream = wrap_transport(&node, None, std::time::Duration::from_secs(3), None)
         .await
         .unwrap();
     stream.write_all(b"ping").await.unwrap();

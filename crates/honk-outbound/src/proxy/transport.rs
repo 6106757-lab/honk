@@ -23,7 +23,18 @@ use tokio::net::TcpStream;
 use crate::proxy::transport::grpc::wrap_grpc;
 
 use super::AsyncReadWrite;
-use crate::transport_quality::tcp::ObservedTcp;
+use crate::proxy::detour::DetourPath;
+use crate::transport_quality::tcp::{Carrier, ObservedTcp};
+
+/// The node's server as a `host:port` literal, bracketed when it is IPv6.
+fn endpoint_address(node: &Node) -> String {
+    let host = node.host();
+    if host.contains(':') {
+        format!("[{host}]:{}", node.port)
+    } else {
+        format!("{}:{}", host, node.port)
+    }
+}
 
 pub(crate) struct TransportPreparation(Option<xhttp::XhttpPreparation>);
 
@@ -54,17 +65,18 @@ pub(crate) async fn wrap_transport(
     node: &Node,
     tcp: Option<TcpStream>,
     connect_timeout: std::time::Duration,
+    detour: Option<&DetourPath>,
 ) -> anyhow::Result<Box<dyn AsyncReadWrite>> {
     if node.is_xhttp() {
         let owner = crate::runtime::NodeRuntime::try_ephemeral_guarded(node)?;
         let runtime = owner.runtime();
-        let stream = wrap_transport_runtime(&runtime, tcp, connect_timeout).await?;
+        let stream = wrap_transport_runtime(&runtime, tcp, connect_timeout, detour).await?;
         return Ok(Box::new(crate::proxy::RuntimeOwnedIo {
             inner: stream,
             _owner: owner,
         }));
     }
-    let stream = maybe_tls_wrap(node, tcp, connect_timeout).await?;
+    let stream = maybe_tls_wrap(node, tcp, connect_timeout, detour).await?;
     wrap_after_tls(node, stream).await
 }
 
@@ -73,8 +85,10 @@ pub(crate) async fn wrap_transport_runtime(
     runtime: &std::sync::Arc<crate::runtime::NodeRuntime>,
     tcp: Option<TcpStream>,
     connect_timeout: std::time::Duration,
+    detour: Option<&DetourPath>,
 ) -> anyhow::Result<Box<dyn AsyncReadWrite>> {
-    let (stream, preparation) = prepare_transport_runtime(runtime, tcp, connect_timeout).await?;
+    let (stream, preparation) =
+        prepare_transport_runtime(runtime, tcp, connect_timeout, detour).await?;
     preparation.commit()?;
     Ok(stream)
 }
@@ -85,12 +99,13 @@ pub(crate) async fn prepare_transport_runtime(
     runtime: &std::sync::Arc<crate::runtime::NodeRuntime>,
     tcp: Option<TcpStream>,
     connect_timeout: std::time::Duration,
+    detour: Option<&DetourPath>,
 ) -> anyhow::Result<(Box<dyn AsyncReadWrite>, TransportPreparation)> {
     if let Some(xhttp) = &runtime.xhttp {
         let (stream, preparation) = xhttp.prepare(runtime, tcp, connect_timeout).await?;
         return Ok((stream, TransportPreparation(Some(preparation))));
     }
-    let stream = maybe_tls_wrap(&runtime.node, tcp, connect_timeout).await?;
+    let stream = maybe_tls_wrap(&runtime.node, tcp, connect_timeout, detour).await?;
     Ok((
         wrap_after_tls(&runtime.node, stream).await?,
         TransportPreparation::none(),
@@ -118,12 +133,17 @@ pub(crate) async fn wrap_after_tls(
 /// Connect if needed and apply TLS or authenticated REALITY. `None` identifies
 /// a cold dial whose admission may be reused after dropping its failed socket;
 /// a supplied socket always needs fresh admission for a replacement.
+///
+/// `detour` carries the connection through another node when the node names
+/// one. It wins over a supplied socket: a node on a detour has no business
+/// holding a socket of its own.
 pub(crate) async fn maybe_tls_wrap(
     node: &Node,
     tcp: Option<TcpStream>,
     connect_timeout: std::time::Duration,
+    detour: Option<&DetourPath>,
 ) -> anyhow::Result<Box<dyn AsyncReadWrite>> {
-    match maybe_tls_wrap_concrete(node, tcp, connect_timeout).await? {
+    match maybe_tls_wrap_concrete(node, tcp, connect_timeout, detour).await? {
         MaybeTls::Tls(stream) => Ok(Box::new(crate::tls::BatchRead::new(stream))),
         MaybeTls::Plain(stream) => Ok(stream),
     }
@@ -141,13 +161,39 @@ pub(crate) async fn maybe_tls_wrap_concrete(
     node: &Node,
     tcp: Option<TcpStream>,
     connect_timeout: std::time::Duration,
+    detour: Option<&DetourPath>,
 ) -> anyhow::Result<MaybeTls> {
     let tls = node.tls().unwrap();
     if !tls.alpn.is_empty() {
         node.validate_protocol()?;
     }
     let cold = tcp.is_none();
+    // A node that names a detour must ride it. Dialling the direct path
+    // because the binding is missing would send its traffic out of the real
+    // interface while looking like a normal connection.
+    if detour.is_none() {
+        if let Some(name) = node.detour_name() {
+            anyhow::bail!(
+                "node {}: detour {name:?} is not bound in this generation",
+                node.name
+            );
+        }
+    }
+    let address = endpoint_address(node);
     let initial_tcp = async {
+        if let Some(path) = detour {
+            let endpoint = crate::proxy::detour::resolve_endpoint(&address).await?;
+            let stream = path
+                .connect(endpoint, connect_timeout)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "node {}: detour could not reach {address}: {error}",
+                        node.name
+                    )
+                })?;
+            return Ok(Carrier::Chained(stream));
+        }
         match tcp {
             Some(tcp) => {
                 if let Some(observer) = crate::runtime::flow_observation::current() {
@@ -159,21 +205,30 @@ pub(crate) async fn maybe_tls_wrap_concrete(
                         },
                     );
                 }
-                Ok(tcp)
+                Ok(Carrier::Socket(tcp))
             }
-            None => {
-                let addr = format!("{}:{}", node.host(), node.port);
-                crate::util::connect_outbound(&addr, connect_timeout).await
-            }
+            None => Ok(Carrier::Socket(
+                crate::util::connect_outbound(&address, connect_timeout).await?,
+            )),
         }
     };
     if let Some(reality) = crate::reality::parse_reality_config(node)? {
+        // REALITY answers an abandoned handshake by re-dialling the same peer
+        // on the bypass mark. That is a direct dial by construction, so a
+        // REALITY node on a detour would leak its traffic out of the real
+        // interface exactly when the handshake looks most suspicious.
+        anyhow::ensure!(
+            detour.is_none(),
+            "node {}: REALITY cannot be dialled through a detour; the fallback handshake \
+             re-dials the peer directly",
+            node.name
+        );
         let deadline = tokio::time::Instant::now() + connect_timeout * 3;
         let alpn = node.is_xhttp().then_some(b"\x02h2".as_slice());
         let setup = async {
             let tcp = initial_tcp.await?;
             let peer = tcp.peer_addr()?;
-            let tcp = ObservedTcp::new(tcp);
+            let tcp = ObservedTcp::new_carrier(tcp);
             let chrome = crate::tls::chrome_mode();
             let mut tls_stream = match crate::reality::reality_connect_with_key_shares(
                 tcp, &reality, chrome, true, alpn,
@@ -223,7 +278,7 @@ pub(crate) async fn maybe_tls_wrap_concrete(
                 std::io::Error::new(std::io::ErrorKind::TimedOut, "REALITY setup timeout")
             })?;
     }
-    let mut tcp = ObservedTcp::new(initial_tcp.await?);
+    let mut tcp = ObservedTcp::new_carrier(initial_tcp.await?);
     if tls.enabled {
         let connector = crate::tls::build_connector(node)?;
         let server_name = tls.sni.clone().unwrap_or_else(|| node.host().to_string());

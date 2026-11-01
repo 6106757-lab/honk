@@ -202,7 +202,8 @@ async fn xhttp_tls_rejects_missing_h2_but_raw_tls_preserves_no_alpn() {
             let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .unwrap();
-            let result = maybe_tls_wrap_concrete(&node, Some(tcp), Duration::from_secs(1)).await;
+            let result =
+                maybe_tls_wrap_concrete(&node, Some(tcp), Duration::from_secs(1), None).await;
             if xhttp {
                 let Err(error) = result else {
                     panic!("XHTTP accepted TLS without negotiated h2");

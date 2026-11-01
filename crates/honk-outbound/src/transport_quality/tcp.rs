@@ -50,24 +50,118 @@ impl TcpPressure {
     }
 }
 
+/// What a connection physically rides on.
+///
+/// Most nodes own a socket. A node that names a detour rides another node
+/// instead, and that node hands back a byte stream rather than a descriptor:
+/// there is no socket to sample, and none to lend to a zero-copy relay.
+#[derive(Debug)]
+pub(crate) enum Carrier {
+    Socket(TcpStream),
+    Chained(Box<dyn crate::proxy::AsyncReadWrite>),
+}
+
+impl AsyncRead for Carrier {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Socket(socket) => Pin::new(socket).poll_read(cx, buf),
+            Self::Chained(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for Carrier {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Socket(socket) => Pin::new(socket).poll_write(cx, buf),
+            Self::Chained(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Socket(socket) => Pin::new(socket).poll_write_vectored(cx, bufs),
+            Self::Chained(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Socket(socket) => socket.is_write_vectored(),
+            Self::Chained(stream) => stream.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Socket(socket) => Pin::new(socket).poll_flush(cx),
+            Self::Chained(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Socket(socket) => Pin::new(socket).poll_shutdown(cx),
+            Self::Chained(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+impl Carrier {
+    fn socket(&self) -> Option<&TcpStream> {
+        match self {
+            Self::Socket(socket) => Some(socket),
+            Self::Chained(_) => None,
+        }
+    }
+
+    /// The descriptor behind this carrier, when there is one to probe.
+    pub(crate) fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        self.socket().map(AsRawFd::as_raw_fd)
+    }
+
+    pub(crate) fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+        match self {
+            Self::Socket(socket) => socket.peer_addr(),
+            Self::Chained(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a chained carrier has no peer address of its own",
+            )),
+        }
+    }
+}
+
 /// The observer is dormant through TLS/REALITY authentication and has no I/O
 /// authority: it neither owns another descriptor nor changes a poll result.
 #[derive(Debug)]
 pub(crate) struct ObservedTcp {
-    inner: TcpStream,
-    pressure: TcpPressure,
+    inner: Carrier,
+    /// `None` on a chained carrier: nothing to sample without a socket.
+    pressure: Option<TcpPressure>,
     active: bool,
-}
-
-impl std::os::fd::AsRawFd for ObservedTcp {
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
-        std::os::fd::AsRawFd::as_raw_fd(&self.inner)
-    }
 }
 
 impl ObservedTcp {
     pub(crate) fn new(inner: TcpStream) -> Self {
-        let pressure = TcpPressure::new(&inner);
+        Self::new_carrier(Carrier::Socket(inner))
+    }
+
+    /// Wrap a carrier, sampling it when there is a socket to sample.
+    pub(crate) fn new_carrier(inner: Carrier) -> Self {
+        let pressure = inner.socket().map(TcpPressure::new);
         Self {
             inner,
             pressure,
@@ -75,34 +169,55 @@ impl ObservedTcp {
         }
     }
 
-    pub(crate) fn activate(&mut self) {
-        self.active = true;
-        self.pressure.observe(&self.inner);
-    }
-
-    fn observe(&mut self) {
-        if self.active {
-            self.pressure.observe(&self.inner);
+    /// Wrap a stream another node handed back. It carries bytes, not a
+    /// descriptor, so this connection reports no transport quality of its own.
+    pub(crate) fn new_chained(stream: Box<dyn crate::proxy::AsyncReadWrite>) -> Self {
+        Self {
+            inner: Carrier::Chained(stream),
+            pressure: None,
+            active: false,
         }
     }
 
+    pub(crate) fn activate(&mut self) {
+        self.active = true;
+        self.observe();
+    }
+
+    fn observe(&mut self) {
+        let (Some(pressure), Some(socket)) = (self.pressure.as_mut(), self.inner.socket()) else {
+            return;
+        };
+        if self.active {
+            pressure.observe(socket);
+        }
+    }
+
+    /// The descriptor behind this carrier, when there is one to probe.
+    pub(crate) fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.inner.raw_fd()
+    }
+
     /// Lends the socket to a relay that bypasses this wrapper's I/O while
-    /// keeping its pressure sampler attached to the same carrier.
+    /// keeping its pressure sampler attached to the same carrier. A chained
+    /// carrier has no socket to lend.
     #[cfg(feature = "rprx")]
-    pub(crate) fn raw_parts(&mut self) -> (&TcpStream, RawObserver<'_>) {
+    pub(crate) fn raw_parts(&mut self) -> Option<(&TcpStream, RawObserver<'_>)> {
         let Self {
             inner,
             pressure,
             active,
         } = self;
-        (
-            inner,
+        let socket = inner.socket()?;
+        let pressure = pressure.as_mut()?;
+        Some((
+            socket,
             RawObserver {
-                socket: inner,
+                socket,
                 pressure,
                 active: *active,
             },
-        )
+        ))
     }
 }
 

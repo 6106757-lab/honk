@@ -19,6 +19,7 @@ impl VLessHandler {
         header: Vec<u8>,
         tcp: Option<TcpStream>,
         connect_timeout: std::time::Duration,
+        detour: Option<&crate::proxy::detour::DetourPath>,
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> anyhow::Result<Box<dyn AsyncReadWrite>> {
         let vless = node.vless().unwrap();
@@ -26,7 +27,7 @@ impl VLessHandler {
         let encryption = self.encryption_config(node)?;
         if node.is_xhttp() {
             let stream =
-                crate::proxy::transport::wrap_transport(node, tcp, connect_timeout).await?;
+                crate::proxy::transport::wrap_transport(node, tcp, connect_timeout, detour).await?;
             return start_boxed(encryption, stream, &header, vision).await;
         }
         if encryption.is_none()
@@ -34,8 +35,13 @@ impl VLessHandler {
             && matches!(vless.transport.transport.as_str(), "" | "tcp")
         {
             let stream: Box<dyn AsyncReadWrite> =
-                match crate::proxy::transport::maybe_tls_wrap_concrete(node, tcp, connect_timeout)
-                    .await?
+                match crate::proxy::transport::maybe_tls_wrap_concrete(
+                    node,
+                    tcp,
+                    connect_timeout,
+                    detour,
+                )
+                .await?
                 {
                     crate::proxy::transport::MaybeTls::Tls(tls) => {
                         if tls.ssl().version2() != Some(boring::ssl::SslVersion::TLS1_3) {
@@ -56,7 +62,8 @@ impl VLessHandler {
             });
         }
 
-        let stream = crate::proxy::transport::maybe_tls_wrap(node, tcp, connect_timeout).await?;
+        let stream =
+            crate::proxy::transport::maybe_tls_wrap(node, tcp, connect_timeout, detour).await?;
         let stream: Box<dyn AsyncReadWrite> = match permit {
             Some(permit) => Box::new(crate::proxy::RuntimeOwnedIo {
                 inner: stream,
@@ -85,7 +92,7 @@ impl VLessHandler {
             target_domain,
             vless.wire_flow(),
         )?;
-        let operation = self.dial_carrier(node, uuid, header, tcp, connect_timeout, None);
+        let operation = self.dial_carrier(node, uuid, header, tcp, connect_timeout, None, None);
         let stream =
             crate::runtime::flow_observation::request_write(std::pin::pin!(operation)).await?;
         Ok(ProxyStream {
@@ -114,6 +121,7 @@ impl VLessHandler {
                     header,
                     None,
                     timeout,
+                    runtime.detour().map(Arc::as_ref),
                     Some(permit),
                 )))
                 .await?;
@@ -124,9 +132,13 @@ impl VLessHandler {
         }
         runtime
             .scope_tasks(runtime.transport_quality().scope(async {
-                let (stream, preparation) =
-                    crate::proxy::transport::prepare_transport_runtime(runtime, None, timeout)
-                        .await?;
+                let (stream, preparation) = crate::proxy::transport::prepare_transport_runtime(
+                    runtime,
+                    None,
+                    timeout,
+                    runtime.detour().map(Arc::as_ref),
+                )
+                .await?;
                 let vision = runtime.node.vless().unwrap().is_vision().then_some(uuid);
                 let encryption = self.encryption_config(&runtime.node)?;
                 Ok((

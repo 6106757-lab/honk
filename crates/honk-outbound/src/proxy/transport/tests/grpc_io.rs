@@ -382,7 +382,7 @@ async fn grpc_transport_roundtrip_through_dialer() {
         });
     };
     let consume = async {
-        let mut stream = wrap_transport(&node, None, Duration::from_secs(3))
+        let mut stream = wrap_transport(&node, None, Duration::from_secs(3), None)
             .await
             .unwrap();
         stream.write_all(b"hello").await.unwrap();

@@ -89,10 +89,16 @@ impl TrojanHandler {
     )> {
         match runtime {
             Some(runtime) => {
-                super::transport::prepare_transport_runtime(runtime, tcp, timeout).await
+                super::transport::prepare_transport_runtime(
+                    runtime,
+                    tcp,
+                    timeout,
+                    runtime.detour().map(Arc::as_ref),
+                )
+                .await
             }
             None => Ok((
-                super::transport::wrap_transport(node, tcp, timeout).await?,
+                super::transport::wrap_transport(node, tcp, timeout, None).await?,
                 super::transport::TransportPreparation::none(),
             )),
         }
