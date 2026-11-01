@@ -48,12 +48,22 @@ pub(crate) fn bind_masque_detours(
     proxies: &Arc<ProxyRegistry>,
 ) {
     for node in nodes {
-        let Some(config) = node.masque() else {
+        let Some(name) = node.detour_name() else {
             continue;
         };
-        let Some(name) = config.detour.as_deref() else {
+        // Every protocol now carries `detour`, but only the MASQUE carrier has
+        // a dialer slot to bind one to. Say so out loud rather than leaving a
+        // configured detour silently unused, and never bind MASQUE twice: the
+        // carrier's own detour is the only one its tunnel ever takes.
+        if node.protocol() != NodeProtocol::Masque {
+            tracing::warn!(
+                "node {}: detour {name:?} is configured, but {} does not dial \
+                 through a detour yet",
+                node.name,
+                node.protocol().as_str()
+            );
             continue;
-        };
+        }
         let Some(target) = nodes.iter().find(|candidate| candidate.name == name) else {
             tracing::warn!(
                 "masque node {}: detour {name:?} is not a node in this configuration",

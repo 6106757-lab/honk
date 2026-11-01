@@ -68,6 +68,14 @@ pub struct Node {
     pub host: String,
     pub port: u16,
     pub outbound: OutboundConfig,
+    /// Name of the node or group this node dials *through* before reaching
+    /// its own server, or `direct` for no detour at all. Empty means what it
+    /// has always meant: dial the server on the direct path out.
+    ///
+    /// It is a property of the path, not of the protocol, so it lives on the
+    /// node rather than inside [`OutboundConfig`]: every protocol reaches its
+    /// server the same way, and only the server address differs.
+    pub detour: Option<String>,
     pub mark: Option<u32>,
     pub tags: Vec<String>,
     pub subscription_id: Option<uuid::Uuid>,
@@ -89,6 +97,7 @@ impl Default for Node {
             host: String::new(),
             port: 0,
             outbound: OutboundConfig::default(),
+            detour: None,
             mark: None,
             tags: Vec::new(),
             subscription_id: None,
@@ -102,6 +111,16 @@ impl Default for Node {
 impl Node {
     pub fn protocol(&self) -> NodeProtocol {
         self.outbound.protocol()
+    }
+
+    /// The detour this node dials through, if it names one. An empty string
+    /// counts as none: generators emit `dialer-proxy: ""` routinely, and
+    /// empty is not a node name anywhere else in the configuration.
+    pub fn detour_name(&self) -> Option<&str> {
+        self.detour
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
     }
 
     pub fn is_xhttp(&self) -> bool {
@@ -332,12 +351,24 @@ impl Node {
     pub fn derive_id(&self) -> uuid::Uuid {
         let material = self.identity_material();
         let legacy_id = uuid::Uuid::new_v5(&NODE_ID_NAMESPACE, material.as_bytes());
-        if let Some(tls) = self.tls().filter(|tls| !tls.alpn.is_empty()) {
+        let shaped = if let Some(tls) = self.tls().filter(|tls| !tls.alpn.is_empty()) {
             let alpn = serde_json::to_vec(&("tls-alpn", &tls.alpn))
                 .expect("TLS ALPN strings are JSON serializable");
             uuid::Uuid::new_v5(&legacy_id, &alpn)
         } else {
             legacy_id
+        };
+        // A detour changes the path, not the server: the same server reached
+        // through a different detour is a different node, and both can be
+        // configured at once. Only nodes that name one pay for a new identity,
+        // so every node dialling the direct path keeps the id it has always had.
+        match self.detour_name() {
+            Some(detour) => {
+                let material = serde_json::to_vec(&("detour", detour))
+                    .expect("detour names are JSON serializable");
+                uuid::Uuid::new_v5(&shaped, &material)
+            }
+            None => shaped,
         }
     }
 }

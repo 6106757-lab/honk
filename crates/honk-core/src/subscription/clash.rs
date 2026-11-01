@@ -418,9 +418,6 @@ fn apply_protocol(mapping: &Mapping, node: &mut Node) -> Result<(), &'static str
                 Some(value) => fields::alpn_list(value)?,
                 None => Vec::new(),
             };
-            // mihomo calls the same idea `dialer-proxy`; sing-box, `detour`.
-            config.detour = yaml_text_alias(mapping, &["dialer-proxy", "dialer_proxy", "detour"])?
-                .filter(|value| !value.trim().is_empty());
         }
         OutboundConfig::Direct | OutboundConfig::Block => unreachable!(),
     }
@@ -761,6 +758,13 @@ pub(super) fn parse_clash_proxy(
     };
 
     apply_protocol(mapping, &mut node)?;
+    // A detour belongs to the path, not to the protocol: mihomo spells it
+    // `dialer-proxy`, sing-box `detour`. Every protocol reads it here, so a
+    // MASQUE node keeps exactly the behaviour it had when the field lived in
+    // its own config, and the other protocols pick it up as the shared dial
+    // entry point lands.
+    node.detour = yaml_text_alias(mapping, &["dialer-proxy", "dialer_proxy", "detour"])?
+        .filter(|value| !value.trim().is_empty());
     apply_stream(mapping, &mut node, udp)?;
     apply_tls(mapping, &mut node, protocol, tls_explicit, tls_enabled)?;
     apply_quic(mapping, &mut node, tuic_default_alpn)?;

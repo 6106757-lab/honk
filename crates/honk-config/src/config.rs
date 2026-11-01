@@ -4,6 +4,7 @@ pub(crate) use seed::CONFIG_FIELDS;
 pub use seed::ConfigSeed;
 use seed::RawConfigSeed;
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use crate::diagnostic::{
@@ -446,6 +447,51 @@ fn config_validation_error(
         setting,
         message,
     )
+}
+
+/// Walk one detour chain and report the first name that closes a loop.
+///
+/// `settled` remembers chains that ended without a cycle, so a detour shared
+/// by several nodes is walked once no matter how many of them name it.
+fn detour_cycle(
+    nodes: &[Node],
+    groups: &[Group],
+    name: &str,
+    path: &mut Vec<String>,
+    settled: &mut HashSet<String>,
+) -> Option<String> {
+    if path.iter().any(|seen| seen == name) {
+        return Some(name.to_string());
+    }
+    if settled.contains(name) {
+        return None;
+    }
+    path.push(name.to_string());
+    let target = nodes
+        .iter()
+        .find(|node| node.name == name)
+        .and_then(Node::detour_name);
+    if let Some(target) = target {
+        if matches!(target, Config::BUILTIN_DIRECT_NODE) {
+            settled.insert(name.to_string());
+        } else if let Some(group) = groups.iter().find(|group| group.name == target) {
+            // A group detour leads wherever the group can lead: its nested
+            // groups and its fallback. Members only a filter expression names
+            // need the resolver, which is where the group breaks its cycles.
+            for member in group.groups.iter().chain(group.final_outbound.iter()) {
+                if let Some(cycle) = detour_cycle(nodes, groups, member, path, settled) {
+                    return Some(cycle);
+                }
+            }
+            settled.insert(name.to_string());
+        } else if let Some(cycle) = detour_cycle(nodes, groups, target, path, settled) {
+            return Some(cycle);
+        } else {
+            settled.insert(name.to_string());
+        }
+    }
+    path.pop();
+    None
 }
 
 impl Config {
@@ -999,6 +1045,7 @@ impl Config {
             check_outbound(rule.outbound.as_str(), Some(index))?;
         }
         check_outbound(&self.routing.default_outbound, None)?;
+        self.validate_node_detours_detailed(source)?;
         for (index, subscription) in self.subscriptions.iter().enumerate() {
             if subscription.name.is_empty() {
                 return Err(config_validation_error(
@@ -1039,6 +1086,70 @@ impl Config {
                         .field("download_detour"),
                     "invalid-subscription-detour-target",
                     "subscription download detour must be direct, routing or a group",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate every node's detour, and the graph those detours form.
+    ///
+    /// A detour names the node, group or builtin this node dials through, and
+    /// it is applied once — at the shared dial entry point — so a chain that
+    /// leads back to a node already on the path would dial that node through
+    /// itself. Group members only a filter expression names are resolved at
+    /// runtime, where the group already breaks its own cycles.
+    fn validate_node_detours_detailed(
+        &self,
+        source: &SourceRef,
+    ) -> Result<(), DetailedConfigError> {
+        let is_node = |name: &str| {
+            self.nodes.iter().any(|node| {
+                node.id != DIRECT_NODE_ID && node.id != BLOCK_NODE_ID && node.name == name
+            })
+        };
+        for (index, node) in self.nodes.iter().enumerate() {
+            let Some(target) = node.detour_name() else {
+                continue;
+            };
+            let names_itself = target == node.name;
+            if names_itself
+                || !(matches!(target, Self::BUILTIN_DIRECT_NODE)
+                    || is_node(target)
+                    || self.groups.iter().any(|group| group.name == target))
+            {
+                return Err(config_validation_error(
+                    source,
+                    SettingPath::new("nodes").index(index + 1).field("detour"),
+                    "invalid-node-detour-target",
+                    if names_itself {
+                        "node detour must not name the node itself"
+                    } else {
+                        "node detour must name a node, a group or direct"
+                    },
+                ));
+            }
+        }
+        let mut path = Vec::new();
+        let mut settled = HashSet::new();
+        for node in &self.nodes {
+            if !is_node(&node.name) || node.detour_name().is_none() {
+                continue;
+            }
+            if detour_cycle(
+                &self.nodes,
+                &self.groups,
+                &node.name,
+                &mut path,
+                &mut settled,
+            )
+            .is_some()
+            {
+                return Err(config_validation_error(
+                    source,
+                    SettingPath::new("nodes").field("detour"),
+                    "invalid-node-detour-cycle",
+                    "node detours must not form a cycle",
                 ));
             }
         }

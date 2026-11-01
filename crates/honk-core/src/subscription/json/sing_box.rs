@@ -40,9 +40,9 @@ pub(super) fn normalize(value: Value) -> NodeResult {
     if protocol == NodeProtocol::VLess && source.contains_key("vless_mode") {
         return Err("VLESS vless_mode was removed");
     }
-    if source.remove("detour").is_some_and(|value| active(&value)) {
-        return Err("sing-box detour chaining is unsupported");
-    }
+    let detour = source
+        .remove("detour")
+        .filter(|value| !value.is_null() && active(value));
 
     let mut proxy = Mapping::new();
     put(&mut proxy, "type", Value::String(protocol.as_str().into()));
@@ -51,6 +51,13 @@ pub(super) fn normalize(value: Value) -> NodeResult {
         &mut proxy,
         &[("tag", "name"), ("server", "server")],
     )?;
+    // A detour names the node or group this one dials through. That is a
+    // property of the path rather than of the protocol, so it rides along with
+    // the rest of the node instead of being rejected: the shared parser reads
+    // it for every protocol that carries one.
+    if let Some(value) = detour {
+        put(&mut proxy, "detour", value);
+    }
     let hopping_port = if protocol == NodeProtocol::Hysteria2 {
         normalize_server_ports(&mut source, &mut proxy)?
     } else {

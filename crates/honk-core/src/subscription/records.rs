@@ -175,8 +175,11 @@ fn normalize_protocol(
     if protocol == "vless" && options.contains("vless_mode") {
         return Err("VLESS vless_mode was removed");
     }
-    consume_record_controls(protocol, &mut options)?;
+    let detour = consume_record_controls(protocol, &mut options)?;
     let mut map = base_mapping(protocol, name, server, port);
+    if let Some(target) = detour {
+        put_str(&mut map, "detour", target);
+    }
     apply_security(&mut map, dialect, protocol, &mut options)?;
     apply_protocol(&mut map, dialect, protocol, positions, &mut options)?;
     apply_udp_options(&mut map, &mut options)?;
@@ -192,26 +195,38 @@ fn record_header(field: &Field) -> Option<(&str, &str)> {
     Some((left.trim(), right.get(1..)?.trim()))
 }
 
-fn consume_record_controls(protocol: &str, options: &mut RecordOptions) -> RecordResult<()> {
+/// Consume the options that steer the record itself. Returns the detour this
+/// record asks to dial through, if it names one.
+fn consume_record_controls(
+    protocol: &str,
+    options: &mut RecordOptions,
+) -> RecordResult<Option<String>> {
     for key in options.keys() {
         let claim = key.strip_suffix("-opts").unwrap_or(key);
         if honk_config::options::vocab::xhttp_stream_transport(claim) == Ok("xhttp") {
             stream_transport(claim)?;
         }
     }
-    if take_any_active(
+    // Links spell the detour differently, but they all name the node or group
+    // this one dials through — the same idea the configuration calls `detour`.
+    let detour = take_option(
         options,
         &[
-            "proxy",
-            "underlying-proxy",
-            "underlying_proxy",
             "dialer-proxy",
             "dialer_proxy",
-            "chain",
-            "chained",
-            "proxy-policy",
-            "proxy_policy",
+            "detour",
+            "underlying-proxy",
+            "underlying_proxy",
         ],
+    )
+    .filter(|name| !name.trim().is_empty());
+    // Multi-hop chains and proxy selection policies are different features.
+    // honk dials through one detour; a detour that names its own detour is
+    // resolved when that node is built, which is what keeps a node from being
+    // dialled through the same detour twice.
+    if take_any_active(
+        options,
+        &["proxy", "chain", "chained", "proxy-policy", "proxy_policy"],
     ) {
         return Err("record chaining is unsupported");
     }
@@ -234,7 +249,7 @@ fn consume_record_controls(protocol: &str, options: &mut RecordOptions) -> Recor
     if take_any_active(options, &["ssr-protocol", "ssr-protocol-param"]) {
         return Err("record SSR mode is unsupported");
     }
-    Ok(())
+    Ok(detour)
 }
 
 fn apply_udp_options(map: &mut Mapping, options: &mut RecordOptions) -> RecordResult<()> {

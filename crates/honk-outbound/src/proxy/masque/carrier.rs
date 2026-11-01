@@ -54,7 +54,7 @@ async fn open_h2(
         .masque()
         .ok_or_else(|| anyhow::anyhow!("masque node {} has no masque config", node.name))?;
     let address = endpoint_address(node);
-    let tcp = match (config.detour.as_deref(), detour) {
+    let tcp = match (node.detour_name(), detour) {
         (Some(name), Some(dialer)) => {
             let endpoint = resolve_endpoint(&address).await?;
             dialer

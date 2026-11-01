@@ -188,8 +188,13 @@ struct FlatNode {
     masque_remote_dns_resolve: Option<bool>,
     #[serde(default)]
     masque_dns: Vec<String>,
-    #[serde(default)]
-    masque_detour: Option<String>,
+    /// The node or group this node dials through before reaching its own
+    /// server. Deliberately unprefixed: the path out is no more a MASQUE
+    /// property than it is a Trojan one. `masque_detour` stays as an alias so
+    /// configurations written while the field belonged to MASQUE alone keep
+    /// loading, and MASQUE keeps its own detour behaviour unchanged.
+    #[serde(default, alias = "masque_detour", alias = "masque-detour")]
+    detour: Option<String>,
     #[serde(default)]
     mark: Option<u32>,
     #[serde(default)]
@@ -498,7 +503,6 @@ impl FlatNode {
             masque_remote_dns_resolve
         );
         strip!(!self.masque_dns.is_empty() && !masque, masque_dns);
-        strip!(self.masque_detour.is_some() && !masque, masque_detour);
 
         if !dropped.is_empty() {
             diagnostics.push(DetailedDiagnostic::warning(
@@ -725,7 +729,6 @@ impl FlatNode {
                     mtu: flat.quic_mtu,
                     remote_dns_resolve: flat.masque_remote_dns_resolve.unwrap_or(false),
                     dns: std::mem::take(&mut flat.masque_dns),
-                    detour: flat.masque_detour.take(),
                     tls,
                 })
             }
@@ -746,6 +749,7 @@ impl FlatNode {
             host: flat.host,
             port: flat.port,
             outbound,
+            detour: flat.detour,
             mark: flat.mark,
             tags: flat.tags,
             subscription_id: flat.subscription_id,
@@ -838,7 +842,7 @@ struct WireOptions<'a> {
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     masque_dns: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
-    masque_detour: Option<&'a str>,
+    detour: Option<&'a str>,
     mark: Option<u32>,
     tags: &'a [String],
     subscription_id: Option<uuid::Uuid>,
@@ -886,6 +890,7 @@ impl<'a> WireOptions<'a> {
             group_id: node.group_id,
             created_at: node.created_at,
             updated_at: node.updated_at,
+            detour: node.detour_name(),
             ..Self::default()
         };
         match &node.outbound {
@@ -978,7 +983,6 @@ impl<'a> WireOptions<'a> {
                 wire.masque_local_ipv6 = config.local_ipv6.as_deref();
                 wire.masque_remote_dns_resolve = Some(config.remote_dns_resolve);
                 wire.masque_dns = config.dns.as_slice();
-                wire.masque_detour = config.detour.as_deref();
                 wire.set_tls(&config.tls);
             }
             OutboundConfig::Direct | OutboundConfig::Block => {}
