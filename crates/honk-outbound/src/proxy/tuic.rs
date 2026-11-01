@@ -503,13 +503,10 @@ impl TuicHandler {
         runtime: &crate::runtime::NodeRuntime,
     ) -> anyhow::Result<Arc<TuicClient>> {
         let profiles = runtime.quic_flow_control_profiles()?;
+        let detour = runtime.detour();
         runtime
             .quic_client(|| {
-                self.build_client(
-                    runtime.node.as_ref(),
-                    Some(profiles),
-                    runtime.detour().as_ref(),
-                )
+                self.build_client(runtime.node.as_ref(), Some(profiles), detour.as_ref())
             })
             .await
     }
