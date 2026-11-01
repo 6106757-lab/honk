@@ -141,6 +141,7 @@ async fn stalled_tls_session_dial_respects_its_own_deadline() {
             None,
             Arc::new(PaddingState::default()),
             InboundPayloadBudget::new(INBOUND_PAYLOAD_BUDGET),
+            None,
         ),
     )
     .await;
