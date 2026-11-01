@@ -553,7 +553,6 @@ mod tests {
             r#"{"outbounds":[{"type":"vless","server":"secret.example","server_port":443,"uuid":"00000000-0000-4000-8000-000000000031","packet_encoding":"","multiplex":{"enabled":true,"protocol":"yamux"}}]}"#,
             r#"{"outbounds":[{"type":"trojan","server":"secret.example","server_port":443,"password":"secret-password","tls":{"enabled":true},"transport":{"type":"http","path":"/secret"}}]}"#,
             r#"{"outbounds":[{"type":"trojan","server":"secret.example","server_port":443,"password":"secret-password"}]}"#,
-            r#"{"outbounds":[{"type":"vless","server":"secret.example","server_port":443,"uuid":"00000000-0000-4000-8000-000000000031","detour":"secret-hop"}]}"#,
             r#"{"version":3,"servers":[{"server":"secret.example","server_port":8388,"method":"aes-256-gcm","password":"secret-password"}]}"#,
         ] {
             let error = parse_json_subscription(json(input), None)
@@ -562,6 +561,25 @@ mod tests {
             assert!(!error.contains("secret"));
             assert!(!error.contains("00000000-0000-4000-8000-000000000031"));
         }
+    }
+
+    #[test]
+    fn sing_box_detour_is_kept_as_the_nodes_path_out() {
+        let nodes = parse_json_subscription(
+            json(
+                r#"{"outbounds":[
+                  {"type":"vless","tag":"hopped","server":"hopped.example","server_port":443,"uuid":"00000000-0000-4000-8000-000000000031","detour":"hop"},
+                  {"type":"trojan","tag":"direct-path","server":"direct.example","server_port":443,"password":"password","tls":{"enabled":true}}
+                ]}"#,
+            ),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name, "hopped");
+        assert_eq!(nodes[0].detour_name(), Some("hop"));
+        assert_eq!(nodes[1].detour_name(), None);
     }
 
     #[test]
