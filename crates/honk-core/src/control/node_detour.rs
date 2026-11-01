@@ -61,26 +61,33 @@ pub(crate) fn bind_node_detours(
 mod tests {
     //! Chain verification over loopback.
     //!
-    //! Two SOCKS5 servers stand in for two proxy hops and an echo server for
-    //! the far side. Each relay records every target it is asked to reach, so
-    //! a test can say which hop carried which leg rather than only that bytes
-    //! arrived: a node on a detour shows up as a request at the front for the
-    //! chained node's own server, and never at that server directly.
+    //! A SOCKS5 relay stands in for the front hop, a Trojan relay for the
+    //! chained node's own server, and an echo server for the far side. Each
+    //! relay records every target it is asked to reach, so a test can name the
+    //! hop that carried a leg instead of only that bytes arrived: a node on a
+    //! detour shows up as a request at the front for the chained node's own
+    //! server, and never at that server directly.
+    //!
+    //! The chained node is deliberately Trojan and not SOCKS5. Only the
+    //! protocols that dial through the shared transport consult the detour, so
+    //! a test built on one that does not would pass whatever the chain did.
 
     use super::*;
-    use honk_config::node::OutboundConfig;
-    use honk_config::types::NodeProtocol;
+    use honk_config::node::{OutboundConfig, TrojanConfig};
+    use honk_config::types::{NodeProtocol, SubscriptionType};
     use honk_outbound::proxy::ProtocolEntry;
     use honk_outbound::proxy::socks5::Socks5Handler;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use honk_outbound::proxy::trojan::TrojanHandler;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Mutex;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
+    const PASSWORD: &str = "chain-secret";
 
-    /// A SOCKS5 relay that records every CONNECT target it is handed.
+    /// A relay that records every target it is asked to reach.
     struct Relay {
         address: SocketAddr,
         requested: Arc<Mutex<Vec<SocketAddr>>>,
@@ -92,7 +99,7 @@ mod tests {
         }
     }
 
-    async fn spawn_relay() -> Relay {
+    async fn spawn_relay(trojan: bool) -> Relay {
         let requested = Arc::new(Mutex::new(Vec::new()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -101,14 +108,19 @@ mod tests {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let sink = Arc::clone(&sink);
                 tokio::spawn(async move {
-                    let _ = serve_relay(&mut stream, &sink).await;
+                    let served = if trojan {
+                        serve_trojan(&mut stream, &sink).await
+                    } else {
+                        serve_socks5(&mut stream, &sink).await
+                    };
+                    let _ = served;
                 });
             }
         });
         Relay { address, requested }
     }
 
-    async fn serve_relay(
+    async fn serve_socks5(
         stream: &mut TcpStream,
         sink: &Mutex<Vec<SocketAddr>>,
     ) -> anyhow::Result<()> {
@@ -123,19 +135,39 @@ mod tests {
         if head[1] != 0x01 {
             anyhow::bail!("only CONNECT is supported");
         }
-        let target = read_target(stream, head[3]).await?;
+        let target = read_address(stream, head[3]).await?;
         sink.lock().unwrap().push(target);
-        // Success, bound to an unspecified address: the client reads the
-        // reply and starts sending; the bound fields are not consulted.
+        // Success, bound to an unspecified address: the client reads the reply
+        // and starts sending, so the bound fields are not consulted.
         stream
             .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
             .await?;
-        let mut upstream = TcpStream::connect(target).await?;
-        tokio::io::copy_bidirectional(stream, &mut upstream).await?;
-        Ok(())
+        relay_to(stream, target).await
     }
 
-    async fn read_target(stream: &mut TcpStream, address_type: u8) -> anyhow::Result<SocketAddr> {
+    /// Serve one Trojan connection: `hex(sha224(password)) CRLF cmd addr CRLF`
+    /// and then the payload. The password is not checked, because which hop
+    /// carried the leg is what is under test here, not authentication.
+    async fn serve_trojan(
+        stream: &mut TcpStream,
+        sink: &Mutex<Vec<SocketAddr>>,
+    ) -> anyhow::Result<()> {
+        let mut hash = [0_u8; 56];
+        stream.read_exact(&mut hash).await?;
+        let mut crlf = [0_u8; 2];
+        stream.read_exact(&mut crlf).await?;
+        let mut command = [0_u8; 1];
+        stream.read_exact(&mut command).await?;
+        let mut address_type = [0_u8; 1];
+        stream.read_exact(&mut address_type).await?;
+        let target = read_address(stream, address_type[0]).await?;
+        stream.read_exact(&mut crlf).await?;
+        sink.lock().unwrap().push(target);
+        relay_to(stream, target).await
+    }
+
+    /// The SOCKS5-style address both hops write: a type byte, the host, a port.
+    async fn read_address(stream: &mut TcpStream, address_type: u8) -> anyhow::Result<SocketAddr> {
         let port = |bytes: [u8; 2]| u16::from_be_bytes(bytes);
         match address_type {
             0x01 => {
@@ -152,7 +184,7 @@ mod tests {
                 let mut octets = [0_u8; 16];
                 octets.copy_from_slice(&rest[..16]);
                 Ok(SocketAddr::new(
-                    IpAddr::V6(Ipv6Addr::from(octets)),
+                    IpAddr::V6(std::net::Ipv6Addr::from(octets)),
                     port([rest[16], rest[17]]),
                 ))
             }
@@ -169,8 +201,14 @@ mod tests {
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("{name} resolved to nothing"))
             }
-            other => anyhow::bail!("unknown SOCKS5 address type {other}"),
+            other => anyhow::bail!("unknown address type {other}"),
         }
+    }
+
+    async fn relay_to(stream: &mut TcpStream, target: SocketAddr) -> anyhow::Result<()> {
+        let mut upstream = TcpStream::connect(target).await?;
+        tokio::io::copy_bidirectional(stream, &mut upstream).await?;
+        Ok(())
     }
 
     /// The far side: whatever it is sent comes straight back.
@@ -188,26 +226,50 @@ mod tests {
         address
     }
 
-    fn socks5_node(name: &str, server: SocketAddr) -> Node {
+    fn node_named(name: &str, server: SocketAddr, outbound: OutboundConfig) -> Node {
         let mut node = Node {
             name: name.to_owned(),
             address: server.to_string(),
             host: server.ip().to_string(),
             port: server.port(),
-            outbound: OutboundConfig::from_protocol(NodeProtocol::Socks5),
+            outbound,
             ..Default::default()
         };
         node.id = node.derive_id();
         node
     }
 
+    fn socks5_node(name: &str, server: SocketAddr) -> Node {
+        node_named(
+            name,
+            server,
+            OutboundConfig::from_protocol(NodeProtocol::Socks5),
+        )
+    }
+
+    fn trojan_node(name: &str, server: SocketAddr) -> Node {
+        node_named(
+            name,
+            server,
+            OutboundConfig::Trojan(TrojanConfig {
+                password: Some(PASSWORD.into()),
+                ..Default::default()
+            }),
+        )
+    }
+
+    /// A generation that can dial either hop, with detours bound the way the
+    /// control plane binds them.
     fn registries(nodes: &[Node]) -> (Arc<OutboundRuntimeRegistry>, Arc<ProxyRegistry>) {
         let (registry, _) = OutboundRuntimeRegistry::build_reusing(nodes, 4, None).unwrap();
-        let handler = Arc::new(Socks5Handler::new());
         let mut proxies = ProxyRegistry::new();
         proxies.register(ProtocolEntry::new(
             NodeProtocol::Socks5,
-            Arc::clone(&handler),
+            Arc::new(Socks5Handler::new()),
+        ));
+        proxies.register(ProtocolEntry::new(
+            NodeProtocol::Trojan,
+            Arc::new(TrojanHandler::new()),
         ));
         let registry = Arc::new(registry);
         let proxies = Arc::new(proxies);
@@ -215,6 +277,8 @@ mod tests {
         (registry, proxies)
     }
 
+    /// Send a sentinel and require it back, so a stream that was accepted but
+    /// carries nothing does not count as a working chain.
     async fn say_ping(stream: &mut Box<dyn honk_outbound::proxy::AsyncReadWrite>) {
         stream.write_all(b"ping").await.unwrap();
         let mut reply = [0_u8; 4];
@@ -223,15 +287,15 @@ mod tests {
     }
 
     /// The chain, end to end: the front is asked for the chained node's own
-    /// server, and the far side is only ever reached from the back node.
+    /// server, and the far side is only ever asked of the chained node.
     #[tokio::test]
     async fn a_chained_node_reaches_its_server_through_the_front() {
-        let front = spawn_relay().await;
-        let back = spawn_relay().await;
+        let front = spawn_relay(false).await;
+        let back = spawn_relay(true).await;
         let echo = spawn_echo().await;
 
         let front_node = socks5_node("front", front.address);
-        let mut back_node = socks5_node("back", back.address);
+        let mut back_node = trojan_node("back", back.address);
         back_node.detour = Some("front".into());
         back_node.id = back_node.derive_id();
 
@@ -261,12 +325,12 @@ mod tests {
     /// path, and the front that carries nothing sees nothing.
     #[tokio::test]
     async fn a_node_without_a_detour_never_touches_the_front() {
-        let front = spawn_relay().await;
-        let solo = spawn_relay().await;
+        let front = spawn_relay(false).await;
+        let solo = spawn_relay(true).await;
         let echo = spawn_echo().await;
 
         let front_node = socks5_node("front", front.address);
-        let solo_node = socks5_node("solo", solo.address);
+        let solo_node = trojan_node("solo", solo.address);
         let nodes = [front_node, solo_node.clone()];
         let (registry, proxies) = registries(&nodes);
 
@@ -297,11 +361,11 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             listener.local_addr().unwrap()
         };
-        let back = spawn_relay().await;
+        let back = spawn_relay(true).await;
         let echo = spawn_echo().await;
 
         let front_node = socks5_node("front", closed);
-        let mut back_node = socks5_node("back", back.address);
+        let mut back_node = trojan_node("back", back.address);
         back_node.detour = Some("front".into());
         back_node.id = back_node.derive_id();
 
@@ -327,22 +391,23 @@ mod tests {
     /// subscription pointed at.
     #[tokio::test]
     async fn a_subscription_dialer_proxy_carries_the_node_through_the_front() {
-        let front = spawn_relay().await;
-        let back = spawn_relay().await;
+        let front = spawn_relay(false).await;
+        let back = spawn_relay(true).await;
         let echo = spawn_echo().await;
 
         let subscription = honk_config::subscription::Subscription {
             name: "chain".into(),
             url: "https://example.test/chain.yaml".into(),
-            sub_type: honk_config::types::SubscriptionType::Clash,
+            sub_type: SubscriptionType::Clash,
             ..Default::default()
         };
-        // Flow mappings keep the body flat, so the indentation carries no
-        // meaning a reader has to work out before the assertions.
+        // Flow mappings keep the body flat, so no indentation carries a meaning
+        // the reader has to work out before the assertions.
         let body = format!(
-            "proxies:\n\
+            "proxies:/n/
              - {{name: front, type: socks5, server: {}, port: {}}}\n\
-             - {{name: back, type: socks5, server: {}, port: {}, dialer-proxy: front}}\n",
+             - {{name: back, type: trojan, server: {}, port: {}, password: {PASSWORD}, \
+                dialer-proxy: front}}\n",
             front.address.ip(),
             front.address.port(),
             back.address.ip(),
