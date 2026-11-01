@@ -239,7 +239,7 @@ async fn udp_request_observation_follows_each_source_view() {
                         .await
                         .unwrap()
                 } else {
-                    let client = handler.build_client(&node, None).await.unwrap();
+                    let client = handler.build_client(&node, None, None).await.unwrap();
                     handler
                         .udp_transport_via_client(client, target, None, Duration::from_secs(5))
                         .await
@@ -309,7 +309,7 @@ async fn udp_source_send_to_tracks_physical_admission() {
     let address = start_server(TEST_PASSWORD).await;
     let handler = Hysteria2Handler::new();
     let client = handler
-        .build_client(&test_node(address.port(), TEST_PASSWORD), None)
+        .build_client(&test_node(address.port(), TEST_PASSWORD), None, None)
         .await
         .unwrap();
     let target = "192.0.2.1:53".parse().unwrap();

@@ -725,7 +725,9 @@ fn test_udp_message_rejects_invalid_fragments() {
 async fn test_short_salamander_password_rejected_before_dial() {
     let mut node = test_node(443, TEST_PASSWORD);
     node.hysteria2_mut().unwrap().obfs = Some("abc".to_string());
-    let result = Hysteria2Handler::new().build_client(&node, None).await;
+    let result = Hysteria2Handler::new()
+        .build_client(&node, None, None)
+        .await;
     let error = match result {
         Ok(_) => panic!("short Salamander password must be rejected"),
         Err(error) => error,
@@ -738,7 +740,10 @@ async fn test_invalid_port_hopping_rejected_before_dial() {
     let mut node = test_node(443, TEST_PASSWORD);
     for spec in ["0-10", "443,443", "443-445,445-446"] {
         node.hysteria2_mut().unwrap().port_hopping = Some(spec.to_string());
-        let error = match Hysteria2Handler::new().build_client(&node, None).await {
+        let error = match Hysteria2Handler::new()
+            .build_client(&node, None, None)
+            .await
+        {
             Ok(_) => panic!("invalid port hopping list must be rejected"),
             Err(error) => error,
         };
@@ -751,7 +756,7 @@ async fn test_downlink_mbps_is_serialized_as_bytes_per_second() {
     let mut node = test_node(443, TEST_PASSWORD);
     node.hysteria2_mut().unwrap().down_mbps = Some(1);
     let client = Hysteria2Handler::new()
-        .build_client(&node, None)
+        .build_client(&node, None, None)
         .await
         .unwrap();
     let frame = auth_request_frame(TEST_PASSWORD, client.rx_bytes_per_second);
@@ -1005,7 +1010,7 @@ async fn udp_carrier_close_is_node_failure() {
     let server_addr = start_server(TEST_PASSWORD).await;
     let node = test_node(server_addr.port(), TEST_PASSWORD);
     let handler = Hysteria2Handler::new();
-    let client = handler.build_client(&node, None).await.unwrap();
+    let client = handler.build_client(&node, None, None).await.unwrap();
     let timeout = Duration::from_secs(5);
     let transport = handler
         .udp_transport_via_client(
@@ -1575,7 +1580,10 @@ async fn obfs_cannot_ride_a_detour() {
     let error = Hysteria2Handler::new()
         .build_client(&node, None, Some(&path))
         .await
-        .expect_err("obfs and a detour cannot both apply")
+        // `Result::expect_err` would demand `Debug` on the client, which is
+        // never worth deriving for a live socket holder.
+        .err()
+        .expect("obfs and a detour cannot both apply")
         .to_string();
     assert!(error.contains("cannot ride a detour"), "{error}");
     assert!(error.contains(&node.name), "{error}");

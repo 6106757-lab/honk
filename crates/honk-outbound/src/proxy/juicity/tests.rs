@@ -214,7 +214,7 @@ async fn udp_carrier_close_is_node_failure() {
     let server_addr = start_server(TEST_PASSWORD).await;
     let node = test_node(server_addr.port(), TEST_PASSWORD);
     let handler = JuicityHandler::new();
-    let client = handler.build_client(&node, None).await.unwrap();
+    let client = handler.build_client(&node, None, None).await.unwrap();
     let timeout = Duration::from_secs(5);
     let transport = handler
         .udp_transport_via_client(
@@ -690,7 +690,7 @@ async fn dropping_the_transport_releases_the_stream() {
     let (server, mut streams) = start_wire_server().await;
     let node = test_node(server.port(), TEST_PASSWORD);
     let handler = JuicityHandler::new();
-    let client = handler.build_client(&node, None).await.unwrap();
+    let client = handler.build_client(&node, None, None).await.unwrap();
     let a: SocketAddr = "192.0.2.1:53".parse().unwrap();
     let transport = handler
         .udp_transport_via_client(client, a, None, T, true)

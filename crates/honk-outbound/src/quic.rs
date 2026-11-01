@@ -511,13 +511,6 @@ pub struct QuicClient<C> {
     /// run QUIC over a salamander-obfuscated socket; when unset the plain
     /// marked socket from [`client_endpoint`] is used.
     endpoint_factory: Option<Arc<dyn Fn(bool) -> io::Result<Endpoint> + Send + Sync>>,
-    /// The node this one rides out through, when it names one. QUIC runs over
-    /// the framed UDP transport that node hands back instead of a socket of
-    /// its own; the dial is async, so it cannot go through the sync factory.
-    detour: Option<Arc<crate::proxy::detour::DetourPath>>,
-    /// Advertised `max_udp_payload_size` cap for the default endpoint (see
-    /// [`client_endpoint`] for the safe 1252 default).
-    mtu: u16,
     /// The node this one rides out through, when it names one.
     ///
     /// QUIC then runs over the framed UDP transport that node hands back
@@ -526,6 +519,9 @@ pub struct QuicClient<C> {
     /// because a node that names a path out is not reaching the server on its
     /// own socket at all.
     detour: Option<Arc<crate::proxy::detour::DetourPath>>,
+    /// Advertised `max_udp_payload_size` cap for the default endpoint (see
+    /// [`client_endpoint`] for the safe 1252 default).
+    mtu: u16,
     flow_control_profiles: Arc<AdaptiveFlowProfiles>,
     state: Arc<Mutex<State<C>>>,
     task_scope: crate::runtime::TaskScope,
