@@ -480,6 +480,8 @@ impl ControlPlane {
             &new_runtime_registry,
             &new_config.nodes,
             &self.proxy_registry,
+            &new_config.groups,
+            &new_group_manager,
         );
         let Some(dns_router) = super::dns::reuse_or_build_dns_router(
             &current_config,

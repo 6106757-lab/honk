@@ -21,11 +21,6 @@ pub(in crate::control) fn config_with_subscription_nodes(
         .nodes
         .retain(|n| n.subscription_id != Some(subscription_id));
     config.nodes.extend(nodes);
-    // A subscription carries whatever `dialer-proxy` named, and a group is a
-    // routing-layer placeholder that nothing on the dial path can ride. Settle
-    // those here exactly as a parsed configuration does, rather than letting a
-    // node through whose detour can never be bound and whose every dial fails.
-    config.settle_node_detours();
     // Stable node IDs may survive a rename or move between subscriptions, so
     // prune dead members and rebuild filter-derived membership from provenance.
     let live: std::collections::HashSet<uuid::Uuid> = config.nodes.iter().map(|n| n.id).collect();
@@ -247,15 +242,15 @@ mod tests {
         ));
     }
 
-    /// A subscription's `dialer-proxy` may name a group, and a group is a
-    /// routing-layer placeholder: `bind_node_detours` works by node name, so
-    /// such a detour would never be bound and every dial would refuse. The
-    /// merge settles it away, leaving the node on its own path.
+    /// A subscription's `dialer-proxy` may name a group, and the bind resolves
+    /// a group on each dial to whichever member it then picks. Nothing about
+    /// the merge is allowed to take that name away.
     #[test]
-    fn a_subscription_detour_naming_a_group_is_settled() {
+    fn a_subscription_detour_naming_a_group_survives_the_merge() {
         let subscription_id = uuid::Uuid::new_v4();
         let mut node = subscription_node(subscription_id);
         node.detour = Some("front".into());
+        node.id = node.derive_id();
         let mut current = Config::default();
         current.groups.push(Group {
             name: "front".into(),
@@ -264,14 +259,10 @@ mod tests {
 
         let merged = config_with_subscription_nodes(&current, subscription_id, vec![node]);
 
-        let remaining: Vec<_> = merged
-            .nodes
-            .iter()
-            .filter_map(|node| node.detour_name())
-            .collect();
-        assert!(
-            remaining.is_empty(),
-            "no node may keep a group detour: {remaining:?}"
+        assert_eq!(
+            merged.nodes[0].detour_name(),
+            Some("front"),
+            "a group is a detour the bind can resolve, so it must reach it"
         );
     }
 

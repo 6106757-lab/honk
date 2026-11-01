@@ -1,9 +1,11 @@
 //! The path a node takes out when it names a detour.
 //!
 //! A server the direct path out cannot reach is often reachable from another
-//! node, so a node may name one. Turning that name into a dial needs both the
-//! node set and the proxy registry, so the generation resolves it once and
-//! hands the node a [`DetourPath`].
+//! node, so a node may name one — or a group, whose current member carries it.
+//! Turning that name into a dial needs the node set, the groups and the proxy
+//! registry, so the generation resolves it once and hands the node a
+//! [`DetourPath`]. A group is the one part that cannot be resolved that early,
+//! and it is resolved again on every dial instead.
 //!
 //! A dial through it yields the same byte stream a socket would, and for UDP
 //! the same framed transport, so the protocol above does not have to know
@@ -14,7 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use honk_config::node::Node;
+use honk_config::types::NodeProtocol;
 
+use crate::alive::{IpVersion, ProbeDomain};
+use crate::group::GroupManager;
 use crate::proxy::{AsyncReadWrite, PacketTransport, ProxyRegistry};
 use crate::runtime::OutboundRuntimeRegistry;
 
@@ -47,6 +52,20 @@ pub async fn resolve_endpoint(address: &str) -> anyhow::Result<SocketAddr> {
         .ok_or_else(|| anyhow::anyhow!("endpoint {address} resolved to nothing"))
 }
 
+/// What the operator named: one node, or a group that picks one.
+///
+/// A group is resolved at dial time rather than at bind time. That is the
+/// point of naming one — the front follows the group's current choice, so a
+/// selector the operator has just switched, or a fallback that has failed over
+/// since the last reload, carries the next dial without a reload of its own.
+enum DetourTarget {
+    Node(uuid::Uuid),
+    Group {
+        name: String,
+        manager: Arc<GroupManager>,
+    },
+}
+
 /// The node this one dials through, pinned to the generation that built it.
 ///
 /// Dials stay inside that generation: a retired one refuses them, and the node
@@ -54,15 +73,21 @@ pub async fn resolve_endpoint(address: &str) -> anyhow::Result<SocketAddr> {
 pub struct DetourPath {
     proxies: Arc<ProxyRegistry>,
     generation: Arc<OutboundRuntimeRegistry>,
-    node_id: uuid::Uuid,
+    target: DetourTarget,
+    /// Whether the node riding this path is itself MASQUE. Only a group
+    /// reaches this field: a node target is judged when it is bound, but a
+    /// group gives no answer until the dial asks.
+    rider_is_masque: bool,
 }
 
 impl std::fmt::Debug for DetourPath {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("DetourPath")
-            .field("node_id", &self.node_id)
-            .finish_non_exhaustive()
+        let mut debug = formatter.debug_struct("DetourPath");
+        match &self.target {
+            DetourTarget::Node(node_id) => debug.field("node_id", node_id),
+            DetourTarget::Group { name, .. } => debug.field("group", name),
+        };
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -76,7 +101,55 @@ impl DetourPath {
         Self {
             proxies,
             generation,
-            node_id,
+            target: DetourTarget::Node(node_id),
+            rider_is_masque: false,
+        }
+    }
+
+    /// Pin a detour to a group, resolved on each dial to whichever node the
+    /// group then picks for that network.
+    ///
+    /// The rider's protocol comes along because the pair cannot be judged
+    /// before the group answers.
+    pub fn to_group(
+        proxies: Arc<ProxyRegistry>,
+        generation: Arc<OutboundRuntimeRegistry>,
+        name: &str,
+        manager: Arc<GroupManager>,
+        rider: NodeProtocol,
+    ) -> Self {
+        Self {
+            proxies,
+            generation,
+            target: DetourTarget::Group {
+                name: name.to_string(),
+                manager,
+            },
+            rider_is_masque: rider == NodeProtocol::Masque,
+        }
+    }
+
+    /// The node that carries this dial, for this network.
+    fn resolve(&self, domain: ProbeDomain) -> anyhow::Result<uuid::Uuid> {
+        match &self.target {
+            DetourTarget::Node(node_id) => Ok(*node_id),
+            DetourTarget::Group { name, manager } => {
+                let node = manager
+                    .select_node_for_domain(name, domain, IpVersion::V4)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "detour group {name:?} has no node that can carry this dial"
+                        )
+                    })?;
+                if self.rider_is_masque && node.protocol() == NodeProtocol::Masque {
+                    anyhow::bail!(
+                        "detour group {name:?} selected {:?}, which is MASQUE and would nest \
+                         tunnels",
+                        node.name
+                    );
+                }
+                Ok(node.id)
+            }
         }
     }
 
@@ -90,15 +163,10 @@ impl DetourPath {
         target: SocketAddr,
         timeout: Duration,
     ) -> anyhow::Result<Box<dyn AsyncReadWrite>> {
+        let node_id = self.resolve(ProbeDomain::Tcp)?;
         let stream = self
             .proxies
-            .dial_runtime(
-                Arc::clone(&self.generation),
-                self.node_id,
-                target,
-                None,
-                timeout,
-            )
+            .dial_runtime(Arc::clone(&self.generation), node_id, target, None, timeout)
             .await?;
         Ok(stream.stream)
     }
@@ -110,10 +178,11 @@ impl DetourPath {
         target_domain: Option<&str>,
         timeout: Duration,
     ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        let node_id = self.resolve(ProbeDomain::DataUdp)?;
         self.proxies
             .dial_udp_transport_runtime(
                 Arc::clone(&self.generation),
-                self.node_id,
+                node_id,
                 target,
                 target_domain,
                 timeout,
@@ -214,5 +283,37 @@ mod tests {
             format!("{path:?}").contains(&node_id.to_string()),
             "the debug form names the node it rides: {path:?}"
         );
+    }
+
+    fn group_path(name: &str) -> DetourPath {
+        DetourPath::to_group(
+            Arc::new(ProxyRegistry::new()),
+            Arc::new(OutboundRuntimeRegistry::build(&[]).unwrap()),
+            name,
+            Arc::new(GroupManager::new(&[], &[])),
+            NodeProtocol::Trojan,
+        )
+    }
+
+    /// A group detour has no node to name, so it names the group instead.
+    #[test]
+    fn a_group_detour_names_the_group_it_resolves() {
+        let path = group_path("fronts");
+        assert!(
+            format!("{path:?}").contains("fronts"),
+            "the debug form names the group: {path:?}"
+        );
+    }
+
+    /// A group that can produce nothing refuses the dial. Sending it on its own
+    /// path would be indistinguishable from a node with no detour at all.
+    #[test]
+    fn a_group_with_no_member_refuses_to_carry_the_dial() {
+        let path = group_path("empty");
+        let error = path
+            .resolve(ProbeDomain::Tcp)
+            .expect_err("an empty group carries nothing")
+            .to_string();
+        assert!(error.contains("empty"), "{error}");
     }
 }

@@ -1,13 +1,15 @@
-//! Wiring a node's detour to the node it names.
+//! Wiring a node's detour to the node or group it names.
 //!
 //! A server the direct path out cannot reach is often reachable from another
-//! node, so a node may name one. Turning that name into a dial needs both the
-//! node set and the proxy registry, neither of which the outbound layer owns,
-//! so the binding happens here — once per generation, at startup and on every
-//! reload.
+//! node, so a node may name one — or a group, whose current member carries it.
+//! Turning that name into a dial needs the node set, the groups and the proxy
+//! registry, none of which the outbound layer owns, so the binding happens
+//! here — once per generation, at startup and on every reload.
 
+use honk_config::group::Group;
 use honk_config::node::Node;
 use honk_config::types::NodeProtocol;
+use honk_outbound::group::GroupManager;
 use honk_outbound::proxy::ProxyRegistry;
 use honk_outbound::proxy::detour::DetourPath;
 use honk_outbound::runtime::OutboundRuntimeRegistry;
@@ -19,36 +21,55 @@ use std::sync::Arc;
 /// protocol can end up taking it twice. Unknown names, and a MASQUE node whose
 /// detour is another MASQUE node, are reported and skipped rather than failing
 /// the generation: one unreachable node should not take down the rest.
+///
+/// The name may be a node or a group. A group is resolved on each dial, so the
+/// front follows the group's current choice instead of whichever node happened
+/// to be selected when the generation was built.
 pub(crate) fn bind_node_detours(
     registry: &Arc<OutboundRuntimeRegistry>,
     nodes: &[Node],
     proxies: &Arc<ProxyRegistry>,
+    groups: &[Group],
+    manager: &Arc<GroupManager>,
 ) {
     for node in nodes {
         let Some(name) = node.detour_name() else {
             continue;
         };
-        let Some(target) = nodes.iter().find(|candidate| candidate.name == name) else {
-            tracing::warn!(
-                "node {}: detour {name:?} is not a node in this configuration",
-                node.name
-            );
-            continue;
+        let path = match (
+            nodes.iter().find(|candidate| candidate.name == name),
+            groups.iter().find(|group| group.name == name),
+        ) {
+            (Some(target), _) => {
+                if node.protocol() == NodeProtocol::Masque
+                    && target.protocol() == NodeProtocol::Masque
+                {
+                    tracing::warn!(
+                        "masque node {}: detour {name:?} is itself a MASQUE node, which would \
+                         nest tunnels; ignored",
+                        node.name
+                    );
+                    continue;
+                }
+                DetourPath::new(Arc::clone(proxies), Arc::clone(registry), target.id)
+            }
+            (None, Some(_)) => DetourPath::to_group(
+                Arc::clone(proxies),
+                Arc::clone(registry),
+                name,
+                Arc::clone(manager),
+                node.protocol(),
+            ),
+            (None, None) => {
+                tracing::warn!(
+                    "node {}: detour {name:?} is neither a node nor a group in this \
+                     configuration",
+                    node.name
+                );
+                continue;
+            }
         };
-        if node.protocol() == NodeProtocol::Masque && target.protocol() == NodeProtocol::Masque {
-            tracing::warn!(
-                "masque node {}: detour {name:?} is itself a MASQUE node, which would nest \
-                 tunnels; ignored",
-                node.name
-            );
-            continue;
-        }
-        let path = Arc::new(DetourPath::new(
-            Arc::clone(proxies),
-            Arc::clone(registry),
-            target.id,
-        ));
-        if !registry.bind_detour(node.id, path) {
+        if !registry.bind_detour(node.id, Arc::new(path)) {
             tracing::warn!(
                 "node {}: detour {name:?} could not be bound to its runtime",
                 node.name
@@ -75,6 +96,7 @@ mod tests {
     use super::*;
     use honk_config::node::{OutboundConfig, TrojanConfig};
     use honk_config::types::{NodeProtocol, SubscriptionType};
+    use honk_outbound::group::GroupManager;
     use honk_outbound::proxy::ProtocolEntry;
     use honk_outbound::proxy::socks5::Socks5Handler;
     use honk_outbound::proxy::trojan::TrojanHandler;
@@ -259,8 +281,12 @@ mod tests {
     }
 
     /// A generation that can dial either hop, with detours bound the way the
-    /// control plane binds them.
-    fn registries(nodes: &[Node]) -> (Arc<OutboundRuntimeRegistry>, Arc<ProxyRegistry>) {
+    /// control plane binds them. The group manager is what lets a detour name a
+    /// group, so it is built from the same node set the runtimes are.
+    fn registries(
+        nodes: &[Node],
+        groups: &[honk_config::group::Group],
+    ) -> (Arc<OutboundRuntimeRegistry>, Arc<ProxyRegistry>) {
         let (registry, _) = OutboundRuntimeRegistry::build_reusing(nodes, 4, None).unwrap();
         let mut proxies = ProxyRegistry::new();
         proxies.register(ProtocolEntry::new(
@@ -273,7 +299,8 @@ mod tests {
         ));
         let registry = Arc::new(registry);
         let proxies = Arc::new(proxies);
-        bind_node_detours(&registry, nodes, &proxies);
+        let manager = Arc::new(GroupManager::new(groups, nodes));
+        bind_node_detours(&registry, nodes, &proxies, groups, &manager);
         (registry, proxies)
     }
 
@@ -300,7 +327,7 @@ mod tests {
         back_node.id = back_node.derive_id();
 
         let nodes = [front_node, back_node.clone()];
-        let (registry, proxies) = registries(&nodes);
+        let (registry, proxies) = registries(&nodes, &[]);
 
         let mut stream = proxies
             .dial_runtime(Arc::clone(&registry), back_node.id, echo, None, TIMEOUT)
@@ -332,7 +359,7 @@ mod tests {
         let front_node = socks5_node("front", front.address);
         let solo_node = trojan_node("solo", solo.address);
         let nodes = [front_node, solo_node.clone()];
-        let (registry, proxies) = registries(&nodes);
+        let (registry, proxies) = registries(&nodes, &[]);
 
         let mut stream = proxies
             .dial_runtime(Arc::clone(&registry), solo_node.id, echo, None, TIMEOUT)
@@ -370,7 +397,7 @@ mod tests {
         back_node.id = back_node.derive_id();
 
         let nodes = [front_node, back_node.clone()];
-        let (registry, proxies) = registries(&nodes);
+        let (registry, proxies) = registries(&nodes, &[]);
 
         let error = proxies
             .dial_runtime(Arc::clone(&registry), back_node.id, echo, None, TIMEOUT)
@@ -431,7 +458,7 @@ mod tests {
             "the detour must survive parsing"
         );
 
-        let (registry, proxies) = registries(&nodes);
+        let (registry, proxies) = registries(&nodes, &[]);
         let mut stream = proxies
             .dial_runtime(Arc::clone(&registry), back_node.id, echo, None, TIMEOUT)
             .await
@@ -448,6 +475,85 @@ mod tests {
             back.targets(),
             vec![echo],
             "only the chained node is asked for the far side"
+        );
+    }
+
+    /// A group names a front as a node does. The bind resolves it on the dial,
+    /// so the member the group then carries is the hop that carries the leg:
+    /// re-pointing the group moves the chain without a reload, which is the
+    /// point of naming a group at all.
+    #[tokio::test]
+    async fn a_node_detoured_through_a_group_is_carried_by_its_member() {
+        let front = spawn_relay(false).await;
+        let spare = spawn_relay(false).await;
+        let back = spawn_relay(true).await;
+        let echo = spawn_echo().await;
+
+        let front_node = socks5_node("front", front.address);
+        let spare_node = socks5_node("spare", spare.address);
+        let mut back_node = trojan_node("back", back.address);
+        back_node.detour = Some("fronts".into());
+        back_node.id = back_node.derive_id();
+
+        let groups = [honk_config::group::Group {
+            name: "fronts".into(),
+            policy: honk_config::group::GroupPolicy::Selector,
+            nodes: vec![front_node.id],
+            ..Default::default()
+        }];
+        let nodes = [front_node, spare_node, back_node.clone()];
+        let (registry, proxies) = registries(&nodes, &groups);
+
+        let mut stream = proxies
+            .dial_runtime(Arc::clone(&registry), back_node.id, echo, None, TIMEOUT)
+            .await
+            .expect("a group detour must dial through the group's member")
+            .stream;
+        say_ping(&mut stream).await;
+
+        assert_eq!(
+            front.targets(),
+            vec![back.address],
+            "the group's member must carry the chained node's server"
+        );
+        assert!(
+            spare.targets().is_empty(),
+            "a node the group does not contain must not be touched"
+        );
+        assert_eq!(
+            back.targets(),
+            vec![echo],
+            "the far side is the back node's"
+        );
+    }
+
+    /// The chain is mandatory whatever it names. A group that can produce no
+    /// node fails the dial rather than letting the traffic leave on its own
+    /// path, which would look like an ordinary connection.
+    #[tokio::test]
+    async fn a_group_with_nothing_to_select_fails_the_dial() {
+        let back = spawn_relay(true).await;
+        let echo = spawn_echo().await;
+
+        let mut back_node = trojan_node("back", back.address);
+        back_node.detour = Some("empty".into());
+        back_node.id = back_node.derive_id();
+
+        let groups = [honk_config::group::Group {
+            name: "empty".into(),
+            policy: honk_config::group::GroupPolicy::Selector,
+            ..Default::default()
+        }];
+        let nodes = [back_node.clone()];
+        let (registry, proxies) = registries(&nodes, &groups);
+
+        proxies
+            .dial_runtime(Arc::clone(&registry), back_node.id, echo, None, TIMEOUT)
+            .await
+            .expect_err("a group with no member must fail the chained node");
+        assert!(
+            back.targets().is_empty(),
+            "the chained node must not reach its own server directly"
         );
     }
 }

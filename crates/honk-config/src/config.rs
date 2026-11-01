@@ -617,7 +617,6 @@ impl Config {
     ) -> Result<crate::parser::LoadedConfig, DetailedConfigError> {
         let mut loaded = crate::parser::load_dae_sources(path, overlay, limits, diagnostics)?;
         loaded.config.derive_node_ids();
-        loaded.config.settle_node_detours();
         Ok(loaded)
     }
 
@@ -632,7 +631,6 @@ impl Config {
         let mut loaded =
             crate::parser::load_dae_sources_in_memory(path, sources, limits, diagnostics)?;
         loaded.config.derive_node_ids();
-        loaded.config.settle_node_detours();
         Ok(loaded)
     }
 
@@ -664,7 +662,6 @@ impl Config {
                 match result {
                     Ok(mut config) => {
                         config.derive_node_ids();
-                        config.settle_node_detours();
                         return Ok(config);
                     }
                     Err(error) => {
@@ -695,7 +692,6 @@ impl Config {
                 Ok(mut config) => {
                     diagnostics.drain(start..attempt_start);
                     config.derive_node_ids();
-                    config.settle_node_detours();
                     return Ok(config);
                 }
                 Err(error) => {
@@ -777,7 +773,6 @@ impl Config {
         )
         .map(|mut config| {
             config.derive_node_ids();
-            config.settle_node_detours();
             config
         });
         finish_attempt(result, diagnostics)
@@ -828,39 +823,6 @@ impl Config {
                 }
             }
             group.nodes = members;
-        }
-    }
-
-    /// Drop node detours that name a group.
-    ///
-    /// A node's detour names the node it dials through, or `direct`. A group is
-    /// a routing-level placeholder: which of its members carries a flow is
-    /// decided when a rule sends that flow through it, and nothing on the dial
-    /// path can ride the group itself.
-    ///
-    /// Subscriptions do carry `dialer-proxy` pointing at a group, so the name is
-    /// dropped here rather than failing the configuration: the node then dials
-    /// on its own path and the operator gets a warning naming it. A failed
-    /// configuration would take down every other node in the subscription too.
-    pub fn settle_node_detours(&mut self) {
-        let groups: std::collections::HashSet<&str> = self
-            .groups
-            .iter()
-            .map(|group| group.name.as_str())
-            .collect();
-        for node in &mut self.nodes {
-            let Some(name) = node.detour_name() else {
-                continue;
-            };
-            if !groups.contains(name) {
-                continue;
-            }
-            tracing::warn!(
-                "node {}: detour {name:?} names a group; a node detour must name a node or \
-                 direct, so this node dials on its own path",
-                node.name
-            );
-            node.detour = None;
         }
     }
 
@@ -2039,22 +2001,24 @@ mod node_detour_tests {
         node
     }
 
-    /// A group is a routing-level placeholder, so a detour naming one is dropped
-    /// rather than failing the configuration: subscriptions carry `dialer-proxy`
-    /// pointing at groups, and one bad entry must not take down every other node
-    /// in the same file.
+    /// A group names a front the way a node does. It is resolved to whichever
+    /// member the group then picks, so keeping it is the whole point: a node
+    /// that names a group is carried by it, not dropped onto its own path.
     #[test]
-    fn group_named_detour_is_dropped_while_node_and_direct_survive() {
+    fn a_group_named_detour_survives_alongside_node_and_direct() {
         let mut config = Config::default();
         config.ensure_builtin_nodes();
         config.nodes.push(detour_node("front", 443));
+        let front_id = config.nodes.last().expect("front was just pushed").id;
         config.groups.push(crate::group::Group {
             name: "front-group".into(),
             policy: crate::node::GroupPolicy::Selector,
+            nodes: vec![front_id],
             ..Default::default()
         });
         let mut rides_group = detour_node("rides-group", 444);
         rides_group.detour = Some("front-group".into());
+        rides_group.id = rides_group.derive_id();
         let mut rides_node = detour_node("rides-node", 445);
         rides_node.detour = Some("front".into());
         rides_node.id = rides_node.derive_id();
@@ -2062,8 +2026,6 @@ mod node_detour_tests {
         rides_direct.detour = Some("direct".into());
         rides_direct.id = rides_direct.derive_id();
         config.nodes.extend([rides_group, rides_node, rides_direct]);
-
-        config.settle_node_detours();
 
         let detour_of = |name: &str| {
             config
@@ -2073,38 +2035,42 @@ mod node_detour_tests {
                 .and_then(|node| node.detour_name())
                 .map(str::to_string)
         };
-        assert_eq!(detour_of("rides-group"), None, "a group is not a detour");
+        assert_eq!(detour_of("rides-group").as_deref(), Some("front-group"));
         assert_eq!(detour_of("rides-node").as_deref(), Some("front"));
         assert_eq!(detour_of("rides-direct").as_deref(), Some("direct"));
     }
 
-    /// Dropping the name exists precisely so the configuration still loads.
+    /// A group detour is a valid configuration, not a tolerated one.
     #[test]
-    fn settled_group_detour_still_validates() {
+    fn a_group_named_detour_validates() {
         let mut config = Config::default();
         config.ensure_builtin_nodes();
         config.nodes.push(detour_node("front", 443));
+        let front_id = config.nodes.last().expect("front was just pushed").id;
         config.groups.push(crate::group::Group {
             name: "front-group".into(),
             policy: crate::node::GroupPolicy::Selector,
+            nodes: vec![front_id],
             ..Default::default()
         });
         let mut rides_group = detour_node("rides-group", 444);
         rides_group.detour = Some("front-group".into());
+        rides_group.id = rides_group.derive_id();
         config.nodes.push(rides_group);
 
-        config.settle_node_detours();
         // Say what failed: a minimal configuration can only be checked once
         // the reason is in front of you.
         if let Err(error) = config.validate() {
-            panic!("a dropped group detour must not fail the configuration: {error:#}");
+            panic!("a group detour must not fail the configuration: {error:#}");
         }
-        assert!(
+        assert_eq!(
             config
                 .nodes
-                .iter()
-                .all(|node| node.detour_name() != Some("front-group")),
-            "no node may keep a group as its detour"
+                .last()
+                .expect("rides-group was just pushed")
+                .detour_name(),
+            Some("front-group"),
+            "the group detour must reach the dial path"
         );
     }
 }

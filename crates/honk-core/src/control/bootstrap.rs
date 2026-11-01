@@ -163,7 +163,14 @@ impl ControlPlane {
             "Control-plane descriptor budget"
         );
         let outbound_runtime = runtime_registry.read().clone();
-        super::node_detour::bind_node_detours(&outbound_runtime, &config.nodes, &proxy_registry);
+        let pinned_groups = group_manager.read().clone();
+        super::node_detour::bind_node_detours(
+            &outbound_runtime,
+            &config.nodes,
+            &proxy_registry,
+            &config.groups,
+            &pinned_groups,
+        );
         dns_upstream_pool.set_runtime_generation(Arc::clone(&outbound_runtime))?;
         install_url_member_resolver(
             &alive_set,
@@ -173,7 +180,6 @@ impl ControlPlane {
         );
 
         let pinned_router = Arc::new(router.clone());
-        let pinned_groups = group_manager.read().clone();
         dns_upstream_pool.set_group_manager_snapshot(Arc::clone(&pinned_groups));
         dns_upstream_pool.set_traffic_router_snapshot(Arc::clone(&pinned_router));
         let initial_routing_plan = Arc::new(Self::compile_routing_plan(&config, &router)?);
