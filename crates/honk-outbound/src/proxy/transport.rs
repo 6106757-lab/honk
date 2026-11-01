@@ -209,16 +209,6 @@ pub(crate) async fn maybe_tls_wrap_concrete(
         }
     };
     if let Some(reality) = crate::reality::parse_reality_config(node)? {
-        // REALITY answers an abandoned handshake by re-dialling the same peer
-        // on the bypass mark. That is a direct dial by construction, so a
-        // REALITY node on a detour would leak its traffic out of the real
-        // interface exactly when the handshake looks most suspicious.
-        anyhow::ensure!(
-            detour.is_none(),
-            "node {}: REALITY cannot be dialled through a detour; the fallback handshake \
-             re-dials the peer directly",
-            node.name
-        );
         let deadline = tokio::time::Instant::now() + connect_timeout * 3;
         let alpn = node.is_xhttp().then_some(b"\x02h2".as_slice());
         let setup = async {
@@ -245,13 +235,36 @@ pub(crate) async fn maybe_tls_wrap_concrete(
                             )
                             .into());
                         }
-                        let tcp = crate::util::connect_marked_addr(
-                            peer,
-                            Some(crate::util::bypass_mark()),
-                            connect_timeout.min(remaining),
-                        )
-                        .await?;
-                        let tcp = ObservedTcp::new(tcp);
+                        let budget = connect_timeout.min(remaining);
+                        // The re-dial is the same peer over the same path.
+                        // With a detour that means through the detour: a
+                        // direct socket here would be the leak the detour
+                        // exists to prevent, and it would happen exactly when
+                        // the handshake looks most suspicious.
+                        let tcp = match detour {
+                            Some(path) => ObservedTcp::new_carrier(
+                                crate::transport_quality::tcp::Carrier::Chained(
+                                    path.connect(peer, budget).await.map_err(|error| {
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::Other,
+                                            format!(
+                                                "node {}: detour could not re-dial {peer}: \
+                                                 {error}",
+                                                node.name
+                                            ),
+                                        )
+                                    })?,
+                                ),
+                            ),
+                            None => ObservedTcp::new(
+                                crate::util::connect_marked_addr(
+                                    peer,
+                                    Some(crate::util::bypass_mark()),
+                                    budget,
+                                )
+                                .await?,
+                            ),
+                        };
                         crate::reality::reality_connect_with_key_shares(
                             tcp, &reality, chrome, false, alpn,
                         )

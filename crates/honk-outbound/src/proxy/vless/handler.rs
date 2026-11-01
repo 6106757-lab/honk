@@ -574,6 +574,51 @@ impl TcpOutbound for VLessHandler {
             }
         }
     }
+
+    /// The same dial carried by a detour the caller names, which is how a
+    /// group's detour reaches a VLESS member.
+    ///
+    /// Only the plain stream path can be carried. H2 and Cool put many flows
+    /// on one tunnel the node keeps, and a tunnel opened over some other path
+    /// is not one this flow may join: joining it would send this flow down
+    /// whichever path that earlier caller had. They refuse rather than ride
+    /// the wrong one.
+    async fn dial_runtime_detoured(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<ProxyStream> {
+        let path = runtime.node.vless().unwrap().tcp_path();
+        anyhow::ensure!(
+            path == VlessTcpPath::Direct,
+            "VLESS {path:?} multiplexes flows over a tunnel the node keeps, so it cannot be \
+             carried by a detour a group names"
+        );
+        if runtime.xhttp.is_some() {
+            let operation = self.prepare_retained_base_detoured(
+                &runtime,
+                target,
+                target_domain,
+                connect_timeout,
+                Some(detour),
+            );
+            let (stream, preparation) =
+                crate::runtime::flow_observation::request_write(std::pin::pin!(operation)).await?;
+            preparation.commit()?;
+            return Ok(stream);
+        }
+        self.dial_base_detoured(
+            &runtime.node,
+            target,
+            target_domain,
+            connect_timeout,
+            detour,
+        )
+        .await
+    }
 }
 
 #[async_trait]
