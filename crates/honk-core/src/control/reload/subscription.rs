@@ -274,4 +274,35 @@ mod tests {
             "no node may keep a group detour: {remaining:?}"
         );
     }
+
+    /// Settling away a group name is a repair, not a purge: a detour naming a
+    /// node is the whole point, so the merge must leave it exactly as written.
+    #[test]
+    fn a_subscription_detour_naming_a_node_survives_the_merge() {
+        let subscription_id = uuid::Uuid::new_v4();
+        let mut front = subscription_node(subscription_id);
+        front.name = "front".into();
+        front.id = front.derive_id();
+        let mut rider = subscription_node(subscription_id);
+        rider.name = "rider".into();
+        // The identity is content-derived, so a second hop needs a server of
+        // its own or it is simply the same node again.
+        rider.address = "127.0.0.1:1081".into();
+        rider.detour = Some("front".into());
+        rider.id = rider.derive_id();
+
+        let merged =
+            config_with_subscription_nodes(&Config::default(), subscription_id, vec![front, rider]);
+
+        let rider = merged
+            .nodes
+            .iter()
+            .find(|node| node.name == "rider")
+            .expect("the chained node must merge");
+        assert_eq!(
+            rider.detour_name(),
+            Some("front"),
+            "a node detour is what the merge exists to keep"
+        );
+    }
 }
