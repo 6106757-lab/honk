@@ -2026,12 +2026,15 @@ mod builtin_nodes_tests {
 mod node_detour_tests {
     use super::*;
 
-    fn detour_node(name: &str) -> crate::node::Node {
+    /// Each node needs a server of its own. The content-derived identity
+    /// covers protocol, host, port, credentials and dial shape — never the
+    /// name — so two nodes built from one link would share an ID, and
+    /// validation rejects a collection holding the same ID twice.
+    fn detour_node(name: &str, port: u16) -> crate::node::Node {
         let mut node =
-            crate::node::Node::from_share_link("trojan://secret@example.com:443").unwrap();
+            crate::node::Node::from_share_link(&format!("trojan://secret@example.com:{port}"))
+                .unwrap();
         node.name = name.into();
-        // The identity is derived from content, so renaming a node without
-        // re-deriving leaves an ID validation rejects as non-canonical.
         node.id = node.derive_id();
         node
     }
@@ -2044,18 +2047,20 @@ mod node_detour_tests {
     fn group_named_detour_is_dropped_while_node_and_direct_survive() {
         let mut config = Config::default();
         config.ensure_builtin_nodes();
-        config.nodes.push(detour_node("front"));
+        config.nodes.push(detour_node("front", 443));
         config.groups.push(crate::group::Group {
             name: "front-group".into(),
             policy: crate::node::GroupPolicy::Selector,
             ..Default::default()
         });
-        let mut rides_group = detour_node("rides-group");
+        let mut rides_group = detour_node("rides-group", 444);
         rides_group.detour = Some("front-group".into());
-        let mut rides_node = detour_node("rides-node");
+        let mut rides_node = detour_node("rides-node", 445);
         rides_node.detour = Some("front".into());
-        let mut rides_direct = detour_node("rides-direct");
+        rides_node.id = rides_node.derive_id();
+        let mut rides_direct = detour_node("rides-direct", 446);
         rides_direct.detour = Some("direct".into());
+        rides_direct.id = rides_direct.derive_id();
         config.nodes.extend([rides_group, rides_node, rides_direct]);
 
         config.settle_node_detours();
@@ -2078,21 +2083,22 @@ mod node_detour_tests {
     fn settled_group_detour_still_validates() {
         let mut config = Config::default();
         config.ensure_builtin_nodes();
-        config.nodes.push(detour_node("front"));
+        config.nodes.push(detour_node("front", 443));
         config.groups.push(crate::group::Group {
             name: "front-group".into(),
             policy: crate::node::GroupPolicy::Selector,
             ..Default::default()
         });
-        let mut rides_group = detour_node("rides-group");
+        let mut rides_group = detour_node("rides-group", 444);
         rides_group.detour = Some("front-group".into());
         config.nodes.push(rides_group);
 
         config.settle_node_detours();
-        assert!(
-            config.validate().is_ok(),
-            "a dropped group detour must not fail the configuration"
-        );
+        // Say what failed: a minimal configuration can only be checked once
+        // the reason is in front of you.
+        if let Err(error) = config.validate() {
+            panic!("a dropped group detour must not fail the configuration: {error:#}");
+        }
         assert!(
             config
                 .nodes
