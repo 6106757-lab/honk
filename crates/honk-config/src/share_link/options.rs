@@ -161,7 +161,7 @@ pub(super) fn detour(query: &Query) -> Option<&str> {
         "underlying_proxy",
     ]
     .iter()
-    .find_map(|key| query.get(*key))
+    .find_map(|key| query.get(key))
     .map(String::as_str)
     .map(str::trim)
     .filter(|name| !name.is_empty())

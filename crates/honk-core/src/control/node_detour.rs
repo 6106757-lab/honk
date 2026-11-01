@@ -196,10 +196,10 @@ mod tests {
                 let mut bytes = [0_u8; 2];
                 stream.read_exact(&mut bytes).await?;
                 let name = String::from_utf8_lossy(&host).into_owned();
-                tokio::net::lookup_host((name, port(bytes)))
+                let address = tokio::net::lookup_host((name.as_str(), port(bytes)))
                     .await?
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("{name} resolved to nothing"))
+                    .next();
+                address.ok_or_else(|| anyhow::anyhow!("{name} resolved to nothing"))
             }
             other => anyhow::bail!("unknown address type {other}"),
         }
