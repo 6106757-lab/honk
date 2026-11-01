@@ -32,11 +32,19 @@ pub async fn resolve_endpoint(address: &str) -> anyhow::Result<SocketAddr> {
 ///
 /// Dials stay inside that generation: a retired one refuses them, and the node
 /// is rebuilt with the next.
-#[derive(Debug)]
 pub struct DetourPath {
     proxies: Arc<ProxyRegistry>,
     generation: Arc<OutboundRuntimeRegistry>,
     node_id: uuid::Uuid,
+}
+
+impl std::fmt::Debug for DetourPath {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DetourPath")
+            .field("node_id", &self.node_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DetourPath {
