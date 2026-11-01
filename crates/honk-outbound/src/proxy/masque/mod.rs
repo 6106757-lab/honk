@@ -28,8 +28,22 @@ use honk_config::node::Node;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// Slots a generation's own tunnel (0) and the detour paths it carries (1, 2, …)
+/// occupy. Ephemeral runtimes — probes and one-shot dials — open their own
+/// tunnel rather than share the generation's, so their slots live in a high
+/// range that can never overlap and is unique per ephemeral runtime.
+const EPHEMERAL_MASQUE_BASE: u32 = 0x8000;
+const EPHEMERAL_MASQUE_SPAN: u32 = 0x7000;
+
+/// Monotonically handed out to ephemeral MASQUE tunnels so two probes of the
+/// same node never ask the kernel for the same TUN device name. Wraps within
+/// [`EPHEMERAL_MASQUE_SPAN`]; a slot is only reused once every prior holder has
+/// been torn down, and teardown deletes the device first.
+static NEXT_EPHEMERAL_MASQUE_SLOT: AtomicU32 = AtomicU32::new(EPHEMERAL_MASQUE_BASE);
 
 use super::{
     PacketOutbound, PacketTransport, ProbeableOutbound, ProxyStream, TcpOutbound,
@@ -130,10 +144,22 @@ impl MasqueRuntime {
         // The carrier died: drop the tunnel so its TUN device goes with it,
         // then rebuild. Cached TUN devices outlive their endpoint.
         guard.remove(&key);
-        // The lowest slot nobody is holding.
-        let slot = (0..=guard.len())
-            .find(|candidate| !guard.values().any(|entry| entry.slot == *candidate))
-            .unwrap_or(guard.len());
+        // A generation's own tunnel is slot 0 and the detours it carries are the
+        // small slots 1, 2, …; those names and route metrics must stay free for
+        // the traffic that actually rides them. An ephemeral runtime (a probe or
+        // a one-shot dial) owns nothing in the generation, so it takes a slot
+        // from a high range that is unique per call — otherwise its TUN device
+        // or default route would collide with the generation's and either fail
+        // to open or silently steal the generation's route.
+        let slot = if runtime.is_ephemeral() {
+            let raw = NEXT_EPHEMERAL_MASQUE_SLOT.fetch_add(1, Ordering::Relaxed);
+            EPHEMERAL_MASQUE_BASE + (raw % EPHEMERAL_MASQUE_SPAN)
+        } else {
+            // The lowest slot nobody is holding.
+            (0..=guard.len())
+                .find(|candidate| !guard.values().any(|entry| entry.slot == *candidate))
+                .unwrap_or(guard.len())
+        };
         let tunnel = Arc::new(
             carrier::open_tunnel(runtime.node.as_ref(), connect_timeout, detour, slot).await?,
         );
