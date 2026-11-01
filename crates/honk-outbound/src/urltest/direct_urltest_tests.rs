@@ -50,6 +50,7 @@ async fn direct_urltest_routes_the_full_requested_target() {
             &handler,
             &format!("http://{addr}/wrong?probe=1"),
             Duration::from_secs(2),
+            None,
         )
         .await
         .is_err()
@@ -59,6 +60,7 @@ async fn direct_urltest_routes_the_full_requested_target() {
         &handler,
         &format!("http://{addr}/requested?probe=1"),
         Duration::from_secs(2),
+        None,
     )
     .await
     .expect("direct URLTest must route the requested path, query, and authority");
@@ -103,6 +105,7 @@ async fn native_request_normalizes_query_only_target() {
         None,
         Duration::from_secs(1),
         Duration::from_secs(1),
+        None,
         None,
     )
     .await;

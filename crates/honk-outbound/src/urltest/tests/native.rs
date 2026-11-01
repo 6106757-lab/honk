@@ -66,6 +66,7 @@ async fn native_http1_cold_and_warm_keep_pinned_authority_without_redirects() {
             addr,
             cold,
             Duration::from_secs(5),
+            None,
         )
         .await
         .unwrap();
@@ -118,6 +119,7 @@ async fn native_http1_rejects_invalid_responses_but_keeps_validated_close_fallba
             addr,
             cold,
             Duration::from_secs(2),
+            None,
         )
         .await;
         assert_eq!(result.is_ok(), succeeds, "cold={cold}: {result:?}");
@@ -153,6 +155,7 @@ async fn http_probe_drop_releases_connection_before_return() {
         addr,
         false,
         Duration::from_secs(5),
+        None,
     ));
     tokio::select! {
         result = &mut probe => panic!("probe completed before drop: {result:?}"),
@@ -200,6 +203,7 @@ async fn native_https_keeps_request_sni_on_pinned_dial() {
         addr,
         true,
         Duration::from_secs(2),
+        None,
     )
     .await;
     assert!(result.is_err(), "peer intentionally does not complete TLS");

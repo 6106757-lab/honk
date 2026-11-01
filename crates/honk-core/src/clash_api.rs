@@ -767,6 +767,7 @@ async fn proxy_delay(
                 query.timeout(),
                 &group_manager,
                 cancel.clone(),
+                None,
             )
             .await
         };
@@ -784,6 +785,21 @@ async fn proxy_delay(
     }
 
     let is_group = config.groups.iter().any(|group| group.name == name);
+    // A group may name a detour — a front node or another group. Measure each
+    // member through that front so the reported delay is the one real flows pay,
+    // not the member's own direct path out.
+    let detour = if is_group {
+        crate::control::node_detour::group_detour(
+            &config,
+            &s.proxy_registry,
+            &s.runtime_registry.read().clone(),
+            &s.group_manager.read().clone(),
+            &name,
+            NodeProtocol::Direct,
+        )
+    } else {
+        None
+    };
     drop(config);
     if is_group {
         let members = {
@@ -806,6 +822,7 @@ async fn proxy_delay(
                 query.timeout(),
                 group_manager,
                 cancel.clone(),
+                detour.clone(),
             )
             .await
         };
@@ -869,13 +886,22 @@ async fn group_delay(
     query: DelayQuery,
     cancel: honk_outbound::alive::ProbeCancellation,
 ) -> Response {
-    let exists = {
-        let config = s.config.read().await;
-        config.groups.iter().any(|group| group.name == name)
-    };
+    let config = s.config.read().await;
+    let exists = config.groups.iter().any(|group| group.name == name);
     if !exists {
         return error_response(StatusCode::NOT_FOUND, "group not found");
     }
+    // Measure members through the group's detour, so the delay reflects the
+    // front the group names rather than each member's direct path out.
+    let detour = crate::control::node_detour::group_detour(
+        &config,
+        &s.proxy_registry,
+        &s.runtime_registry.read().clone(),
+        &s.group_manager.read().clone(),
+        &name,
+        NodeProtocol::Direct,
+    );
+    drop(config);
     let members = {
         let gm = s.group_manager.read();
         gm.delay_test_members(&name)
@@ -894,6 +920,7 @@ async fn group_delay(
             query.timeout(),
             group_manager,
             cancel.clone(),
+            detour.clone(),
         )
         .await
     };

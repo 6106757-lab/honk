@@ -532,7 +532,7 @@ async fn probe_urltest(
         Ok(guard) => guard,
         Err(_) => return Some(Err(ProbeFailureKind::Admission)),
     };
-    let measured = urltest_node(&guard.runtime(), entry.tcp.as_ref(), url, timeout).await;
+    let measured = urltest_node(&guard.runtime(), entry.tcp.as_ref(), url, timeout, None).await;
     if let Err(error) = guard.close().await {
         eprintln!("probe runtime cleanup failed: {error}");
     }
@@ -643,6 +643,7 @@ async fn probe_family(
         &url,
         addr,
         timeout,
+        None,
     )
     .await;
     if let Err(error) = guard.close().await {

@@ -65,6 +65,7 @@ async fn head_fallback_does_not_certify_the_configured_get_latency() {
             Duration::from_secs(1),
             Duration::from_secs(1),
             Some(feedback),
+            None,
         )
         .await
         .expect("URLTest must preserve its valid HEAD fallback");

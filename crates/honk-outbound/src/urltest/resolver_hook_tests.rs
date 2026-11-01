@@ -52,6 +52,7 @@ async fn hook_supplies_addresses_and_preserves_rejection() {
         &handler,
         "https://example.invalid/",
         Duration::from_millis(50),
+        None,
     )
     .await;
     assert!(called.load(std::sync::atomic::Ordering::Relaxed));

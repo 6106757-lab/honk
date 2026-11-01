@@ -210,6 +210,7 @@ async fn assert_cold_reusable_transport_warms_before_measurement(node: Node) {
         Duration::from_secs(1),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap();
@@ -272,6 +273,7 @@ async fn cold_quic_warm_time_is_not_reported() {
             Duration::from_secs(1),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -306,6 +308,7 @@ async fn cold_vless_mux_warm_failure_skips_measurement() {
         Duration::from_millis(50),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap_err();
@@ -360,7 +363,7 @@ async fn urltest_distinguishes_domain_and_address_targets() {
     let runtime = crate::runtime::NodeRuntime::try_ephemeral(&node).unwrap();
     let url = "https://localhost/";
 
-    let _ = urltest_node(&runtime, &handler, url, Duration::from_secs(2)).await;
+    let _ = urltest_node(&runtime, &handler, url, Duration::from_secs(2), None).await;
     let domain_hello = tokio::time::timeout(Duration::from_secs(1), recorded_hellos.recv())
         .await
         .unwrap()
@@ -371,6 +374,7 @@ async fn urltest_distinguishes_domain_and_address_targets() {
         url,
         "127.0.0.1:443".parse().unwrap(),
         Duration::from_secs(2),
+        None,
     )
     .await;
     let address_hello = tokio::time::timeout(Duration::from_secs(1), recorded_hellos.recv())
@@ -581,6 +585,7 @@ async fn hysteria2_excludes_pre_write_dial_time() {
         "http://localhost/",
         addr,
         Duration::from_secs(2),
+        None,
     )
     .await
     .unwrap();
@@ -829,6 +834,7 @@ async fn test_urltest_node_https_requires_tls() {
         &handler,
         &url,
         Duration::from_secs(5),
+        None,
     )
     .await;
     assert!(
@@ -847,6 +853,7 @@ async fn test_urltest_node_failure() {
         &handler,
         "https://127.0.0.1:1/",
         Duration::from_secs(2),
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -858,6 +865,7 @@ async fn test_urltest_node_failure() {
         &handler,
         "https://127.0.0.1:1/",
         Duration::from_secs(2),
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -901,6 +909,7 @@ async fn test_urltest_group_does_not_penalize_resolver_rejection() {
             Duration::from_millis(50),
             None,
             Default::default(),
+            None,
         )
         .await;
         assert!(crate::proxy::is_packet_rejection(
@@ -946,6 +955,7 @@ async fn urltest_group_failures_do_not_advance_real_dial_streaks() {
             Duration::from_secs(5),
             None,
             Default::default(),
+            None,
         )
         .await;
         assert_eq!(results.len(), members.len());

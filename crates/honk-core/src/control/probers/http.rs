@@ -220,6 +220,7 @@ impl honk_outbound::alive::HttpProber for ProxyHttpProber {
                         connect_timeout,
                         timeout,
                         feedback,
+                        None,
                     ),
                 )))
                 .await;

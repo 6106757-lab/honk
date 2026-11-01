@@ -22,6 +22,7 @@ use crate::group::{
     GroupManager, ScoreFeedback, ScoreOutcome, ScoreReporter, ScoreSelectionContext, ScoreSource,
     SelectionNetwork,
 };
+use crate::proxy::detour::DetourPath;
 use crate::proxy::{ProxyRegistry, TcpOutbound};
 use anyhow::{Context, anyhow};
 use honk_config::check::{HttpCheckTarget, decode_health_http_target, decode_http_check_target};
@@ -180,6 +181,7 @@ pub async fn urltest_node(
     handler: &dyn TcpOutbound,
     url: &str,
     timeout: Duration,
+    detour: Option<Arc<DetourPath>>,
 ) -> anyhow::Result<Duration> {
     let timeout = urltest_timeout(timeout);
     let request = http_probe_request(url, "")?;
@@ -189,6 +191,7 @@ pub async fn urltest_node(
         &request,
         timeout,
         &ProbeCancellation::default(),
+        detour,
     )
     .await
 }
@@ -199,6 +202,7 @@ async fn urltest_request_impl(
     request: &http::Request<()>,
     timeout: Duration,
     cancel: &ProbeCancellation,
+    detour: Option<Arc<DetourPath>>,
 ) -> anyhow::Result<Duration> {
     validate_runtime(runtime)?;
     let target = request_target(request)?;
@@ -216,6 +220,7 @@ async fn urltest_request_impl(
         timeout,
         timeout,
         None,
+        detour,
     )
     .await
     .map(|measurement| measurement.latency)
@@ -326,6 +331,7 @@ pub async fn urltest_node_in_generation_with_feedback(
     timeout: Duration,
     group_manager: &GroupManager,
     cancel: ProbeCancellation,
+    detour: Option<Arc<DetourPath>>,
 ) -> anyhow::Result<Duration> {
     urltest_node_in_generation_impl(
         generation,
@@ -336,6 +342,7 @@ pub async fn urltest_node_in_generation_with_feedback(
         timeout,
         Some(group_manager),
         cancel,
+        detour,
     )
     .await
 }
@@ -350,6 +357,7 @@ async fn urltest_node_in_generation_impl(
     timeout: Duration,
     group_manager: Option<&GroupManager>,
     cancel: ProbeCancellation,
+    detour: Option<Arc<DetourPath>>,
 ) -> anyhow::Result<Duration> {
     if cancel.is_cancelled() {
         return Err(crate::proxy::PacketRejection::Cancelled.into());
@@ -378,7 +386,7 @@ async fn urltest_node_in_generation_impl(
     let result = cancel
         .run(runtime.scope_tasks(generation.scope_dials(Box::pin(async {
             warm_http_probe(&runtime, warmable, timeout, timeout, warm_feedback).await?;
-            urltest_request_impl(&runtime, handler, &request, timeout, &cancel).await
+            urltest_request_impl(&runtime, handler, &request, timeout, &cancel, detour).await
         }))))
         .await
         .unwrap_or_else(|| Err(crate::proxy::PacketRejection::Cancelled.into()));
@@ -398,11 +406,12 @@ pub async fn urltest_node_addr(
     url: &str,
     addr: SocketAddr,
     timeout: Duration,
+    detour: Option<Arc<DetourPath>>,
 ) -> anyhow::Result<Duration> {
     let timeout = urltest_timeout(timeout);
     let request = http_probe_request(url, "")?;
     measure_http_probe(
-        runtime, handler, &request, addr, None, timeout, timeout, None,
+        runtime, handler, &request, addr, None, timeout, timeout, None, detour,
     )
     .await
     .map(|measurement| measurement.latency)
@@ -424,6 +433,7 @@ pub async fn measure_http_probe(
     connect_timeout: Duration,
     timeout: Duration,
     feedback: Option<ScoreFeedback>,
+    detour: Option<Arc<DetourPath>>,
 ) -> anyhow::Result<ProbeMeasurement> {
     measure_http_probe_mode(
         runtime,
@@ -435,6 +445,7 @@ pub async fn measure_http_probe(
         timeout,
         feedback,
         false,
+        detour,
     )
     .await
 }
@@ -450,6 +461,7 @@ async fn measure_http_probe_mode(
     timeout: Duration,
     feedback: Option<ScoreFeedback>,
     cold: bool,
+    detour: Option<Arc<DetourPath>>,
 ) -> anyhow::Result<ProbeMeasurement> {
     validate_runtime(runtime)?;
     let target = request_target(request)?;
@@ -464,13 +476,26 @@ async fn measure_http_probe_mode(
     let start = cold.then(Instant::now);
     let result = async {
         // Legacy callers renew each phase budget; native callers also bound
-        // this entire future by their absolute deadline.
-        let dial = crate::runtime::capture_dial_admission().scope(handler.dial_runtime(
-            Arc::clone(runtime),
-            addr,
-            target_domain,
-            connect_timeout,
-        ));
+        // this entire future by their absolute deadline. A group probe leaves
+        // through the group's detour, so the measured latency is the one real
+        // flows pay rather than the node's own direct path out.
+        let dial = match &detour {
+            Some(detour) => crate::runtime::capture_dial_admission().scope(
+                handler.dial_runtime_detoured(
+                    Arc::clone(runtime),
+                    addr,
+                    target_domain,
+                    connect_timeout,
+                    detour,
+                ),
+            ),
+            None => crate::runtime::capture_dial_admission().scope(handler.dial_runtime(
+                Arc::clone(runtime),
+                addr,
+                target_domain,
+                connect_timeout,
+            )),
+        };
         let proxy = tokio::time::timeout(timeout, dial)
             .await
             .map_err(|_| phase_timeout("HTTP probe dial timed out"))??;
@@ -531,9 +556,10 @@ pub async fn measure_pinned_http_probe(
     addr: SocketAddr,
     cold: bool,
     timeout: Duration,
+    detour: Option<Arc<DetourPath>>,
 ) -> anyhow::Result<ProbeMeasurement> {
     measure_http_probe_mode(
-        runtime, handler, request, addr, None, timeout, timeout, None, cold,
+        runtime, handler, request, addr, None, timeout, timeout, None, cold, detour,
     )
     .await
 }
@@ -567,6 +593,7 @@ pub async fn urltest_group_with_feedback(
     timeout: Duration,
     group_manager: Arc<GroupManager>,
     cancel: ProbeCancellation,
+    detour: Option<Arc<DetourPath>>,
 ) -> Vec<(String, anyhow::Result<Duration>)> {
     urltest_group_impl(
         members,
@@ -577,6 +604,7 @@ pub async fn urltest_group_with_feedback(
         timeout,
         Some(group_manager),
         cancel,
+        detour,
     )
     .await
 }
@@ -591,6 +619,7 @@ async fn urltest_group_impl(
     timeout: Duration,
     group_manager: Option<Arc<GroupManager>>,
     cancel: ProbeCancellation,
+    detour: Option<Arc<DetourPath>>,
 ) -> Vec<(String, anyhow::Result<Duration>)> {
     let timeout = urltest_timeout(timeout);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(URLTEST_MAX_CONCURRENT));
@@ -605,6 +634,7 @@ async fn urltest_group_impl(
         let permit = semaphore.clone();
         let group_manager = group_manager.clone();
         let cancel = cancel.clone();
+        let detour = detour.clone();
         join_set.spawn(async move {
             let Some(_permit) = cancel.run(permit.acquire_owned()).await else {
                 return (
@@ -623,6 +653,7 @@ async fn urltest_group_impl(
                         timeout,
                         group_manager.as_deref(),
                         cancel,
+                        detour,
                     )
                     .await
                 }

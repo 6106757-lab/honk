@@ -542,6 +542,7 @@ async fn c27_urltest_propagates_admission_before_dial() {
             Duration::from_millis(50),
             &GroupManager::new(&[], &[]),
             Default::default(),
+            None,
         )
         .await;
         assert!(

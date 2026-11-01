@@ -223,6 +223,20 @@ async fn attempt_wire(
         return AttemptOutcome::refused();
     };
     let runtime = ephemeral.runtime();
+    // A group probe rides the detour the group names, so the latency reflects
+    // the path real flows take rather than the node's own direct path out. The
+    // rider is the candidate's own protocol because the front is resolved per
+    // member.
+    let detour = plan.group.as_ref().and_then(|group| {
+        crate::control::node_detour::group_detour(
+            &*plan.config,
+            &state.proxy_registry,
+            &plan.registry,
+            &plan.manager,
+            group,
+            candidate.node.protocol(),
+        )
+    });
     let operation = async {
         if plan.spec.kind == Kind::Http {
             let timeout = deadline.saturating_duration_since(Instant::now());
@@ -236,6 +250,7 @@ async fn attempt_wire(
                     addr,
                     plan.spec.warmth == Warmth::Cold,
                     timeout,
+                    detour.clone(),
                 ),
             )
             .await?
@@ -245,10 +260,23 @@ async fn attempt_wire(
                     .min(deadline.saturating_duration_since(Instant::now()));
                 match candidate.transport {
                     Transport::Tcp => {
-                        let mut proxy = entry
-                            .tcp
-                            .dial_runtime(Arc::clone(&runtime), addr, None, connect_timeout)
-                            .await?;
+                        let mut proxy = if let Some(detour) = &detour {
+                            entry
+                                .tcp
+                                .dial_runtime_detoured(
+                                    Arc::clone(&runtime),
+                                    addr,
+                                    None,
+                                    connect_timeout,
+                                    detour,
+                                )
+                                .await?
+                        } else {
+                            entry
+                                .tcp
+                                .dial_runtime(Arc::clone(&runtime), addr, None, connect_timeout)
+                                .await?
+                        };
                         tcp_dns(&mut proxy.stream).await
                     }
                     Transport::Udp => {

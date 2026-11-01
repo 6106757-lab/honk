@@ -28,7 +28,7 @@ use honk_config::node::Node;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -36,14 +36,14 @@ use tokio::sync::Mutex;
 /// occupy. Ephemeral runtimes — probes and one-shot dials — open their own
 /// tunnel rather than share the generation's, so their slots live in a high
 /// range that can never overlap and is unique per ephemeral runtime.
-const EPHEMERAL_MASQUE_BASE: u32 = 0x8000;
-const EPHEMERAL_MASQUE_SPAN: u32 = 0x7000;
+const EPHEMERAL_MASQUE_BASE: usize = 0x8000;
+const EPHEMERAL_MASQUE_SPAN: usize = 0x7000;
 
 /// Monotonically handed out to ephemeral MASQUE tunnels so two probes of the
 /// same node never ask the kernel for the same TUN device name. Wraps within
 /// [`EPHEMERAL_MASQUE_SPAN`]; a slot is only reused once every prior holder has
 /// been torn down, and teardown deletes the device first.
-static NEXT_EPHEMERAL_MASQUE_SLOT: AtomicU32 = AtomicU32::new(EPHEMERAL_MASQUE_BASE);
+static NEXT_EPHEMERAL_MASQUE_SLOT: AtomicUsize = AtomicUsize::new(EPHEMERAL_MASQUE_BASE);
 
 use super::{
     PacketOutbound, PacketTransport, ProbeableOutbound, ProxyStream, TcpOutbound,
