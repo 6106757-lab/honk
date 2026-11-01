@@ -516,6 +516,21 @@ impl TcpOutbound for VmessHandler {
         .await?;
         Self::perform_handshake(uuid.as_bytes(), stream, target, target_domain)
     }
+
+    async fn dial_runtime_detoured(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<ProxyStream> {
+        let uuid = uuid(&runtime.node)?;
+        let stream =
+            super::transport::wrap_transport_runtime(&runtime, None, connect_timeout, Some(detour))
+                .await?;
+        Self::perform_handshake(uuid.as_bytes(), stream, target, target_domain)
+    }
 }
 
 #[async_trait]

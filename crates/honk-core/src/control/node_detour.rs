@@ -78,6 +78,59 @@ pub(crate) fn bind_node_detours(
     }
 }
 
+/// The path a group asks its members to leave through, when it names one.
+///
+/// A group resolves to a node only once a flow arrives, so its detour cannot
+/// be bound to that node the way a node's own is: the same node is reachable
+/// directly, or through another group, and keeps its own path out in both
+/// cases. The name is therefore resolved here, per flow, and handed to the
+/// dial that needs it.
+///
+/// `None` means the group names no detour — not that it names a broken one.
+/// A name that resolves to nothing leaves the flow on the node's own path
+/// rather than failing it, because the configuration was rejected at load
+/// before it could reach this point.
+pub(crate) fn group_detour(
+    config: &honk_config::Config,
+    proxies: &Arc<ProxyRegistry>,
+    generation: &Arc<OutboundRuntimeRegistry>,
+    manager: &Arc<GroupManager>,
+    group_name: &str,
+    rider: NodeProtocol,
+) -> Option<Arc<DetourPath>> {
+    let name = config
+        .groups
+        .iter()
+        .find(|group| group.name == group_name)?
+        .detour
+        .as_deref()?;
+    if matches!(name, honk_config::Config::BUILTIN_DIRECT_NODE) {
+        let node = config.builtin_node(name)?;
+        return Some(Arc::new(DetourPath::new(
+            Arc::clone(proxies),
+            Arc::clone(generation),
+            node.id,
+        )));
+    }
+    if let Some(node) = config.nodes.iter().find(|node| node.name == name) {
+        return Some(Arc::new(DetourPath::new(
+            Arc::clone(proxies),
+            Arc::clone(generation),
+            node.id,
+        )));
+    }
+    if config.groups.iter().any(|group| group.name == name) {
+        return Some(Arc::new(DetourPath::to_group(
+            Arc::clone(proxies),
+            Arc::clone(generation),
+            name,
+            Arc::clone(manager),
+            rider,
+        )));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     //! Chain verification over loopback.
@@ -418,8 +471,11 @@ mod tests {
     /// subscription pointed at.
     #[tokio::test]
     async fn a_subscription_dialer_proxy_carries_the_node_through_the_front() {
+        // Both proxies in the body are SOCKS5, so both relays have to be.
+        // A relay speaking the wrong protocol waits for a header that never
+        // arrives and the dial fails as a timeout, which names nothing.
         let front = spawn_relay(false).await;
-        let back = spawn_relay(true).await;
+        let back = spawn_relay(false).await;
         let echo = spawn_echo().await;
 
         let subscription = honk_config::subscription::Subscription {
@@ -554,6 +610,85 @@ mod tests {
         assert!(
             back.targets().is_empty(),
             "the chained node must not reach its own server directly"
+        );
+    }
+
+    fn group_named(name: &str, detour: Option<&str>) -> honk_config::Config {
+        let mut config = honk_config::Config::default();
+        config
+            .nodes
+            .push(socks5_node("front", "127.0.0.1:1".parse().unwrap()));
+        config.groups.push(honk_config::group::Group {
+            name: name.into(),
+            policy: honk_config::group::GroupPolicy::Selector,
+            detour: detour.map(str::to_string),
+            ..Default::default()
+        });
+        config
+    }
+
+    fn detour_of_group(config: &honk_config::Config, group: &str) -> Option<Arc<DetourPath>> {
+        let (generation, _) =
+            OutboundRuntimeRegistry::build_reusing(&config.nodes, 4, None).unwrap();
+        let manager = Arc::new(GroupManager::new(&config.groups, &config.nodes));
+        group_detour(
+            config,
+            &Arc::new(ProxyRegistry::new()),
+            &Arc::new(generation),
+            &manager,
+            group,
+            NodeProtocol::Trojan,
+        )
+    }
+
+    /// A group's detour names a node the same way a node's does, and resolves
+    /// to it for the flow that came through the group.
+    #[test]
+    fn a_group_detour_naming_a_node_resolves_to_that_node() {
+        let config = group_named("wallet", Some("front"));
+        let front_id = config.nodes[0].id;
+        let path = detour_of_group(&config, "wallet").expect("a node name must resolve");
+        assert!(
+            format!("{path:?}").contains(&front_id.to_string()),
+            "the path must name the node the group pointed at: {path:?}"
+        );
+    }
+
+    /// `direct` is a node like any other, so a group may name it.
+    #[test]
+    fn a_group_detour_may_name_direct() {
+        let config = group_named("wallet", Some("direct"));
+        assert!(
+            detour_of_group(&config, "wallet").is_some(),
+            "direct must resolve to the built-in node"
+        );
+    }
+
+    /// A group that names nothing keeps its members on their own paths. This is
+    /// the common case, and it must not cost a lookup that can fail.
+    #[test]
+    fn a_group_naming_no_detour_has_none_to_apply() {
+        let config = group_named("wallet", None);
+        assert!(
+            detour_of_group(&config, "wallet").is_none(),
+            "no name means no detour, not a broken one"
+        );
+    }
+
+    /// The group the flow came through is the one consulted, so another group's
+    /// detour does not reach it.
+    #[test]
+    fn an_unrelated_groups_detour_is_not_applied() {
+        let mut config = group_named("wallet", None);
+        config.groups.push(honk_config::group::Group {
+            name: "other".into(),
+            policy: honk_config::group::GroupPolicy::Selector,
+            detour: Some("front".into()),
+            ..Default::default()
+        });
+        assert!(
+            detour_of_group(&config, "wallet").is_none(),
+            "a group is carried by its own detour, not a neighbour's"
         );
     }
 }

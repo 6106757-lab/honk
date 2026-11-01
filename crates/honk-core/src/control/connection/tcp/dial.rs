@@ -52,6 +52,11 @@ impl ControlPlaneHandle {
         let started_reporters = Arc::new(parking_lot::Mutex::new(Vec::new()));
         for (idx, node) in candidates.iter().enumerate() {
             let ctx = ctx.clone();
+            // The group name the flow came through, which the dial needs to
+            // look up that group's detour. Cloned per candidate because the
+            // async block below moves its capture, and the caller still
+            // attributes the outcome to the same name afterwards.
+            let outbound = outbound.clone();
             let node = (*node).clone();
             let target_domain = target_domain.clone();
             let generation = Arc::clone(&runtime_generation);
@@ -111,6 +116,23 @@ impl ControlPlaneHandle {
                         }
                     };
                     let scope = generation.dial_scope(on_start);
+                    // The detour the flow's group names, if any: it belongs to
+                    // the group rather than to the node, so it is resolved
+                    // here where both are known.
+                    let group_detour = {
+                        // `config` is a tokio lock and `group_manager` a
+                        // parking_lot one: only the first is a future.
+                        let config = ctx.config.read().await;
+                        let manager = ctx.group_manager.read();
+                        crate::control::node_detour::group_detour(
+                            &config,
+                            &ctx.proxy_registry,
+                            &generation,
+                            &manager,
+                            &outbound,
+                            node.protocol(),
+                        )
+                    };
                     let start = std::time::Instant::now();
                     let per_dial_timeout = connect_timeout * 3;
                     let result = {
@@ -123,6 +145,7 @@ impl ControlPlaneHandle {
                             connect_timeout,
                             direct_mark,
                             &scope,
+                            group_detour,
                         );
                         #[cfg(feature = "native-api")]
                         let dial = match &native_observer {
@@ -629,12 +652,33 @@ impl ControlPlaneHandle {
         connect_timeout: Duration,
         direct_mark: Option<honk_outbound::proxy::DirectMark>,
         scope: &Arc<honk_outbound::runtime::DialScope>,
+        group_detour: Option<Arc<honk_outbound::proxy::detour::DetourPath>>,
     ) -> anyhow::Result<(crate::proxy::ProxyStream, bool)> {
         anyhow::ensure!(
             !generation.is_shutdown(),
             "outbound runtime generation is shut down"
         );
         let (target, target_domain) = target;
+        // A connection opened over a detour the caller names is not one the
+        // pools can offer: theirs were opened over some other path, and
+        // reusing one would send this flow down whichever that happened to be.
+        if let Some(detour) = group_detour {
+            return scope
+                .scope(async {
+                    registry
+                        .dial_runtime_detoured(
+                            Arc::clone(generation),
+                            node.id,
+                            target,
+                            target_domain,
+                            connect_timeout,
+                            detour,
+                        )
+                        .await
+                        .map(|stream| (stream, true))
+                })
+                .await;
+        }
         // A marked socket belongs to exactly one flow, so it never touches a pool.
         if let Some(mark) = direct_mark {
             return scope

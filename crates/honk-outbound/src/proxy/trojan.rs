@@ -65,6 +65,38 @@ impl TrojanHandler {
         })
     }
 
+    /// As [`Self::dial_stream`], but over a detour the caller names instead of
+    /// the one the node's runtime carries.
+    ///
+    /// This is a separate entry rather than a parameter on the shared one:
+    /// every other caller has no detour to supply, and an argument that is
+    /// always `None` there is a place to pass it by mistake.
+    async fn dial_stream_detoured(
+        node: &Node,
+        runtime: &Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<ProxyStream> {
+        let password = node.trojan().unwrap().password.as_deref().unwrap_or("");
+        let header = Self::build_request_header(password, target, target_domain)?;
+        let (mut stream, preparation) = super::transport::prepare_transport_runtime(
+            runtime,
+            None,
+            connect_timeout,
+            Some(detour),
+        )
+        .await?;
+        preparation.commit()?;
+        super::transport::write_request(&mut stream, &header).await?;
+        Ok(ProxyStream {
+            stream,
+            target_addr: target,
+            target_domain: target_domain.map(|s| s.to_string()),
+        })
+    }
+
     async fn dial_udp_stream(
         node: &Node,
         runtime: Option<&Arc<crate::runtime::NodeRuntime>>,
@@ -240,6 +272,25 @@ impl TcpOutbound for TrojanHandler {
             target_domain,
             None,
             connect_timeout,
+        )
+        .await
+    }
+
+    async fn dial_runtime_detoured(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<ProxyStream> {
+        Self::dial_stream_detoured(
+            &runtime.node,
+            &runtime,
+            target,
+            target_domain,
+            connect_timeout,
+            detour,
         )
         .await
     }

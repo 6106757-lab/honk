@@ -720,6 +720,26 @@ impl TcpOutbound for Socks5Handler {
         self.dial_with_stream(runtime.node.as_ref(), target, target_domain, server)
             .await
     }
+
+    /// SOCKS5 keeps nothing between dials, so a detour the caller supplies is
+    /// the same handshake over a connection that came from somewhere else.
+    async fn dial_runtime_detoured(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<ProxyStream> {
+        let server = crate::proxy::detour::connect_server(
+            runtime.node.as_ref(),
+            Some(detour),
+            connect_timeout,
+        )
+        .await?;
+        self.dial_with_stream(runtime.node.as_ref(), target, target_domain, server)
+            .await
+    }
 }
 
 #[async_trait]

@@ -467,18 +467,32 @@ fn detour_cycle(
         return None;
     }
     path.push(name.to_string());
-    let target = nodes
+    // A group reached this way carries whatever its own detour names, so the
+    // chain continues through it exactly as it would through a member.
+    let target = groups
         .iter()
-        .find(|node| node.name == name)
-        .and_then(Node::detour_name);
+        .find(|group| group.name == name)
+        .and_then(|group| group.detour.as_deref())
+        .or_else(|| {
+            nodes
+                .iter()
+                .find(|node| node.name == name)
+                .and_then(Node::detour_name)
+        });
     if let Some(target) = target {
         if matches!(target, Config::BUILTIN_DIRECT_NODE) {
             settled.insert(name.to_string());
         } else if let Some(group) = groups.iter().find(|group| group.name == target) {
             // A group detour leads wherever the group can lead: its nested
-            // groups and its fallback. Members only a filter expression names
-            // need the resolver, which is where the group breaks its cycles.
-            for member in group.groups.iter().chain(group.final_outbound.iter()) {
+            // groups, its fallback, and its own detour. Members only a filter
+            // expression names need the resolver, which is where the group
+            // breaks its cycles.
+            for member in group
+                .groups
+                .iter()
+                .chain(group.final_outbound.iter())
+                .chain(group.detour.iter())
+            {
                 if let Some(cycle) = detour_cycle(nodes, groups, member, path, settled) {
                     return Some(cycle);
                 }
@@ -1046,6 +1060,7 @@ impl Config {
         }
         check_outbound(&self.routing.default_outbound, None)?;
         self.validate_node_detours_detailed(source)?;
+        self.validate_group_detours_detailed(source)?;
         for (index, subscription) in self.subscriptions.iter().enumerate() {
             if subscription.name.is_empty() {
                 return Err(config_validation_error(
@@ -1150,6 +1165,68 @@ impl Config {
                     SettingPath::new("nodes").field("detour"),
                     "invalid-node-detour-cycle",
                     "node detours must not form a cycle",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A group's detour is a name with the same rules a node's has: it must
+    /// exist, and it must not be the group itself.
+    ///
+    /// The cycle walk starts from the group, because a group's detour is a hop
+    /// in its own right and not merely a property of whichever member it picks.
+    fn validate_group_detours_detailed(
+        &self,
+        source: &SourceRef,
+    ) -> Result<(), DetailedConfigError> {
+        let is_node = |name: &str| {
+            self.nodes.iter().any(|node| {
+                node.id != DIRECT_NODE_ID && node.id != BLOCK_NODE_ID && node.name == name
+            })
+        };
+        for (index, group) in self.groups.iter().enumerate() {
+            let Some(target) = group.detour.as_deref() else {
+                continue;
+            };
+            let names_itself = target == group.name;
+            if names_itself
+                || !(matches!(target, Self::BUILTIN_DIRECT_NODE)
+                    || is_node(target)
+                    || self.groups.iter().any(|other| other.name == target))
+            {
+                return Err(config_validation_error(
+                    source,
+                    SettingPath::new("groups").index(index + 1).field("detour"),
+                    "invalid-group-detour-target",
+                    if names_itself {
+                        "group detour must not name the group itself"
+                    } else {
+                        "group detour must name a node, a group or direct"
+                    },
+                ));
+            }
+        }
+        let mut path = Vec::new();
+        let mut settled = HashSet::new();
+        for group in &self.groups {
+            if group.detour.is_none() {
+                continue;
+            }
+            if detour_cycle(
+                &self.nodes,
+                &self.groups,
+                &group.name,
+                &mut path,
+                &mut settled,
+            )
+            .is_some()
+            {
+                return Err(config_validation_error(
+                    source,
+                    SettingPath::new("groups").field("detour"),
+                    "invalid-group-detour-cycle",
+                    "group detours must not form a cycle",
                 ));
             }
         }
@@ -2038,6 +2115,51 @@ mod node_detour_tests {
         assert_eq!(detour_of("rides-group").as_deref(), Some("front-group"));
         assert_eq!(detour_of("rides-node").as_deref(), Some("front"));
         assert_eq!(detour_of("rides-direct").as_deref(), Some("direct"));
+    }
+
+    /// A group's own detour is a hop in its own right, so it cannot be the
+    /// group: nothing would ever be left to carry the flow.
+    #[test]
+    fn a_group_detour_naming_itself_is_rejected() {
+        let mut config = Config::default();
+        config.ensure_builtin_nodes();
+        config.nodes.push(detour_node("front", 443));
+        let front_id = config.nodes.last().expect("front was just pushed").id;
+        config.groups.push(crate::group::Group {
+            name: "wallet".into(),
+            policy: crate::node::GroupPolicy::Selector,
+            nodes: vec![front_id],
+            detour: Some("wallet".into()),
+            ..Default::default()
+        });
+        let error = config
+            .validate()
+            .expect_err("a group cannot carry itself")
+            .to_string();
+        assert!(error.contains("detour"), "{error}");
+    }
+
+    /// Two groups carrying each other never reach a node.
+    #[test]
+    fn a_cycle_of_group_detours_is_rejected() {
+        let mut config = Config::default();
+        config.ensure_builtin_nodes();
+        config.nodes.push(detour_node("front", 443));
+        let front_id = config.nodes.last().expect("front was just pushed").id;
+        for (name, detour) in [("left", "right"), ("right", "left")] {
+            config.groups.push(crate::group::Group {
+                name: name.into(),
+                policy: crate::node::GroupPolicy::Selector,
+                nodes: vec![front_id],
+                detour: Some(detour.into()),
+                ..Default::default()
+            });
+        }
+        let error = config
+            .validate()
+            .expect_err("two groups carrying each other is a cycle")
+            .to_string();
+        assert!(error.contains("cycle"), "{error}");
     }
 
     /// A group detour is a valid configuration, not a tolerated one.

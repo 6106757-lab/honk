@@ -154,6 +154,7 @@ async fn ready_pool_hit_does_not_wait_for_physical_dial_permit() {
             &generation.dial_scope(move || {
                 started_on_dial.store(true, std::sync::atomic::Ordering::Release)
             }),
+            None,
         ),
     )
     .await
@@ -202,6 +203,7 @@ async fn feedback_does_not_start_while_waiting_for_dial_admission() {
             &generation.dial_scope(move || {
                 started_on_dial.store(true, std::sync::atomic::Ordering::Release)
             }),
+            None,
         ),
     )
     .await;
@@ -402,6 +404,7 @@ async fn marked_direct_dial_skips_bare_pool_and_rejects_retired_completion() {
             Duration::from_secs(1),
             honk_outbound::proxy::DirectMark::new(0x321),
             &scope,
+            None,
         ),
         async {
             assert_eq!(

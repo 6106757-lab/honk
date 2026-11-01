@@ -3433,3 +3433,46 @@ mod node_detour {
         );
     }
 }
+
+#[cfg(test)]
+mod group_detour {
+    use crate::Config;
+    use crate::diagnostic::DetailedDiagnostic;
+    use crate::parser::parse_dae_config_with_detailed_diagnostics;
+
+    fn parse(input: &str) -> (Config, Vec<DetailedDiagnostic>) {
+        let mut diagnostics = Vec::new();
+        let config = parse_dae_config_with_detailed_diagnostics(input, &mut diagnostics).unwrap();
+        (config, diagnostics)
+    }
+
+    /// A group carries the detour its members ride the same way a node carries
+    /// its own: as a name, resolved to a path when something is dialled.
+    #[test]
+    fn a_group_entry_names_the_detour_its_members_ride() {
+        // Statements in a block are separated by whitespace, never by comma:
+        // a comma inside one belongs to the value. A group written
+        // `policy: fallback, detour: front` on a single line therefore names
+        // a policy and no detour, so this is written one setting per line the
+        // way every other group block in the dialect is.
+        let (config, diagnostics) = parse(
+            "group {\n wallet {\n  policy: fallback\n  detour: front\n }\n \
+             plain {\n  policy: fallback\n }\n}\n\
+             node {\n front: 'trojan://secret@front.example.com:443'\n}\n",
+        );
+        let detours: Vec<_> = config
+            .groups
+            .iter()
+            .map(|group| (group.name.as_str(), group.detour.as_deref()))
+            .collect();
+        assert_eq!(
+            detours,
+            [("wallet", Some("front")), ("plain", None)],
+            "the detour must be read off the group block"
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "a known key must not warn: {diagnostics:?}"
+        );
+    }
+}

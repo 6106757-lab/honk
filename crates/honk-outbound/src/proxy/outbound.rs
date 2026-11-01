@@ -62,6 +62,32 @@ pub trait TcpOutbound: Send + Sync {
         .await
     }
 
+    /// Dial inside a generation, carried by a detour the caller names rather
+    /// than by the node's own.
+    ///
+    /// This is how a group's detour reaches the member it picked. A group
+    /// resolves to a node only once a flow arrives, so the front it names
+    /// could never have been bound to that node: the same node is reachable
+    /// directly, or through another group, and keeps its own path out in both
+    /// cases. The caller is therefore the only thing that knows.
+    ///
+    /// The default refuses. Honouring this means opening the node's own server
+    /// connection over the detour, which only the protocols that dial through
+    /// the shared transport do; dialling regardless would send the flow out of
+    /// the real interface while looking like an ordinary connection, which is
+    /// the one outcome a detour exists to rule out.
+    async fn dial_runtime_detoured(
+        &self,
+        _runtime: Arc<crate::runtime::NodeRuntime>,
+        _target: SocketAddr,
+        _target_domain: Option<&str>,
+        _connect_timeout: Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<ProxyStream> {
+        let _ = detour;
+        anyhow::bail!("this protocol cannot be carried by a detour a group names")
+    }
+
     /// Dial a routed direct flow with a nonzero mark. Outbounds that do not
     /// own the flow's socket cannot apply it and refuse the dial.
     async fn dial_runtime_marked(

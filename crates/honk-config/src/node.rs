@@ -423,6 +423,21 @@ pub struct Group {
     /// Explicit fallback for the caller when the group's policy has no available selection.
     /// Can be "direct", "block", another group name, or a node name.
     pub final_outbound: Option<String>,
+    /// The node or group every member of this group dials out through, or
+    /// `direct`.
+    ///
+    /// Unlike a node's own detour, a group's cannot be bound to anything ahead
+    /// of time: which member carries a flow is decided when the flow arrives.
+    /// The name is therefore resolved on each dial and applied to whichever
+    /// member the group then picks, so a member reached directly through
+    /// another group keeps its own path out.
+    ///
+    /// Groups that name no detour serialize exactly as they always have:
+    /// a `"detour": null` on every group would be noise in every written
+    /// configuration and a diff against every one written before this option
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detour: Option<String>,
     /// URL for health checks (overrides global tcp_check_url).
     pub check_url: Option<String>,
     /// Retained interval metadata; runtime checks use the global interval.
@@ -457,6 +472,7 @@ impl Default for Group {
             groups: Vec::new(),
             default: None,
             final_outbound: None,
+            detour: None,
             check_url: None,
             check_interval: None,
             tolerance: default_tolerance(),
@@ -522,6 +538,8 @@ impl<'de> Deserialize<'de> for Group {
             #[serde(default)]
             final_outbound: Option<String>,
             #[serde(default)]
+            detour: Option<String>,
+            #[serde(default)]
             check_url: Option<String>,
             #[serde(default)]
             check_interval: Option<u64>,
@@ -545,6 +563,7 @@ impl<'de> Deserialize<'de> for Group {
             groups: wire.groups,
             default: wire.default,
             final_outbound: wire.final_outbound,
+            detour: wire.detour,
             check_url: wire.check_url,
             check_interval: wire.check_interval,
             tolerance: wire.tolerance.unwrap_or_else(default_tolerance),

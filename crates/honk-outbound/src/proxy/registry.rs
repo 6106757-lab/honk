@@ -264,6 +264,29 @@ impl ProxyRegistry {
         .await
     }
 
+    /// Dial a node through a detour the caller names, rather than the node's
+    /// own — the one a group carries, resolved to this path only once a flow
+    /// arrives.
+    pub async fn dial_runtime_detoured(
+        &self,
+        generation: Arc<crate::runtime::OutboundRuntimeRegistry>,
+        node_id: uuid::Uuid,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: Duration,
+        detour: Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<ProxyStream> {
+        self.dial_generation(generation, node_id, |runtime, entry| {
+            let tcp = Arc::clone(&entry.tcp);
+            let detour = Arc::clone(&detour);
+            Ok(async move {
+                tcp.dial_runtime_detoured(runtime, target, target_domain, connect_timeout, &detour)
+                    .await
+            })
+        })
+        .await
+    }
+
     /// Dial a direct flow with a nonzero mark in the captured generation.
     pub async fn dial_runtime_marked(
         &self,
