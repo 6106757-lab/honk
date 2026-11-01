@@ -12,6 +12,9 @@ impl VLessHandler {
     /// concrete `EncryptedStream` through response and Vision wrapping so
     /// Direct bypasses only AEAD while its boxed outer transport stays intact.
     /// Unencrypted raw TCP/TLS keeps its concrete type for the existing raw switch.
+    // The detour is the eighth argument; every one of them is a distinct
+    // input to the dial, and grouping them would only move the count.
+    #[allow(clippy::too_many_arguments)]
     async fn dial_carrier(
         &self,
         node: &Node,

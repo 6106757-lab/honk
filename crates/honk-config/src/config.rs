@@ -2030,6 +2030,9 @@ mod node_detour_tests {
         let mut node =
             crate::node::Node::from_share_link("trojan://secret@example.com:443").unwrap();
         node.name = name.into();
+        // The identity is derived from content, so renaming a node without
+        // re-deriving leaves an ID validation rejects as non-canonical.
+        node.id = node.derive_id();
         node
     }
 

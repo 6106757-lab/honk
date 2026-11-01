@@ -169,16 +169,6 @@ impl ObservedTcp {
         }
     }
 
-    /// Wrap a stream another node handed back. It carries bytes, not a
-    /// descriptor, so this connection reports no transport quality of its own.
-    pub(crate) fn new_chained(stream: Box<dyn crate::proxy::AsyncReadWrite>) -> Self {
-        Self {
-            inner: Carrier::Chained(stream),
-            pressure: None,
-            active: false,
-        }
-    }
-
     pub(crate) fn activate(&mut self) {
         self.active = true;
         self.observe();
