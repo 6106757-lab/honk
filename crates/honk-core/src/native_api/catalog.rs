@@ -482,7 +482,8 @@ fn group_value(
         "default_member_id": default_id, "final_outbound": group.final_outbound,
         "check_url": check_url(group), "check_interval": group.check_interval.filter(|value| *value > 0),
         "tolerance": tolerance(group), "idle_timeout": group.idle_timeout,
-        "interrupt_connections": interrupt_connections(group)
+        "interrupt_connections": interrupt_connections(group),
+        "detour": group.detour
     });
     result["runtime"] = json!({ "selection": { "tcp": tcp, "udp": udp }, "health": group_health(manager, group, identity, alive) });
     result["capabilities"] = json!({
