@@ -683,16 +683,27 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
         // matches `wire.rs`, which rides `detour_for(back)` to reach `front`
         // and then dials the check through it -- exactly one SOCKS5 hop, not a
         // two-stage back-then-check tunnel the peer never actually modelled.
-        let mut greeting = [0; 2];
-        socket.read_exact(&mut greeting).await.unwrap();
-        assert_eq!(greeting, [5, 1]);
-        socket.write_all(&[5, 0]).await.unwrap();
-        let mut connect = [0; 4];
-        socket.read_exact(&mut connect).await.unwrap();
-        assert_eq!(connect[..3], [5, 1, 0]);
+        // The probe dials `back` through its named front, so the front is the
+        // SOCKS5 entry point and the single hop the peer plays. This mirrors the
+        // verified server in `group_http_probe_measures_loopback_node...`: read
+        // the greeting as version + nmethods + nmethods bytes (not a fixed two
+        // bytes) so the trailing method byte does not poison the CONNECT parse.
         assert_eq!(
-            connect[3], 1,
-            "the front must receive the resolved check address"
+            socket.read_u8().await.unwrap(),
+            5,
+            "the front must speak SOCKS5"
+        );
+        let methods = socket.read_u8().await.unwrap();
+        let mut offered = vec![0u8; usize::from(methods)];
+        socket.read_exact(&mut offered).await.unwrap();
+        assert!(offered.contains(&0), "the front must offer no-auth");
+        socket.write_all(&[5, 0]).await.unwrap();
+        let mut header = [0; 4];
+        socket.read_exact(&mut header).await.unwrap();
+        assert_eq!(
+            header,
+            [5, 1, 0, 1],
+            "the front must receive a CONNECT for an IPv4 target"
         );
         let mut destination = [0; 6];
         socket.read_exact(&mut destination).await.unwrap();
