@@ -457,7 +457,7 @@ fn managed_entry(
                 .or(reason);
             continue;
         }
-        match config.validate_detailed() {
+        match config.validate_fragment() {
             Ok(()) => return Ok((entry, config)),
             Err(error) => reason = Some(error.diagnostic.message),
         }
