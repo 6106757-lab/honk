@@ -3,8 +3,8 @@
 use crate::diagnostic::{SettingPath, SourceRef};
 use crate::error::{ConfigError, DetailedConfigError, ErrorCategory};
 use crate::node::{
-    Hysteria2Config, Node, OutboundConfig, QuicOptions, Udp443Policy, VlessConfig, VlessMultiplex,
-    VlessUdpEncoding,
+    Hysteria2Config, MasqueConfig, Node, OutboundConfig, QuicOptions, Udp443Policy, VlessConfig,
+    VlessMultiplex, VlessUdpEncoding,
 };
 use crate::options::vocab::{
     coalesce_equal, optional_flow, optional_text, verification_text, vmess_cipher,
@@ -523,6 +523,7 @@ pub(super) fn apply_protocol(
             apply_mtu(&mut config.quic, query);
         }
         OutboundConfig::Juicity(config) => apply_mtu(&mut config.quic, query),
+        OutboundConfig::Masque(config) => apply_masque(config, query),
         OutboundConfig::AnyTls(config) => {
             config.idle_session_check_interval = query
                 .get("idle_session_check_interval")
@@ -604,6 +605,50 @@ fn apply_mtu(quic: &mut QuicOptions, query: &Query) {
     {
         quic.mtu = Some(mtu);
     }
+}
+
+/// Apply the query fields a MASQUE link carries: the carrier, the WARP-style
+/// device keys, the tunnel addresses, the resolver choice and the DNS list.
+///
+/// `h3` is accepted as a spelling of the `quic` carrier so a link written for
+/// another client loads unchanged, and an unknown carrier keeps the protocol
+/// default instead of failing the whole node. A MASQUE tunnel is always TLS,
+/// so a link that names no `security` still gets TLS enabled here.
+fn apply_masque(config: &mut MasqueConfig, query: &Query) {
+    if let Some(value) = query.get("network") {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "h2" | "http2" => config.network = Some("h2".to_string()),
+            "h3" | "http3" | "quic" => config.network = Some("quic".to_string()),
+            _ => {}
+        }
+    }
+    let text = |keys: &[&str]| -> Option<String> {
+        let values = keys.iter().flat_map(|key| query.values(key)).map(Some);
+        optional_text(values).ok().flatten()
+    };
+    config.private_key = text(&["private-key", "private_key", "privateKey"]);
+    config.endpoint_public_key = text(&[
+        "public-key",
+        "public_key",
+        "publicKey",
+        "endpoint-public-key",
+        "endpoint_public_key",
+    ]);
+    config.local_ipv4 = text(&["ip", "ipv4", "local-ipv4", "local_ipv4"]);
+    config.local_ipv6 = text(&["ipv6", "local-ipv6", "local_ipv6"]);
+    config.mtu = text(&["mtu"]).and_then(|value| value.trim().parse::<u16>().ok());
+    config.remote_dns_resolve = text(&["remote-dns-resolve", "remote_dns_resolve"]).is_some_and(
+        |value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+    );
+    if let Some(value) = text(&["dns"]) {
+        config.dns = value
+            .split([',', ';', ' '])
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    config.tls.enabled = true;
 }
 
 fn apply_vless(

@@ -2571,3 +2571,34 @@ fn detailed_share_link_validation_preserves_intrinsic_cause() {
             .contains("VLESS flow requires TLS or REALITY")
     );
 }
+
+#[test]
+fn masque_share_link_carries_the_warp_parameters() {
+    let mut diagnostics = Vec::new();
+    let link = "masque://162.159.192.1:443?network=h3&private-key=PRIVATE&public-key=PUBLIC&ip=172.16.0.2%2F32&ipv6=2606%3A4700%3A%3A1%2F128&mtu=1280&remote-dns-resolve=true&dns=1.1.1.1%2C8.8.8.8&sni=www.cloudflare.com";
+    let node = Node::from_share_link_with_detailed_diagnostics(link, &mut diagnostics)
+        .expect("masque link with WARP parameters");
+    let config = node.masque().expect("masque outbound");
+    assert_eq!(config.network.as_deref(), Some("quic"), "h3 selects the QUIC carrier");
+    assert_eq!(config.private_key.as_deref(), Some("PRIVATE"));
+    assert_eq!(config.endpoint_public_key.as_deref(), Some("PUBLIC"));
+    assert_eq!(config.local_ipv4.as_deref(), Some("172.16.0.2/32"));
+    assert_eq!(config.local_ipv6.as_deref(), Some("2606:4700::1/128"));
+    assert_eq!(config.mtu, Some(1280));
+    assert!(config.remote_dns_resolve);
+    assert_eq!(config.dns, ["1.1.1.1", "8.8.8.8"]);
+    assert!(config.tls.enabled, "a MASQUE tunnel is always TLS");
+    assert_eq!(config.tls.sni.as_deref(), Some("www.cloudflare.com"));
+}
+
+#[test]
+fn masque_share_link_defaults_the_carrier_and_accepts_h2() {
+    let mut diagnostics = Vec::new();
+    let node = Node::from_share_link_with_detailed_diagnostics(
+        "masque://162.159.192.1:443?network=h2",
+        &mut diagnostics,
+    )
+    .expect("masque link over h2");
+    assert_eq!(node.masque().unwrap().network.as_deref(), Some("h2"));
+    assert!(!node.masque().unwrap().remote_dns_resolve);
+}
