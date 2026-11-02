@@ -710,7 +710,9 @@ impl ControlPlaneHandle {
         // through the generation, whose runtime carries the binding; the
         // pooled path (`dial_with_tcp`) has no runtime to read one from and
         // would refuse the dial with "detour ... is not bound".
-        let node_detour = generation.get(&node.id).and_then(|runtime| runtime.detour());
+        let node_detour = generation
+            .get(&node.id)
+            .and_then(|runtime| runtime.detour());
         let pools_usable = !pool_disabled && node_detour.is_none();
 
         let addr = format!("{}:{}", node.host(), node.port);

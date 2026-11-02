@@ -74,7 +74,7 @@ pub(crate) fn bind_node_detours(
                     Arc::clone(manager),
                     node.protocol(),
                 )
-            },
+            }
             (None, None) => {
                 tracing::warn!(
                     "node {}: detour {name:?} is neither a node nor a group in this \

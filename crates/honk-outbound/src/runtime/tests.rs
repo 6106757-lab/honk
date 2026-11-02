@@ -342,15 +342,16 @@ async fn dns_fork_owns_sessions_but_preserves_dial_limits() {
 
 #[test]
 fn dns_fork_carries_the_detour_bindings() {
-    use crate::proxy::detour::DetourPath;
     use crate::proxy::ProxyRegistry;
+    use crate::proxy::detour::DetourPath;
 
     let front = canonical_node("fork-front");
     let mut back = canonical_node("fork-back");
+    // The identity covers the detour, so re-derive the id after setting it.
     back.detour = Some("fork-front".into());
-    let generation = Arc::new(
-        OutboundRuntimeRegistry::build(&[front.clone(), back.clone()]).unwrap(),
-    );
+    back.id = back.derive_id();
+    let generation =
+        Arc::new(OutboundRuntimeRegistry::build(&[front.clone(), back.clone()]).unwrap());
     let path = DetourPath::new(
         Arc::new(ProxyRegistry::new()),
         Arc::clone(&generation),

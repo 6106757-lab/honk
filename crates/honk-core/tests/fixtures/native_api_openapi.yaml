@@ -3453,6 +3453,7 @@ paths:
                         kind: group
                     config:
                       default_member_id: null
+                      detour: null
                       final_outbound: direct
                       check_url: null
                       check_interval: 30
@@ -10177,6 +10178,7 @@ components:
       description: The group's own configured options, patched through PATCH /groups/{group_id}/config. For an option the engine supports, null means the group sets no value of its own and the engine's inheritance and defaults apply. Engine-only options go in a nested x-<engine> member, for example config["x-dae"].check_addresses; GET reports these members and they are not patch targets. Other unlisted keys are not allowed.
       required:
         - default_member_id
+        - detour
         - final_outbound
         - check_url
         - check_interval
@@ -10190,6 +10192,11 @@ components:
           description: The engine's own group options, keyed by name. GET reports them; PATCH does not address them.
       properties:
         default_member_id:
+          type:
+            - string
+            - 'null'
+        detour:
+          description: The outbound the group's members dial through first (a node, a group or direct). Null means the group sets no detour of its own.
           type:
             - string
             - 'null'
@@ -10355,6 +10362,7 @@ components:
               - policy
               - default_member_id
               - final_outbound
+              - detour
               - check_url
               - check_interval
               - tolerance
@@ -10463,6 +10471,7 @@ components:
           - $ref: '#/components/schemas/PolicyPatch'
           - $ref: '#/components/schemas/MemberIdPatch'
           - $ref: '#/components/schemas/OutboundPatch'
+          - $ref: '#/components/schemas/DetourPatch'
           - $ref: '#/components/schemas/CheckUrlPatch'
           - $ref: '#/components/schemas/PositiveIntegerPatch'
           - $ref: '#/components/schemas/TolerancePatch'
@@ -10525,6 +10534,26 @@ components:
         path:
           type: string
           const: /config/final_outbound
+        value:
+          type:
+            - string
+            - 'null'
+    DetourPatch:
+      type: object
+      required:
+        - op
+        - path
+        - value
+      properties:
+        op:
+          type: string
+          enum:
+            - add
+            - replace
+            - test
+        path:
+          type: string
+          const: /config/detour
         value:
           type:
             - string
@@ -10640,6 +10669,7 @@ components:
         - /policy
         - /config/default_member_id
         - /config/final_outbound
+        - /config/detour
         - /config/check_url
         - /config/check_interval
         - /config/tolerance
