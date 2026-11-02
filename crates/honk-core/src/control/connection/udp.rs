@@ -550,6 +550,7 @@ impl ControlPlaneHandle {
         let Some((node, prepared)) = self
             .prepare_udp_candidates(
                 plan,
+                &outbound_name,
                 mark,
                 client_addr,
                 original_dst,

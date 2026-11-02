@@ -411,6 +411,60 @@ impl AnyTlsHandler {
         .await
     }
 
+    /// UDP counterpart of `dial_runtime_detoured`: an AnyTLS session is a
+    /// carrier many flows ride and belongs to the path that opened it, so a
+    /// detoured flow gets a private pool instead of borrowing the node's own
+    /// session (which would send it down that other path).
+    async fn dial_udp_transport_typed_detoured(
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<Arc<AnyTlsUotTransport>> {
+        let pool = Arc::new(AnyTlsPool::new());
+        let node = Arc::clone(&runtime.node);
+        if !crate::descriptor::network_allows_udp(&node) {
+            anyhow::bail!("node '{}' does not allow UDP", node.name);
+        }
+        let dial_node = Arc::clone(&node);
+        let dial_runtime = Arc::clone(&runtime);
+        let dial_addr = format!("{}:{}", node.host(), node.port);
+        let padding_state = pool.padding_state();
+        let inbound_payload_budget = pool.inbound_payload_budget();
+        let chained = Arc::clone(detour);
+        pool.open_with(
+            move || {
+                let node = Arc::clone(&dial_node);
+                let runtime = Arc::clone(&dial_runtime);
+                let addr = dial_addr.clone();
+                let padding_state = Arc::clone(&padding_state);
+                let inbound_payload_budget = Arc::clone(&inbound_payload_budget);
+                let chained = Arc::clone(&chained);
+                async move {
+                    let tls_connector = runtime.anytls_tls_connector()?;
+                    runtime
+                        .transport_quality()
+                        .scope(dial_session(
+                            &node,
+                            &addr,
+                            connect_timeout,
+                            Some(tls_connector),
+                            padding_state,
+                            inbound_payload_budget,
+                            Some(chained),
+                        ))
+                        .await
+                }
+            },
+            move |session, permit| {
+                let domain = target_domain.map(str::to_string);
+                async move { session.open_packet(permit, target, domain.as_deref()).await }
+            },
+        )
+        .await
+    }
+
     async fn dial_udp_transport_speculative_typed(
         runtime: Arc<crate::runtime::NodeRuntime>,
         target: SocketAddr,
@@ -535,6 +589,25 @@ impl PacketOutbound for AnyTlsHandler {
     ) -> anyhow::Result<Arc<dyn PacketTransport>> {
         let transport =
             Self::dial_udp_transport_typed(runtime, target, target_domain, connect_timeout).await?;
+        Ok(transport)
+    }
+
+    async fn dial_udp_transport_runtime_detoured(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        let transport = Self::dial_udp_transport_typed_detoured(
+            runtime,
+            target,
+            target_domain,
+            connect_timeout,
+            detour,
+        )
+        .await?;
         Ok(transport)
     }
 

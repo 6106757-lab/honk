@@ -110,6 +110,34 @@ impl TrojanHandler {
             .await
     }
 
+    /// UDP counterpart of [`Self::dial_stream_detoured`]. The UDP-associate
+    /// control connection *is* the path every datagram rides, so open it over
+    /// the detour the caller names rather than the node's own.
+    async fn dial_udp_stream_detoured(
+        node: &Node,
+        runtime: &Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        if !crate::descriptor::network_allows_udp(node) {
+            anyhow::bail!(
+                "Trojan UDP: node network {:?} does not include \"udp\"",
+                node.network()
+            );
+        }
+        let (control, preparation) = super::transport::prepare_transport_runtime(
+            runtime,
+            None,
+            connect_timeout,
+            Some(detour),
+        )
+        .await?;
+        preparation.commit()?;
+        Ok(Self::finish_udp_stream(node, target, target_domain, control).await?)
+    }
+
     async fn prepare_transport(
         node: &Node,
         runtime: Option<&Arc<crate::runtime::NodeRuntime>>,
@@ -337,6 +365,25 @@ impl PacketOutbound for TrojanHandler {
             target,
             target_domain,
             connect_timeout,
+        )
+        .await
+    }
+
+    async fn dial_udp_transport_runtime_detoured(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        Self::dial_udp_stream_detoured(
+            &runtime.node,
+            &runtime,
+            target,
+            target_domain,
+            connect_timeout,
+            detour,
         )
         .await
     }

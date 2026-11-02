@@ -347,6 +347,46 @@ impl TcpOutbound for MasqueHandler {
     }
 }
 
+impl MasqueHandler {
+    /// Bind a UDP socket to the tunnel carrying this flow's path, and keep the
+    /// tunnel alive as long as the socket exists. `prune_idle()` reclaims a
+    /// tunnel nobody holds, so the socket itself has to count as a holder —
+    /// otherwise the TUN device disappears from under a live UDP flow.
+    async fn dial_udp_via_tunnel(
+        &self,
+        runtime: Arc<NodeRuntime>,
+        target: SocketAddr,
+        connect_timeout: Duration,
+        detour: Option<&crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        let masque = masque_runtime(runtime.as_ref())?;
+        let tunnel = match detour {
+            Some(detour) => {
+                masque
+                    .tunnel_for(runtime.as_ref(), connect_timeout, Some(detour))
+                    .await?
+            }
+            None => masque.tunnel(runtime.as_ref(), connect_timeout).await?,
+        };
+        let source = tunnel.source_for(target).ok_or_else(|| {
+            anyhow::anyhow!(
+                "masque node {} has no {} source address for UDP {target}",
+                runtime.node.name,
+                if target.is_ipv4() { "IPv4" } else { "IPv6" },
+            )
+        })?;
+        let socket = bind::udp_via_tun(tunnel.tun_name(), source)?;
+        let socket = tokio::net::UdpSocket::from_std(socket)?;
+        socket.connect(target).await?;
+        let transport: Arc<dyn PacketTransport> =
+            Arc::new(UdpSocketTransport::new(Arc::new(socket), target));
+        Ok(crate::proxy::packet_transport_with_owner(
+            transport,
+            Arc::clone(&tunnel),
+        ))
+    }
+}
+
 #[async_trait]
 impl PacketOutbound for MasqueHandler {
     async fn dial_udp_transport(
@@ -369,19 +409,22 @@ impl PacketOutbound for MasqueHandler {
         _target_domain: Option<&str>,
         connect_timeout: Duration,
     ) -> anyhow::Result<Arc<dyn PacketTransport>> {
-        let masque = masque_runtime(runtime.as_ref())?;
-        let tunnel = masque.tunnel(runtime.as_ref(), connect_timeout).await?;
-        let source = tunnel.source_for(target).ok_or_else(|| {
-            anyhow::anyhow!(
-                "masque node {} has no {} source address for UDP {target}",
-                runtime.node.name,
-                if target.is_ipv4() { "IPv4" } else { "IPv6" },
-            )
-        })?;
-        let socket = bind::udp_via_tun(tunnel.tun_name(), source)?;
-        let socket = tokio::net::UdpSocket::from_std(socket)?;
-        socket.connect(target).await?;
-        Ok(Arc::new(UdpSocketTransport::new(Arc::new(socket), target)))
+        self.dial_udp_via_tunnel(runtime, target, connect_timeout, None)
+            .await
+    }
+
+    async fn dial_udp_transport_runtime_detoured(
+        &self,
+        runtime: Arc<NodeRuntime>,
+        target: SocketAddr,
+        _target_domain: Option<&str>,
+        connect_timeout: Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        // The tunnel *is* the path for MASQUE: every flow on a node shares one
+        // carrier, so a detoured flow cannot join the generation's own tunnel.
+        self.dial_udp_via_tunnel(runtime, target, connect_timeout, Some(detour.as_ref()))
+            .await
     }
 }
 

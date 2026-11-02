@@ -509,6 +509,26 @@ impl PacketOutbound for JuicityHandler {
             .await?)
     }
 
+    async fn dial_udp_transport_runtime_detoured(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: Duration,
+        detour: &Arc<DetourPath>,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        // A QUIC connection carries every flow that shares it, and the cached
+        // client was opened over the node's own path. Build a private client
+        // over the detour rather than borrowing one from another path.
+        let profiles = Some(runtime.quic_flow_control_profiles()?);
+        let client = self
+            .build_client(runtime.node.as_ref(), profiles, Some(detour))
+            .await?;
+        Ok(self
+            .udp_transport_via_client(client, target, target_domain, connect_timeout, true)
+            .await?)
+    }
+
     async fn dial_udp_transport_speculative_runtime(
         &self,
         runtime: Arc<crate::runtime::NodeRuntime>,

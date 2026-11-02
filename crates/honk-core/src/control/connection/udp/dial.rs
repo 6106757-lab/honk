@@ -56,6 +56,7 @@ impl ControlPlaneHandle {
     pub(super) async fn prepare_udp_candidates(
         &self,
         plan: ResolvedUdpPlan,
+        outbound_name: &str,
         mark: Option<honk_outbound::proxy::DirectMark>,
         client_addr: SocketAddr,
         original_dst: SocketAddr,
@@ -77,6 +78,14 @@ impl ControlPlaneHandle {
         // Only a literal direct route keeps a mark, and Cold URLTest is always
         // a group route, so speculative preparation never needs one.
         debug_assert!(plan_mode != SelectionPlanMode::ColdUrlTest || mark.is_none());
+        // A group's detour belongs to the flow, not to the node. Resolve it
+        // from the same config and group manager TCP dialling consults, so a
+        // UDP flow reaching a group with `detour:` rides the same front as its
+        // TCP peers. Snapshots avoid holding either guard across the dials.
+        let detour_config = self.config.read().await.clone();
+        let detour_manager = self.group_manager.read().clone();
+        let detour_proxies = Arc::clone(&self.proxy_registry);
+        let detour_outbound = outbound_name.to_owned();
         let prepare_generation = Arc::clone(runtime_generation);
         let prepare: UdpPrepare<PreparedEndpoint> = {
             let registry = self.proxy_registry.clone();
@@ -96,9 +105,21 @@ impl ControlPlaneHandle {
                 let udp_pool = Arc::clone(&udp_pool);
                 let alive_set = Arc::clone(&alive_set);
                 let target_domain = target_domain.clone();
+                let detour_config = Arc::clone(&detour_config);
+                let detour_manager = Arc::clone(&detour_manager);
+                let detour_proxies = Arc::clone(&detour_proxies);
+                let detour_outbound = detour_outbound.clone();
                 #[cfg(feature = "native-api")]
                 let native = native.clone();
                 Box::pin(async move {
+                    let detour = crate::control::node_detour::group_detour(
+                        &detour_config,
+                        &detour_proxies,
+                        &runtime_generation,
+                        &detour_manager,
+                        &detour_outbound,
+                        node.protocol(),
+                    );
                     #[cfg(feature = "native-api")]
                     let mut native_attempt = native.as_ref().and_then(|observation| {
                         observation.attempt(&selection_chain, &node, target_domain.as_deref())
@@ -118,7 +139,18 @@ impl ControlPlaneHandle {
                         .map(crate::group::ScoreBusinessGuard::start);
                     let dial_started_at = std::time::Instant::now();
                     let flow_transport = async {
-                        (if let Some(mark) = mark {
+                        let transport = if let Some(detour) = &detour {
+                            registry
+                                .dial_udp_transport_runtime_detoured(
+                                    Arc::clone(&runtime_generation),
+                                    node.id,
+                                    original_dst,
+                                    target_domain.as_deref(),
+                                    connect_timeout,
+                                    Arc::clone(detour),
+                                )
+                                .await
+                        } else if let Some(mark) = mark {
                             registry
                                 .dial_udp_transport_runtime_marked(
                                     Arc::clone(&runtime_generation),
@@ -139,12 +171,20 @@ impl ControlPlaneHandle {
                                     connect_timeout,
                                 )
                                 .await
-                        })
-                        .map(honk_outbound::proxy::PreparedUdpTransport::ready)
-                        .map(PreparedEndpointTransport::Flow)
+                        };
+                        transport
+                            .map(honk_outbound::proxy::PreparedUdpTransport::ready)
+                            .map(PreparedEndpointTransport::Flow)
                     };
                     let operation = async {
-                        if let Some(path) = source_path(&registry, &node, original_dst.port()) {
+                        if detour.is_some() {
+                            // A detoured flow must not borrow a shared source or
+                            // speculative carrier: those were opened over the
+                            // node's own path, not the one this group named.
+                            flow_transport.await
+                        } else if let Some(path) =
+                            source_path(&registry, &node, original_dst.port())
+                        {
                             let runtime = runtime_generation.get(&node.id).ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "node {} is not in the captured runtime generation",

@@ -468,6 +468,35 @@ impl ProxyRegistry {
         .await
     }
 
+    /// Generation-pinned framed UDP transport over a detour a group names.
+    /// A detoured flow never borrows a pooled or shared-source carrier, whose
+    /// own path would otherwise decide where the packets leave.
+    pub async fn dial_udp_transport_runtime_detoured(
+        &self,
+        generation: Arc<crate::runtime::OutboundRuntimeRegistry>,
+        node_id: uuid::Uuid,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: Duration,
+        detour: Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        self.dial_generation(generation, node_id, |runtime, entry| {
+            let packet = Arc::clone(Self::packet_for_runtime(&runtime, entry, target.port())?);
+            Ok(async move {
+                packet
+                    .dial_udp_transport_runtime_detoured(
+                        runtime,
+                        target,
+                        target_domain,
+                        connect_timeout,
+                        &detour,
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
     /// Generation-pinned direct UDP flow with a nonzero rule mark.
     pub async fn dial_udp_transport_runtime_marked(
         &self,
