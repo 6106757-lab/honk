@@ -548,6 +548,15 @@ impl TcpOutbound for VLessHandler {
         target_domain: Option<&str>,
         connect_timeout: std::time::Duration,
     ) -> anyhow::Result<ProxyStream> {
+        // A node that names a detour rides it on every dial, the same way a
+        // group's detour reaches a member. The transport refuses a detour it
+        // was not handed, so reading it here is what keeps the node's traffic
+        // on the front the operator configured instead of failing the dial.
+        if let Some(detour) = runtime.detour() {
+            return self
+                .dial_runtime_detoured(runtime, target, target_domain, connect_timeout, &detour)
+                .await;
+        }
         match runtime.node.vless().unwrap().tcp_path() {
             VlessTcpPath::Direct => {
                 if runtime.xhttp.is_some() {
@@ -595,7 +604,7 @@ impl TcpOutbound for VLessHandler {
         anyhow::ensure!(
             path == VlessTcpPath::Direct,
             "VLESS {path:?} multiplexes flows over a tunnel the node keeps, so it cannot be \
-             carried by a detour a group names"
+             carried by a detour"
         );
         if runtime.xhttp.is_some() {
             let operation = self.prepare_retained_base_detoured(
