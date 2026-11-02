@@ -144,9 +144,7 @@ impl ControlPlaneHandle {
                             .get(chain.len().saturating_sub(2))
                             .map(String::as_str)
                             .filter(|g| {
-                                !g.is_empty()
-                                    && *g != node.name.as_str()
-                                    && *g != outbound.as_str()
+                                !g.is_empty() && *g != node.name.as_str() && *g != outbound.as_str()
                             });
                         #[cfg(not(feature = "native-api"))]
                         let owning_group: Option<&str> = None;

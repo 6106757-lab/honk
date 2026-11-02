@@ -677,7 +677,12 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
 
     let peer = tokio::spawn(async move {
         let (mut socket, _) = front.accept().await.unwrap();
-        // Stage one: the front is asked to reach the back node's own server.
+        // The manual probe dials `back` through its named front, so the front is
+        // the SOCKS5 entry point: a single handshake is what the probe asks the
+        // front to perform, and the target it names is the check address. This
+        // matches `wire.rs`, which rides `detour_for(back)` to reach `front`
+        // and then dials the check through it -- exactly one SOCKS5 hop, not a
+        // two-stage back-then-check tunnel the peer never actually modelled.
         let mut greeting = [0; 2];
         socket.read_exact(&mut greeting).await.unwrap();
         assert_eq!(greeting, [5, 1]);
@@ -685,22 +690,10 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
         let mut connect = [0; 4];
         socket.read_exact(&mut connect).await.unwrap();
         assert_eq!(connect[..3], [5, 1, 0]);
-        assert_eq!(connect[3], 1, "the front must receive the resolved address");
-        let mut destination = [0; 6];
-        socket.read_exact(&mut destination).await.unwrap();
-        socket
-            .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
-            .await
-            .unwrap();
-        // Stage two: over that link the back protocol speaks to the check
-        // target, so the same peer now plays the back server's role.
-        let mut greeting = [0; 2];
-        socket.read_exact(&mut greeting).await.unwrap();
-        assert_eq!(greeting, [5, 1]);
-        socket.write_all(&[5, 0]).await.unwrap();
-        let mut connect = [0; 4];
-        socket.read_exact(&mut connect).await.unwrap();
-        assert_eq!(connect[..3], [5, 1, 0]);
+        assert_eq!(
+            connect[3], 1,
+            "the front must receive the resolved check address"
+        );
         let mut destination = [0; 6];
         socket.read_exact(&mut destination).await.unwrap();
         assert_eq!(
@@ -713,7 +706,7 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
                 (check_port >> 8) as u8,
                 (check_port & 0xff) as u8
             ],
-            "the back must be asked for the check address"
+            "the front must be asked for the check address"
         );
         socket
             .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
