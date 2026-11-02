@@ -68,12 +68,13 @@ pub(crate) fn bind_node_detours(
             (None, Some(_)) => {
                 tracing::info!(node = %node.name, detour = %name, "detour bound to group");
                 DetourPath::to_group(
-                Arc::clone(proxies),
-                Arc::clone(registry),
-                name,
-                Arc::clone(manager),
-                node.protocol(),
-            ),
+                    Arc::clone(proxies),
+                    Arc::clone(registry),
+                    name,
+                    Arc::clone(manager),
+                    node.protocol(),
+                )
+            },
             (None, None) => {
                 tracing::warn!(
                     "node {}: detour {name:?} is neither a node nor a group in this \
@@ -89,10 +90,6 @@ pub(crate) fn bind_node_detours(
                 "node {}: detour {name:?} could not be bound to its runtime (id {})",
                 node.name,
                 node.id
-            );
-            tracing::warn!(
-                "node {}: detour {name:?} could not be bound to its runtime",
-                node.name
             );
         }
     }
