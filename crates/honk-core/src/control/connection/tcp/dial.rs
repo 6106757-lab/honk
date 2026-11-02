@@ -119,11 +119,37 @@ impl ControlPlaneHandle {
                     // The detour the flow's group names, if any: it belongs to
                     // the group rather than to the node, so it is resolved
                     // here where both are known.
+                    //
+                    // When a candidate was reached through a group's `final:`
+                    // fallback, `outbound` still names the routing group (e.g.
+                    // "Final"), which carries no `detour:` of its own and is not
+                    // linked to the fallback group by a member edge — so looking
+                    // the detour up by `outbound` returns nothing and the front
+                    // is silently dropped. The selection chain records the real
+                    // owning group as its second-to-last element (e.g.
+                    // "Lianshi"); if the routing group resolves to no detour we
+                    // fall back to that owning group, so its `detour:` (and
+                    // anything it inherits) still applies to the dial.
                     let group_detour = {
                         // `config` is a tokio lock and `group_manager` a
                         // parking_lot one: only the first is a future.
                         let config = ctx.config.read().await;
                         let manager = ctx.group_manager.read();
+                        // The selection chain (native-api only) records the real
+                        // owning group as its second-to-last element; fall back
+                        // to it for the detour lookup when the routing group
+                        // itself resolves to none (the `final:` fallback case).
+                        #[cfg(feature = "native-api")]
+                        let owning_group = chain
+                            .get(chain.len().saturating_sub(2))
+                            .map(String::as_str)
+                            .filter(|g| {
+                                !g.is_empty()
+                                    && *g != node.name.as_str()
+                                    && *g != outbound.as_str()
+                            });
+                        #[cfg(not(feature = "native-api"))]
+                        let owning_group: Option<&str> = None;
                         crate::control::node_detour::group_detour(
                             &config,
                             &ctx.proxy_registry,
@@ -132,6 +158,18 @@ impl ControlPlaneHandle {
                             &outbound,
                             node.protocol(),
                         )
+                        .or_else(|| {
+                            owning_group.and_then(|via| {
+                                crate::control::node_detour::group_detour(
+                                    &config,
+                                    &ctx.proxy_registry,
+                                    &generation,
+                                    &manager,
+                                    via,
+                                    node.protocol(),
+                                )
+                            })
+                        })
                     };
                     let start = std::time::Instant::now();
                     let per_dial_timeout = connect_timeout * 3;

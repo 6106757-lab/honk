@@ -102,6 +102,20 @@ impl ControlPlaneHandle {
                 let runtime_generation = Arc::clone(&prepare_generation);
                 let feedback = feedback.get(index).cloned().flatten();
                 let selection_chain = selection_chains.get(index).cloned().unwrap_or_default();
+                // The selection chain records the real owning group as its
+                // second-to-last element. When a candidate was reached through a
+                // group's `final:` fallback the routing group carries no detour
+                // of its own, so resolve the detour by the owning group instead
+                // of the routing group name (see the TCP dial for the rationale).
+                // Owned to survive into the inner async block without dangling.
+                let owning_group: Option<String> = selection_chain
+                    .get(selection_chain.len().saturating_sub(2))
+                    .filter(|g| {
+                        !g.is_empty()
+                            && g.as_str() != node.name.as_str()
+                            && g.as_str() != detour_outbound.as_str()
+                    })
+                    .cloned();
                 let udp_pool = Arc::clone(&udp_pool);
                 let alive_set = Arc::clone(&alive_set);
                 let target_domain = target_domain.clone();
@@ -119,7 +133,19 @@ impl ControlPlaneHandle {
                         &detour_manager,
                         &detour_outbound,
                         node.protocol(),
-                    );
+                    )
+                    .or_else(|| {
+                        owning_group.as_deref().and_then(|via| {
+                            crate::control::node_detour::group_detour(
+                                &detour_config,
+                                &detour_proxies,
+                                &runtime_generation,
+                                &detour_manager,
+                                via,
+                                node.protocol(),
+                            )
+                        })
+                    });
                     #[cfg(feature = "native-api")]
                     let mut native_attempt = native.as_ref().and_then(|observation| {
                         observation.attempt(&selection_chain, &node, target_domain.as_deref())
