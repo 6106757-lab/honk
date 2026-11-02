@@ -17,7 +17,7 @@ use super::{
 pub(super) const MAX_PATCH_OPERATIONS: usize = 32;
 
 /// Patchable settings: wire field name, JSON pointer and source edit, indexed by the constants below.
-pub(super) const FIELDS: [(&str, &str, GroupField); 7] = [
+pub(super) const FIELDS: [(&str, &str, GroupField); 8] = [
     ("policy", "/policy", GroupField::Policy),
     (
         "default_member_id",
@@ -41,6 +41,7 @@ pub(super) const FIELDS: [(&str, &str, GroupField); 7] = [
         GroupField::InterruptConnections,
     ),
     ("check_url", "/config/check_url", GroupField::CheckUrl),
+    ("detour", "/config/detour", GroupField::Detour),
 ];
 const POLICY: usize = 0;
 const DEFAULT: usize = 1;
@@ -49,9 +50,10 @@ const TOLERANCE: usize = 3;
 const IDLE_TIMEOUT: usize = 4;
 const INTERRUPT: usize = 5;
 const CHECK_URL: usize = 6;
+const DETOUR: usize = 7;
 const MAX_CHECK_URL_BYTES: usize = 2048;
 
-fn paths() -> [&'static str; 7] {
+fn paths() -> [&'static str; 8] {
     FIELDS.map(|(_, path, _)| path)
 }
 
@@ -156,7 +158,9 @@ fn normalized(index: usize, value: &Value) -> Option<Value> {
                             && policy.get("native").and_then(Value::as_str) == Some(kind)
                     })
         }),
-        DEFAULT | FINAL => value.is_null() || value.as_str().is_some_and(|value| !value.is_empty()),
+        DEFAULT | FINAL | DETOUR => {
+            value.is_null() || value.as_str().is_some_and(|value| !value.is_empty())
+        }
         TOLERANCE | IDLE_TIMEOUT if !value.is_null() => return integer(value).map(Value::from),
         INTERRUPT => value.is_null() || value.is_boolean(),
         CHECK_URL if !value.is_null() => {
@@ -246,6 +250,7 @@ impl GroupPatch {
             json!(self.group.idle_timeout),
             json!(crate::observe::catalog::interrupt_connections(&self.group)),
             json!(crate::observe::catalog::check_url(&self.group)),
+            json!(self.group.detour),
         ];
         let mut values = initial.clone().map(Some);
         let operations = operation_list(&self.operations)?;
