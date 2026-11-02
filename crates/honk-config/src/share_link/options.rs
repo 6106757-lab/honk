@@ -624,7 +624,7 @@ fn apply_masque(config: &mut MasqueConfig, query: &Query) {
     }
     let text = |keys: &[&str]| -> Option<String> {
         let values = keys.iter().flat_map(|key| query.values(key)).map(Some);
-        optional_text(values).ok().flatten()
+        optional_text(values).ok().flatten().map(str::to_string)
     };
     config.private_key = text(&["private-key", "private_key", "privateKey"]);
     config.endpoint_public_key = text(&[
@@ -637,9 +637,13 @@ fn apply_masque(config: &mut MasqueConfig, query: &Query) {
     config.local_ipv4 = text(&["ip", "ipv4", "local-ipv4", "local_ipv4"]);
     config.local_ipv6 = text(&["ipv6", "local-ipv6", "local_ipv6"]);
     config.mtu = text(&["mtu"]).and_then(|value| value.trim().parse::<u16>().ok());
-    config.remote_dns_resolve = text(&["remote-dns-resolve", "remote_dns_resolve"]).is_some_and(
-        |value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
-    );
+    config.remote_dns_resolve =
+        text(&["remote-dns-resolve", "remote_dns_resolve"]).is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
     if let Some(value) = text(&["dns"]) {
         config.dns = value
             .split([',', ';', ' '])

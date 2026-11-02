@@ -2579,7 +2579,11 @@ fn masque_share_link_carries_the_warp_parameters() {
     let node = Node::from_share_link_with_detailed_diagnostics(link, &mut diagnostics)
         .expect("masque link with WARP parameters");
     let config = node.masque().expect("masque outbound");
-    assert_eq!(config.network.as_deref(), Some("quic"), "h3 selects the QUIC carrier");
+    assert_eq!(
+        config.network.as_deref(),
+        Some("quic"),
+        "h3 selects the QUIC carrier"
+    );
     assert_eq!(config.private_key.as_deref(), Some("PRIVATE"));
     assert_eq!(config.endpoint_public_key.as_deref(), Some("PUBLIC"));
     assert_eq!(config.local_ipv4.as_deref(), Some("172.16.0.2/32"));
