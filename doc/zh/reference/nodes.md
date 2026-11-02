@@ -653,9 +653,18 @@ REALITY 不使用 CA 校验或 `skip_cert_verify`。目标 TLS 记录的缓冲�
 
 静态配置会提供真实 ECH，ECH 被拒绝时握手 fail-closed。发现是尽力而为且 fail-open：找不到 ECHConfigList 时，握手不带真实 ECH 继续；`utls` 仍发送 ECH GREASE。发现使用 bootstrap resolver，未配置时使用系统首个 nameserver，并按域名缓存结果。同一组控制项也适用于 QUIC 协议。
 
+## 链式代理与 MASQUE 节点
+
+节点可以在分享链接里用 `?dialer-proxy=front`（也接受 `dialer_proxy`、`detour`、`underlying-proxy`、`underlying_proxy`）指定拨号前置；Clash / Mihomo 订阅读 `dialer-proxy`，sing-box JSON 读 `detour`。前置可为节点名或组名，在每次重载时重新绑定，前置组换成员即时生效。节点级 detour 在 TCP 与 UDP 上都生效。
+
+`masque://host:port` 形式的手写链接会被识别为 MASQUE（connect-ip）出站，但 WARP 所需的密钥等字段请经订阅 YAML 的 `type: masque` 条目提供（`private-key`、`public-key`、`network`、`ip` / `ipv6`、`mtu`、`remote-dns-resolve` 等）。MASQUE 在本机创建 TUN 设备，每条承载路径各持有一个隧道。节点级 detour 指向另一个 MASQUE 节点会被忽略并告警。
+
+组级 `detour:`、引用组继承、协议支持范围与完整配置示例见[链式代理与 MASQUE 配置指南](../guide/chained-proxy-and-masque.md)。
+
 ## 分享链接 scheme
 
 | Scheme | 格式与映射 |
+| `masque://` | MASQUE connect-ip 端点；密钥等字段由订阅 YAML 提供，见上一节 |
 | --- | --- |
 | `ss://` | SIP002 userinfo/完整地址部分 base64 形式，以及 `plugin` |
 | `vmess://` | 宽松 base64 v2rayN JSON（`add`、`port`、`id`、`scy`、`net`、`host`、`path`、`tls`、`sni`、`ps`） |
@@ -672,5 +681,6 @@ REALITY 不使用 CA 校验或 `skip_cert_verify`。目标 TLS 记录的缓冲�
 ## 相关文档
 
 - [订阅参考](./subscription.md)
+- [链式代理与 MASQUE 配置指南](../guide/chained-proxy-and-masque.md)
 - [组参考](./groups.md)
 - [出站设计](../design/outbound.md)

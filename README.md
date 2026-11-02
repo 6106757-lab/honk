@@ -4,11 +4,11 @@
 
 **An experimental transparent-proxy engine for Linux, written in Rust.**
 
-**[Documentation](doc/README.md)** / **[Web UI demo](https://demo.daeuniverse.org/)** / **[Releases](https://github.com/daeuniverse/honk/releases)**
+**[Documentation](doc/README.md)** / **[Web UI demo](https://demo.daeuniverse.org/)** / **[Releases](https://github.com/6106757-lab/honk/releases)**
 
 English / [简体中文](README.zh.md)
 
-[Capabilities](#capabilities) / [Install](#install) / [Web interface](#web-interface) / [Report problems](#report-problems)
+[Capabilities](#capabilities) / [Fork additions](#fork-additions) / [Install](#install) / [Web interface](#web-interface) / [Report problems](#report-problems)
 
 </div>
 
@@ -26,9 +26,19 @@ honk follows the design of dae's eBPF datapath and configuration syntax, and of 
 
 There is no FakeIP engine, full mihomo parity, or Windows/macOS datapath.
 
+## Fork additions
+
+This fork adds features that upstream `daeuniverse/honk` does not ship. See the [Chinese configuration guide](doc/zh/guide/chained-proxy-and-masque.md) for full syntax.
+
+- MASQUE (connect-ip) outbound, including WARP-style endpoints imported from subscriptions, with TUN devices and UI latency probes.
+- Node-level and group-level chained proxies (`dialer-proxy` / `detour`), on both TCP and UDP, with front switching that takes effect on reload.
+- `filter: group(X)` groups inherit X's `detour:`; an explicit `detour:`, including `direct`, overrides it.
+- An embedded doona UI built from [6106757-lab/doona](https://github.com/6106757-lab/doona) `v0.1.0-rc.4`, which can probe MASQUE nodes.
+- Prebuilt x86_64 musl `full` binaries on [Releases](https://github.com/6106757-lab/honk/releases); no local Rust toolchain is needed.
+
 ## Install
 
-Download an archive for your platform from [Releases](https://github.com/daeuniverse/honk/releases). Releases cover x86_64 and aarch64 Linux; `full` suits most deployments.
+Download a prebuilt archive from [this fork's Releases](https://github.com/6106757-lab/honk/releases). The published artifact is the x86_64 static musl `full` build; it can be deployed as-is without a local Rust toolchain. The table below describes the upstream build matrix; only `full` is published here.
 
 | Build | Native API | Clash API | Embedded doona and doona lite |
 | --- | --- | --- | --- |
@@ -74,11 +84,11 @@ The workspace contains configuration, shared eBPF types, NFQUEUE, outbound, core
 
 Use [mock mode](doc/en/how-to-start.md#unprivileged-development) for unprivileged userspace development. `--mock-ebpf` does not intercept traffic or test the datapath.
 
-The rolling [Debug prerelease](https://github.com/daeuniverse/honk/releases/tag/debug) provides the latest `debug.*` build from `main` for testing. These use the release profile, not Cargo's debug profile; retention and publication follow the [release rules](.agents/rules/release.md).
+Binaries are built by GitHub Actions and published straight to [Releases](https://github.com/6106757-lab/honk/releases); see [build.yml](.github/workflows/build.yml). Every release lists SHA-256 checksums.
 
 ## Report problems
 
-Report proxy, routing, and DNS problems in [honk issues](https://github.com/daeuniverse/honk/issues); report web interface problems in [doona issues](https://github.com/Zakkaus/doona/issues).
+Report proxy, routing, and DNS problems in [this fork's Issues](https://github.com/6106757-lab/honk/issues); report embedded UI problems in [doona fork Issues](https://github.com/6106757-lab/doona/issues).
 
 For vulnerabilities, follow [SECURITY.md](.github/SECURITY.md).
 

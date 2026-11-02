@@ -14,6 +14,7 @@ Start with the Startup guide to install honk and choose a minimal configuration,
 | ---------- | --------- | ------ |
 | Startup guide | [en/how-to-start.md](./en/how-to-start.md) | [zh/how-to-start.md](./zh/how-to-start.md) |
 | Configuration guide | [en/configuration.md](./en/configuration.md) | [zh/configuration.md](./zh/configuration.md) |
+| Chained proxy and MASQUE / 链式代理与 MASQUE | — | [zh/guide/chained-proxy-and-masque.md](./zh/guide/chained-proxy-and-masque.md)（中文专页） |
 
 ## Reference / 参考
 

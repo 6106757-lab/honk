@@ -37,7 +37,8 @@ group {
 | `filter: subtag(...)` | `filters` + `nodes` | `[]` | 按产生节点的订阅的当前 tag 选择节点。 |
 | `filter: group(...)` | `groups` | `[]` | 加入嵌套组 tag。接受逗号分隔的参数和竖线分隔的 tag。 |
 | `default` | `default` | `null` | `selector` 的初始或回退成员 tag。 |
-| `final` | `final_outbound` | `null` | 组策略没有合格选择时使用的节点、组、`direct` 或 `block`，该组嵌套在其他组中时同样生效。Final 节点仍受健康检查约束；缺失或成环的 final 会拒绝，不会隐式直连。 |
+| `final` | `final_outbound` | `null` |
+| `detour` | `detour` | `null` | 本组成员拨号时经过的前置节点、组，或 `direct`（显式直连）。每次拨号时解析；组自身未写时沿 `filter: group(X)` 引用边继承上游组的 detour，显式值优先并停止查找。详见[配置指南](../guide/chained-proxy-and-masque.md)。 | 组策略没有合格选择时使用的节点、组、`direct` 或 `block`，该组嵌套在其他组中时同样生效。Final 节点仍受健康检查约束；缺失或成环的 final 会拒绝，不会隐式直连。 |
 | `check_url` | `check_url` | `null` | 非 Selector 策略的按组 TCP 健康检查目标。Selector 会忽略该字段并告警。 |
 | —（dae 中不可配置） | `check_interval` | `null` | 按组间隔字段，单位为秒。当前运行时不读取该字段，而使用全局间隔。 |
 | `tolerance` | `tolerance` | `50` | 非负整数毫秒；dae URLTest 组未显式设置时继承 `global.check_tolerance`，显式值优先；运行时有效下限为 1 ms。 |
@@ -135,8 +136,17 @@ honk 会忽略无法解析的过滤器，并在诊断中注明其在组内节点
 
 面向 Clash 的组输出保留成员 tag：`all` 字段列出直接节点名和嵌套组 tag，而不展开嵌套组。面向叶节点的健康状态与连通性遍历会展开这些 tag 下的实际节点。
 
+## 组级 detour 与继承
+
+`detour:` 指定本组所选成员拨号时经过的前置，可写节点名、组名或 `direct`。它与节点自身的 `dialer-proxy` 是两层独立机制；经过本组的流量按本组的 detour 拨号，建议不要混用。
+
+`filter: group(X)` 是引用边而非拷贝节点列表，因此本组没写 `detour:` 时会继承 X 的 detour：按声明顺序对引用边做广度优先查找，取第一个命中的值，并用 `visited` 防环。显式 `detour:`（含 `direct`）优先并停止查找。`final:` 只是策略无合格选择时的回退，不参与继承；用 `name()` / `subtag()` 直接过滤出成员、没有引用边的组也不会继承。
+
+组 detour 的解析集中在 `group_detour()`，TCP 拨号、UDP 拨号以及 Clash / 原生 API 的延迟测试都读同一个结果，所以延迟测试测到的是真实业务链路。前置写成组时，Selector 切换或 Fallback 故障转移会在后续拨号立即生效，不需要重启。协议支持范围与验证方法见[链式代理与 MASQUE 配置指南](../guide/chained-proxy-and-masque.md)。
+
 ## 相关文档
 
 - [节点参考](./nodes.md)
+- [链式代理与 MASQUE 配置指南](../guide/chained-proxy-and-masque.md)
 - [路由参考](./routing.md)
 - [组设计](../design/groups.md)
