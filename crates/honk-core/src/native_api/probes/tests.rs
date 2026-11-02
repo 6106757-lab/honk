@@ -39,6 +39,24 @@ async fn state(mut config: Config) -> Arc<NativeState> {
         &groups,
         &pinned_groups,
     );
+    #[cfg(test)]
+    {
+        let held = control.runtime_registry().read().clone();
+        for n in &nodes {
+            if let Some(detour_name) = n.detour_name() {
+                let via_outbound = outbound_runtime.detour_for(n.id).is_some();
+                let via_held = held.detour_for(n.id).is_some();
+                eprintln!(
+                    "HARNESS-DETACH node={:?} outbound_ptr={:?} held_ptr={:?} via_outbound={} via_held={}",
+                    detour_name,
+                    std::sync::Arc::as_ptr(&outbound_runtime),
+                    std::sync::Arc::as_ptr(&held),
+                    via_outbound,
+                    via_held,
+                );
+            }
+        }
+    }
     let state = NativeState::new(
         &mut control,
         "127.0.0.1:9527".parse().unwrap(),
