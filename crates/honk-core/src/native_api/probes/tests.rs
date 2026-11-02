@@ -638,7 +638,7 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
         .nodes
         .push(Node::from_share_link(&format!("socks5://127.0.0.1:{front_port}#front")).unwrap());
     let back =
-        Node::from_share_link(&format!("socks5://back.example:9?dialer-proxy=front#back")).unwrap();
+        Node::from_share_link("socks5://back.example:9?dialer-proxy=front#back").unwrap();
     let back_id = back.id;
     config.nodes.push(back);
     let state = state(config).await;
@@ -700,26 +700,33 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
         json!(["tcp"]),
         "ipv4",
     );
-    let plan = capture(&state, serde_json::from_value(input).unwrap())
+    let (stop, receiver) = watch::channel(false);
+    let worker = state.observation.probes.start(Arc::clone(&state), receiver);
+    let accepted = body(
+        create(
+            &state,
+            http_request(&input, "node-detour"),
+            &RequestId("node-detour".into()),
+        )
         .await
-        .unwrap();
-    let mut plan = prepare(plan).await.unwrap();
-    let (_stop, receiver) = watch::channel(false);
-    execute(
-        &state,
-        &mut plan,
-        Instant::now() + Duration::from_secs(5),
-        receiver,
+        .unwrap(),
     )
-    .await
-    .unwrap();
+    .await;
+    let result = terminal(&state, accepted["operation_id"].as_str().unwrap()).await;
+    assert_eq!(result["status"], "succeeded", "{result}");
     assert_eq!(
-        plan.result.results[0].state, "healthy",
-        "{:?}",
-        plan.result.results[0].error
+        result["result"]["results"][0]["state"], "healthy",
+        "{result}"
     );
-    assert!(plan.result.results[0].latency_ms.is_some());
+    assert!(
+        result["result"]["results"][0]["latency_ms"]
+            .as_f64()
+            .is_some(),
+        "{result}"
+    );
     peer.await.unwrap();
+    stop.send(true).unwrap();
+    worker.await.unwrap();
 }
 
 #[tokio::test]
