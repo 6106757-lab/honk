@@ -18,6 +18,7 @@ pub enum GroupField {
     IdleTimeout,
     InterruptConnections,
     CheckUrl,
+    Detour,
 }
 
 impl GroupField {
@@ -30,6 +31,7 @@ impl GroupField {
             Self::IdleTimeout => "idle_timeout",
             Self::InterruptConnections => "interrupt_connections",
             Self::CheckUrl => "check_url",
+            Self::Detour => "detour",
         }
     }
 }
