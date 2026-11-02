@@ -13,6 +13,12 @@ async fn state(mut config: Config) -> Arc<NativeState> {
     config.experimental.native_api.allow_anonymous_loopback = true;
 
     config.ensure_builtin_nodes();
+    // Mirror production bootstrap: capture the node and group set before the
+    // config is moved into the control plane, so each node's named detour can
+    // be bound. Without this a node that names a front (dialer-proxy) has no
+    // bound path, and its manual probe dials directly instead of riding it.
+    let nodes = config.nodes.clone();
+    let groups = config.groups.clone();
     let resolver = crate::dns::DnsResolver::new(&config.dns).unwrap();
     let forwarder = resolver.forwarder();
     let mut control = crate::control::ControlPlane::new(
@@ -24,6 +30,15 @@ async fn state(mut config: Config) -> Arc<NativeState> {
         forwarder,
     )
     .unwrap();
+    let outbound_runtime = control.runtime_registry().read().clone();
+    let pinned_groups = control.group_manager().read().clone();
+    crate::control::node_detour::bind_node_detours(
+        &outbound_runtime,
+        &nodes,
+        &control.proxy_registry(),
+        &groups,
+        &pinned_groups,
+    );
     let state = NativeState::new(
         &mut control,
         "127.0.0.1:9527".parse().unwrap(),
@@ -637,8 +652,7 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
     config
         .nodes
         .push(Node::from_share_link(&format!("socks5://127.0.0.1:{front_port}#front")).unwrap());
-    let back =
-        Node::from_share_link("socks5://back.example:9?dialer-proxy=front#back").unwrap();
+    let back = Node::from_share_link("socks5://back.example:9?dialer-proxy=front#back").unwrap();
     let back_id = back.id;
     config.nodes.push(back);
     let state = state(config).await;
