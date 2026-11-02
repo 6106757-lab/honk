@@ -826,6 +826,12 @@ impl OutboundRuntimeRegistry {
         true
     }
 
+    /// The path this node rides, for a caller that means to measure the node
+    /// as it dials. A manual delay test has no detour of its own to name.
+    pub fn detour_for(&self, node_id: uuid::Uuid) -> Option<Arc<crate::proxy::detour::DetourPath>> {
+        self.nodes.get(&node_id).and_then(|runtime| runtime.detour())
+    }
+
     /// Drop a detour binding the new generation no longer names. A reused
     /// runtime keeps every other piece of its state, so without this a node
     /// whose detour was removed would keep riding the previous front.
