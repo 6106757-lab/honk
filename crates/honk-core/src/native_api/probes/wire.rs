@@ -226,17 +226,22 @@ async fn attempt_wire(
     // A group probe rides the detour the group names, so the latency reflects
     // the path real flows take rather than the node's own direct path out. The
     // rider is the candidate's own protocol because the front is resolved per
-    // member.
-    let detour = plan.group.as_ref().and_then(|group| {
-        crate::control::node_detour::group_detour(
-            &plan.config,
-            &state.proxy_registry,
-            &plan.registry,
-            &plan.manager,
-            group,
-            candidate.node.protocol(),
-        )
-    });
+    // member. A node that names its own front (dialer-proxy) dials through it
+    // the same way real flows do; the group's named front, if any, wins.
+    let detour = plan
+        .group
+        .as_ref()
+        .and_then(|group| {
+            crate::control::node_detour::group_detour(
+                &plan.config,
+                &state.proxy_registry,
+                &plan.registry,
+                &plan.manager,
+                group,
+                candidate.node.protocol(),
+            )
+        })
+        .or_else(|| plan.registry.detour_for(candidate.node.id));
     let operation = async {
         if plan.spec.kind == Kind::Http {
             let timeout = deadline.saturating_duration_since(Instant::now());
@@ -284,14 +289,26 @@ async fn attempt_wire(
                             .packet
                             .as_ref()
                             .ok_or_else(|| anyhow::anyhow!("packet handler unavailable"))?;
-                        let transport = packet
-                            .dial_udp_transport_runtime(
-                                Arc::clone(&runtime),
-                                addr,
-                                None,
-                                connect_timeout,
-                            )
-                            .await?;
+                        let transport = if let Some(detour) = &detour {
+                            packet
+                                .dial_udp_transport_runtime_detoured(
+                                    Arc::clone(&runtime),
+                                    addr,
+                                    None,
+                                    connect_timeout,
+                                    detour,
+                                )
+                                .await?
+                        } else {
+                            packet
+                                .dial_udp_transport_runtime(
+                                    Arc::clone(&runtime),
+                                    addr,
+                                    None,
+                                    connect_timeout,
+                                )
+                                .await?
+                        };
                         crate::dns::forwarder::udp_dns_probe(transport.as_ref()).await
                     }
                 }
@@ -311,6 +328,16 @@ async fn attempt_wire(
             .scope_tasks(plan.registry.scope_dials(operation))
             .await
     };
+    // The API reports a generic `probe_failed`; the actionable cause only
+    // exists here, so record it before the chain is collapsed.
+    if let Err(error) = &result {
+        tracing::warn!(
+            node = %candidate.node.name,
+            kind = ?plan.spec.kind,
+            transport = ?candidate.transport,
+            "manual probe attempt failed: {error:#}"
+        );
+    }
     let mut outcome = AttemptOutcome::completed(result, deadline, &cancel);
     drop(runtime);
     // Never cancel this owner boundary: close must drain every factory/driver

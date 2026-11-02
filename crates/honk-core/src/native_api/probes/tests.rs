@@ -618,6 +618,110 @@ async fn group_http_probe_measures_loopback_node_and_custom_check_port() {
     worker.await.unwrap();
 }
 
+/// A manual probe of a node that names its own front (dialer-proxy) must ride
+/// that front exactly like real flows do. Before the fix the node probe ran
+/// with no detour at all and failed with a generic `probe_failed`, while the
+/// automatic health check -- which reads the node's own binding -- succeeded.
+#[tokio::test]
+async fn a_node_probe_rides_the_detour_the_node_names() {
+    let front = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let front_port = front.local_addr().unwrap().port();
+    let check = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let check_port = check.local_addr().unwrap().port();
+
+    let mut config = Config::default();
+    config.global.tcp_check_url = vec![format!("http://127.0.0.1:{check_port}/check")];
+    let hosts = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(hosts.path(), "back.example 127.0.0.1\n").unwrap();
+    config.dns.hosts = vec![hosts.path().to_string_lossy().into_owned()];
+    config
+        .nodes
+        .push(Node::from_share_link(&format!("socks5://127.0.0.1:{front_port}#front")).unwrap());
+    let back =
+        Node::from_share_link(&format!("socks5://back.example:9?dialer-proxy=front#back")).unwrap();
+    let back_id = back.id;
+    config.nodes.push(back);
+    let state = state(config).await;
+
+    let peer = tokio::spawn(async move {
+        let (mut socket, _) = front.accept().await.unwrap();
+        // Stage one: the front is asked to reach the back node's own server.
+        let mut greeting = [0; 2];
+        socket.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(greeting, [5, 1]);
+        socket.write_all(&[5, 0]).await.unwrap();
+        let mut connect = [0; 4];
+        socket.read_exact(&mut connect).await.unwrap();
+        assert_eq!(connect[..3], [5, 1, 0]);
+        assert_eq!(connect[3], 1, "the front must receive the resolved address");
+        let mut destination = [0; 6];
+        socket.read_exact(&mut destination).await.unwrap();
+        socket
+            .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        // Stage two: over that link the back protocol speaks to the check
+        // target, so the same peer now plays the back server's role.
+        let mut greeting = [0; 2];
+        socket.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(greeting, [5, 1]);
+        socket.write_all(&[5, 0]).await.unwrap();
+        let mut connect = [0; 4];
+        socket.read_exact(&mut connect).await.unwrap();
+        assert_eq!(connect[..3], [5, 1, 0]);
+        let mut destination = [0; 6];
+        socket.read_exact(&mut destination).await.unwrap();
+        assert_eq!(
+            &destination,
+            &[
+                127,
+                0,
+                0,
+                1,
+                (check_port >> 8) as u8,
+                (check_port & 0xff) as u8
+            ],
+            "the back must be asked for the check address"
+        );
+        socket
+            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+            .await
+            .unwrap();
+        receive_headers(&mut socket).await;
+        socket
+            .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+            .await
+            .unwrap();
+    });
+
+    let input = request(
+        json!({"type":"node","node_id":back_id.to_string()}),
+        "http",
+        json!(["tcp"]),
+        "ipv4",
+    );
+    let plan = capture(&state, serde_json::from_value(input).unwrap())
+        .await
+        .unwrap();
+    let mut plan = prepare(plan).await.unwrap();
+    let (_stop, receiver) = watch::channel(false);
+    execute(
+        &state,
+        &mut plan,
+        Instant::now() + Duration::from_secs(5),
+        receiver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        plan.result.results[0].state, "healthy",
+        "{:?}",
+        plan.result.results[0].error
+    );
+    assert!(plan.result.results[0].latency_ms.is_some());
+    peer.await.unwrap();
+}
+
 #[tokio::test]
 async fn ipv6_raw_probe_dials_the_requested_family_without_ipv4_fallback() {
     let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
