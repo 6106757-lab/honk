@@ -1123,27 +1123,37 @@ impl Config {
                 node.id != DIRECT_NODE_ID && node.id != BLOCK_NODE_ID && node.name == name
             })
         };
+        // A subscription's nodes join the configuration only when its provider
+        // expands, so a detour naming one cannot resolve while the operator
+        // sources parse. The dial resolves the name against the assembled
+        // outbounds at runtime, so with a subscription declared an unplaceable
+        // target is left to that pass instead of failing the whole source.
+        let deferred = !self.subscriptions.is_empty();
         for (index, node) in self.nodes.iter().enumerate() {
             let Some(target) = node.detour_name() else {
                 continue;
             };
-            let names_itself = target == node.name;
-            if names_itself
-                || !(matches!(target, Self::BUILTIN_DIRECT_NODE)
-                    || is_node(target)
-                    || self.groups.iter().any(|group| group.name == target))
-            {
+            if target == node.name {
                 return Err(config_validation_error(
                     source,
                     SettingPath::new("nodes").index(index + 1).field("detour"),
                     "invalid-node-detour-target",
-                    if names_itself {
-                        "node detour must not name the node itself"
-                    } else {
-                        "node detour must name a node, a group or direct"
-                    },
+                    "node detour must not name the node itself",
                 ));
             }
+            if deferred
+                || matches!(target, Self::BUILTIN_DIRECT_NODE)
+                || is_node(target)
+                || self.groups.iter().any(|group| group.name == target)
+            {
+                continue;
+            }
+            return Err(config_validation_error(
+                source,
+                SettingPath::new("nodes").index(index + 1).field("detour"),
+                "invalid-node-detour-target",
+                "node detour must name a node, a group or direct",
+            ));
         }
         let mut path = Vec::new();
         let mut settled = HashSet::new();
@@ -1185,27 +1195,34 @@ impl Config {
                 node.id != DIRECT_NODE_ID && node.id != BLOCK_NODE_ID && node.name == name
             })
         };
+        // As with a node's detour, a subscription can name the target only once
+        // its provider expands; the dial resolves it at runtime.
+        let deferred = !self.subscriptions.is_empty();
         for (index, group) in self.groups.iter().enumerate() {
             let Some(target) = group.detour.as_deref() else {
                 continue;
             };
-            let names_itself = target == group.name;
-            if names_itself
-                || !(matches!(target, Self::BUILTIN_DIRECT_NODE)
-                    || is_node(target)
-                    || self.groups.iter().any(|other| other.name == target))
-            {
+            if target == group.name {
                 return Err(config_validation_error(
                     source,
                     SettingPath::new("groups").index(index + 1).field("detour"),
                     "invalid-group-detour-target",
-                    if names_itself {
-                        "group detour must not name the group itself"
-                    } else {
-                        "group detour must name a node, a group or direct"
-                    },
+                    "group detour must not name the group itself",
                 ));
             }
+            if deferred
+                || matches!(target, Self::BUILTIN_DIRECT_NODE)
+                || is_node(target)
+                || self.groups.iter().any(|other| other.name == target)
+            {
+                continue;
+            }
+            return Err(config_validation_error(
+                source,
+                SettingPath::new("groups").index(index + 1).field("detour"),
+                "invalid-group-detour-target",
+                "group detour must name a node, a group or direct",
+            ));
         }
         let mut path = Vec::new();
         let mut settled = HashSet::new();
