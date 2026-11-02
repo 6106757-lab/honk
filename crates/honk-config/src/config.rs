@@ -1247,6 +1247,20 @@ impl Config {
         self.validate_reserved_names_detailed(&source)?;
         self.validate_references_detailed(&source)
     }
+
+    /// Validate one entry lifted out of its source.
+    ///
+    /// A fragment parsed on its own carries a single node or subscription and no
+    /// groups or routing, so every reference it makes to another node, group or
+    /// routing target is unresolvable here by construction. Those references are
+    /// checked once the entry joins the source and the assembled snapshot is
+    /// validated, so only the checks that stand on one entry run at this stage.
+    pub fn validate_fragment(&self) -> Result<(), DetailedConfigError> {
+        let source = DiagnosticSources::new(None).root();
+        self.validate_globals_detailed(&source)?;
+        crate::node::validate_node_collection(&self.nodes)?;
+        self.validate_reserved_names_detailed(&source)
+    }
     /// Validate a fully assembled runtime snapshot.
     ///
     /// This retains the operator validator's global, DNS, routing, and
