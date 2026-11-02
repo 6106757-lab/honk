@@ -231,32 +231,6 @@ fn keep_tunnel(is_alive: bool, owners: usize) -> bool {
     is_alive && owners > 1
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A tunnel nobody holds is the leak: it has a live carrier, so the old
-    /// `retain(is_alive)` would have kept it forever. A flow's owner clone is
-    /// what separates it from a tunnel that is merely cached.
-    #[test]
-    fn only_a_held_and_live_tunnel_survives_pruning() {
-        assert!(keep_tunnel(true, 2), "a flow is holding this tunnel");
-        assert!(
-            !keep_tunnel(true, 1),
-            "an idle tunnel with a live carrier is exactly what leaked"
-        );
-        assert!(!keep_tunnel(false, 2), "a dead carrier is never reusable");
-        assert!(!keep_tunnel(false, 1));
-    }
-
-    #[tokio::test]
-    async fn pruning_an_empty_runtime_is_a_no_op() {
-        let runtime = MasqueRuntime::new();
-        runtime.prune_idle().await;
-        assert_eq!(runtime.tunnel_count(), Some(0));
-    }
-}
-
 /// Resolve the node's MASQUE runtime, so both dial paths share one message
 /// when a node is dispatched without its generation.
 fn masque_runtime(runtime: &NodeRuntime) -> anyhow::Result<&MasqueRuntime> {
@@ -428,3 +402,29 @@ impl WarmableOutbound for MasqueHandler {
 }
 
 impl ProbeableOutbound for MasqueHandler {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tunnel nobody holds is the leak: it has a live carrier, so the old
+    /// `retain(is_alive)` would have kept it forever. A flow's owner clone is
+    /// what separates it from a tunnel that is merely cached.
+    #[test]
+    fn only_a_held_and_live_tunnel_survives_pruning() {
+        assert!(keep_tunnel(true, 2), "a flow is holding this tunnel");
+        assert!(
+            !keep_tunnel(true, 1),
+            "an idle tunnel with a live carrier is exactly what leaked"
+        );
+        assert!(!keep_tunnel(false, 2), "a dead carrier is never reusable");
+        assert!(!keep_tunnel(false, 1));
+    }
+
+    #[tokio::test]
+    async fn pruning_an_empty_runtime_is_a_no_op() {
+        let runtime = MasqueRuntime::new();
+        runtime.prune_idle().await;
+        assert_eq!(runtime.tunnel_count(), Some(0));
+    }
+}
