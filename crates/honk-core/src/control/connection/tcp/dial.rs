@@ -703,6 +703,15 @@ impl ControlPlaneHandle {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
         });
+        // A node that names a detour must not ride a pooled socket. Every
+        // socket in the pool was opened over some other path — usually
+        // direct, always whatever the node rode when it was opened — and a
+        // detour replaces exactly that. Skipping the pools sends the dial
+        // through the generation, whose runtime carries the binding; the
+        // pooled path (`dial_with_tcp`) has no runtime to read one from and
+        // would refuse the dial with "detour ... is not bound".
+        let node_detour = generation.get(&node.id).and_then(|runtime| runtime.detour());
+        let pools_usable = !pool_disabled && node_detour.is_none();
 
         let addr = format!("{}:{}", node.host(), node.port);
         let protocol = node.protocol();
@@ -710,7 +719,7 @@ impl ControlPlaneHandle {
             .find(protocol)
             .ok_or_else(|| anyhow::anyhow!("No handler for protocol {:?}", protocol))?;
 
-        if !pool_disabled && (entry.descriptor.pool_ready_streams)(node) {
+        if pools_usable && (entry.descriptor.pool_ready_streams)(node) {
             let key =
                 ConnectionPool::ready_key(generation.generation(), node.id, target, target_domain);
             if let Some(stream) = pool.acquire_ready(&key).await {
@@ -735,7 +744,7 @@ impl ControlPlaneHandle {
         let dial = async {
             // A raw pooled TCP still needs its protocol handshake. Multiplexed
             // protocols opt out because their node runtime owns the transport.
-            if !pool_disabled
+            if pools_usable
                 && (entry.descriptor.pool_bare_tcp)(node)
                 && let Some(tcp) = pool.acquire_tcp(&addr).await
             {
