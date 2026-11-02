@@ -1575,6 +1575,7 @@ fn setting_from_decode_path(path: &serde_path_to_error::Path) -> (SettingPath, O
                         "groups",
                         "default",
                         "final_outbound",
+                        "detour",
                         "check_url",
                         "check_interval",
                         "tolerance",
