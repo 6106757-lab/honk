@@ -364,6 +364,9 @@ async fn urltest_node_in_generation_impl(
     }
     let timeout = urltest_timeout(timeout);
     let request = http_probe_request(url, "")?;
+    // A caller that names no front still means to measure the node as it
+    // dials, which is the detour the node itself names.
+    let detour = detour.or_else(|| generation.detour_for(node.id));
     let (runtime, guard) =
         try_probe_runtime(generation, node, crate::proxy::WarmRequirement::Session)?;
     let warm_feedback = if runtime.is_warm_or_stateless_for(crate::proxy::WarmRequirement::Session)
