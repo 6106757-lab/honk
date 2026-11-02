@@ -36,6 +36,11 @@ pub(crate) fn bind_node_detours(
     groups: &[Group],
     manager: &Arc<GroupManager>,
 ) {
+    tracing::info!(
+        nodes = nodes.len(),
+        groups = groups.len(),
+        "binding node detours"
+    );
     for node in nodes {
         let Some(name) = node.detour_name() else {
             registry.clear_detour(node.id);
@@ -57,9 +62,12 @@ pub(crate) fn bind_node_detours(
                     registry.clear_detour(node.id);
                     continue;
                 }
+                tracing::info!(node = %node.name, detour = %name, "detour bound to node");
                 DetourPath::new(Arc::clone(proxies), Arc::clone(registry), target.id)
             }
-            (None, Some(_)) => DetourPath::to_group(
+            (None, Some(_)) => {
+                tracing::info!(node = %node.name, detour = %name, "detour bound to group");
+                DetourPath::to_group(
                 Arc::clone(proxies),
                 Arc::clone(registry),
                 name,
@@ -77,6 +85,11 @@ pub(crate) fn bind_node_detours(
             }
         };
         if !registry.bind_detour(node.id, Arc::new(path)) {
+            tracing::warn!(
+                "node {}: detour {name:?} could not be bound to its runtime (id {})",
+                node.name,
+                node.id
+            );
             tracing::warn!(
                 "node {}: detour {name:?} could not be bound to its runtime",
                 node.name
