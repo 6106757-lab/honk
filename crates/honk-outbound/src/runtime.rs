@@ -837,6 +837,21 @@ impl OutboundRuntimeRegistry {
         true
     }
 
+    /// Reclaim MASQUE tunnels a reused runtime kept from a previous generation.
+    ///
+    /// A node whose config did not change keeps its runtime across a reload,
+    /// tunnel map included. Detour bindings are refreshed every generation, so
+    /// a tunnel opened over the old path may no longer have any flow dialling
+    /// it — and with no dial, `tunnel_for` never runs its `retain`, so the
+    /// kernel keeps that TUN device and its route until a restart.
+    pub async fn prune_masque_tunnels(&self) {
+        for runtime in self.nodes.values() {
+            if let ProtocolRuntime::Masque(masque) = &runtime.runtime {
+                masque.prune_idle().await;
+            }
+        }
+    }
+
     pub fn build(nodes: &[Node]) -> Result<Self, RuntimeRegistryError> {
         Self::build_reusing(
             nodes,

@@ -46,7 +46,7 @@ const EPHEMERAL_MASQUE_SPAN: usize = 0x7000;
 static NEXT_EPHEMERAL_MASQUE_SLOT: AtomicUsize = AtomicUsize::new(EPHEMERAL_MASQUE_BASE);
 
 use super::{
-    PacketOutbound, PacketTransport, ProbeableOutbound, ProxyStream, TcpOutbound,
+    PacketOutbound, PacketTransport, ProbeableOutbound, ProxyStream, RuntimeOwnedIo, TcpOutbound,
     UdpSocketTransport, WarmRequirement, WarmableOutbound,
 };
 use crate::runtime::{NodeRuntime, ProtocolRuntime};
@@ -202,6 +202,59 @@ impl MasqueRuntime {
     pub async fn close(&self) {
         self.tunnels.lock().await.clear();
     }
+
+    /// Reclaim tunnels that this generation no longer uses.
+    ///
+    /// A tunnel is generation-level state: its carrier was opened over the
+    /// detour that generation bound. A reload rebinds detours on *reused*
+    /// runtimes, and a node the new config stops dialling keeps its runtime —
+    /// so the map can still hold a live tunnel whose path no longer exists.
+    /// `tunnel_for` only runs `retain` when a flow asks for the path, which
+    /// for such a node never happens again; nothing then drops the tunnel and
+    /// its TUN device and default route stay in the kernel until a restart.
+    ///
+    /// Each dial clones the tunnel's Arc into the flow's I/O owner (see
+    /// `RuntimeOwnedIo` in the dial paths), so a live flow keeps the count
+    /// above one and is left alone.
+    pub async fn prune_idle(&self) {
+        let mut guard = self.tunnels.lock().await;
+        guard.retain(|_, entry| {
+            keep_tunnel(entry.tunnel.is_alive(), Arc::strong_count(&entry.tunnel))
+        });
+    }
+}
+
+/// Whether a cached tunnel is still worth keeping. Kept separate from the
+/// lock so the ownership rule can be checked without a real TUN device (which
+/// needs root and is therefore out of reach of unit tests).
+fn keep_tunnel(is_alive: bool, owners: usize) -> bool {
+    is_alive && owners > 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tunnel nobody holds is the leak: it has a live carrier, so the old
+    /// `retain(is_alive)` would have kept it forever. A flow's owner clone is
+    /// what separates it from a tunnel that is merely cached.
+    #[test]
+    fn only_a_held_and_live_tunnel_survives_pruning() {
+        assert!(keep_tunnel(true, 2), "a flow is holding this tunnel");
+        assert!(
+            !keep_tunnel(true, 1),
+            "an idle tunnel with a live carrier is exactly what leaked"
+        );
+        assert!(!keep_tunnel(false, 2), "a dead carrier is never reusable");
+        assert!(!keep_tunnel(false, 1));
+    }
+
+    #[tokio::test]
+    async fn pruning_an_empty_runtime_is_a_no_op() {
+        let runtime = MasqueRuntime::new();
+        runtime.prune_idle().await;
+        assert_eq!(runtime.tunnel_count(), Some(0));
+    }
 }
 
 /// Resolve the node's MASQUE runtime, so both dial paths share one message
@@ -261,8 +314,11 @@ impl TcpOutbound for MasqueHandler {
         crate::runtime::flow_observation::milestone(
             crate::runtime::flow_observation::Milestone::TransportReady,
         );
+        // The flow owns a reference to the tunnel: while its socket is bound
+        // to the TUN device, pruning must not pull the device out from under
+        // it. Once the flow ends, the map is the only owner again.
         Ok(ProxyStream {
-            stream: Box::new(stream),
+            stream: Box::new(RuntimeOwnedIo::new(stream, Arc::clone(&tunnel))),
             target_addr: target,
             target_domain: target_domain.map(str::to_string),
         })
@@ -306,8 +362,11 @@ impl TcpOutbound for MasqueHandler {
         crate::runtime::flow_observation::milestone(
             crate::runtime::flow_observation::Milestone::TransportReady,
         );
+        // The flow owns a reference to the tunnel: while its socket is bound
+        // to the TUN device, pruning must not pull the device out from under
+        // it. Once the flow ends, the map is the only owner again.
         Ok(ProxyStream {
-            stream: Box::new(stream),
+            stream: Box::new(RuntimeOwnedIo::new(stream, Arc::clone(&tunnel))),
             target_addr: target,
             target_domain: target_domain.map(str::to_string),
         })
