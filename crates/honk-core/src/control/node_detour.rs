@@ -85,15 +85,57 @@ pub(crate) fn bind_node_detours(
     }
 }
 
-/// The path a group asks its members to leave through, when it names one.
+/// The detour that applies to a group, following the nested groups it draws
+/// its members from.
+///
+/// `filter: group(X)` is a reference edge, not a copied node list: the group
+/// borrows X's current selection. It is meant to borrow the way that selection
+/// leaves the machine too, so a group naming no detour of its own inherits the
+/// first one found in a breadth-first walk of its upstream groups, in
+/// declaration order. An explicit `detour:`, including `direct`, wins and
+/// stops the walk. `visited` makes a
+/// cycle in the group graph harmless — the graph itself is only checked when
+/// the outbound registry is built, which is later than a flow's lookup.
+fn effective_group_detour<'a>(
+    config: &'a honk_config::Config,
+    group_name: &str,
+) -> Option<&'a str> {
+    let start = config
+        .groups
+        .iter()
+        .find(|group| group.name == group_name)?;
+    if let Some(detour) = start.detour.as_deref() {
+        return Some(detour);
+    }
+    let mut visited = vec![start.name.as_str()];
+    let mut pending: std::collections::VecDeque<_> =
+        start.groups.iter().map(String::as_str).collect();
+    while let Some(name) = pending.pop_front() {
+        if visited.contains(&name) {
+            continue;
+        }
+        visited.push(name);
+        let Some(group) = config.groups.iter().find(|group| group.name == name) else {
+            continue;
+        };
+        if let Some(detour) = group.detour.as_deref() {
+            return Some(detour);
+        }
+        pending.extend(group.groups.iter().map(String::as_str));
+    }
+    None
+}
+
+/// The path a group asks its members to leave through, when one applies.
 ///
 /// A group resolves to a node only once a flow arrives, so its detour cannot
-/// be bound to that node the way a node's own is: the same node is reachable
-/// directly, or through another group, and keeps its own path out in both
-/// cases. The name is therefore resolved here, per flow, and handed to the
-/// dial that needs it.
+/// be bound to that node the way a node's own is: which member carries the
+/// flow is decided per flow, and the name is resolved here and handed to the
+/// dial that needs it. A group that names no detour of its own inherits one
+/// from the nested groups it draws its members from — see the
+/// `effective_group_detour` helper below.
 ///
-/// `None` means the group names no detour — not that it names a broken one.
+/// `None` means no detour applies — not that a named one is broken.
 /// A name that resolves to nothing leaves the flow on the node's own path
 /// rather than failing it, because the configuration was rejected at load
 /// before it could reach this point.
@@ -105,12 +147,7 @@ pub(crate) fn group_detour(
     group_name: &str,
     rider: NodeProtocol,
 ) -> Option<Arc<DetourPath>> {
-    let name = config
-        .groups
-        .iter()
-        .find(|group| group.name == group_name)?
-        .detour
-        .as_deref()?;
+    let name = effective_group_detour(config, group_name)?;
     if matches!(name, honk_config::Config::BUILTIN_DIRECT_NODE) {
         let node = config.builtin_node(name)?;
         return Some(Arc::new(DetourPath::new(
@@ -682,8 +719,8 @@ mod tests {
         );
     }
 
-    /// The group the flow came through is the one consulted, so another group's
-    /// detour does not reach it.
+    /// A detour on a group with no reference edge to this one does not reach
+    /// it: inheritance follows `filter: group(X)` edges, not mere coexistence.
     #[test]
     fn an_unrelated_groups_detour_is_not_applied() {
         let mut config = group_named("wallet", None);
@@ -697,5 +734,94 @@ mod tests {
             detour_of_group(&config, "wallet").is_none(),
             "a group is carried by its own detour, not a neighbour's"
         );
+    }
+
+    /// `filter: group(X)` is a reference edge: the group borrows X's current
+    /// selection, so it also borrows how that selection leaves the machine.
+    #[test]
+    fn a_group_inherits_the_detour_of_the_group_it_references() {
+        let mut config = group_named("wallet", None);
+        config.groups[0].groups = vec!["upstream".into()];
+        config.groups.push(honk_config::group::Group {
+            name: "upstream".into(),
+            policy: honk_config::group::GroupPolicy::Selector,
+            detour: Some("front".into()),
+            ..Default::default()
+        });
+        let front_id = config.nodes[0].id;
+        let path = detour_of_group(&config, "wallet").expect("an inherited detour must resolve");
+        assert!(
+            format!("{path:?}").contains(&front_id.to_string()),
+            "the inherited path must name the upstream detour node: {path:?}"
+        );
+    }
+
+    /// Inheritance follows the whole chain, not just one hop.
+    #[test]
+    fn inheritance_follows_a_chain_of_nested_groups() {
+        let mut config = group_named("wallet", None);
+        config.groups[0].groups = vec!["mid".into()];
+        config.groups.push(honk_config::group::Group {
+            name: "mid".into(),
+            groups: vec!["upstream".into()],
+            policy: honk_config::group::GroupPolicy::Selector,
+            ..Default::default()
+        });
+        config.groups.push(honk_config::group::Group {
+            name: "upstream".into(),
+            policy: honk_config::group::GroupPolicy::Selector,
+            detour: Some("front".into()),
+            ..Default::default()
+        });
+        let front_id = config.nodes[0].id;
+        let path = detour_of_group(&config, "wallet").expect("a chained detour must resolve");
+        assert!(
+            format!("{path:?}").contains(&front_id.to_string()),
+            "the chain must reach the upstream detour node: {path:?}"
+        );
+    }
+
+    /// An explicit `detour:` on the group wins over one it would otherwise
+    /// inherit from a nested group.
+    #[test]
+    fn an_explicit_detour_overrides_an_inherited_one() {
+        let mut config = group_named("wallet", Some("front"));
+        let inherited_id = config.nodes[0].id;
+        config
+            .nodes
+            .push(socks5_node("own-front", "127.0.0.1:2".parse().unwrap()));
+        let own_id = config.nodes[1].id;
+        config.groups[0].detour = Some("own-front".into());
+        config.groups[0].groups = vec!["upstream".into()];
+        config.groups.push(honk_config::group::Group {
+            name: "upstream".into(),
+            policy: honk_config::group::GroupPolicy::Selector,
+            detour: Some("front".into()),
+            ..Default::default()
+        });
+        let path = detour_of_group(&config, "wallet").expect("the group's own detour must resolve");
+        let rendered = format!("{path:?}");
+        assert!(
+            rendered.contains(&own_id.to_string()),
+            "the group's own detour must win: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&inherited_id.to_string()),
+            "the upstream detour must not be inherited: {rendered}"
+        );
+    }
+
+    /// A cycle in the nested-group graph must not hang the lookup.
+    #[test]
+    fn inheritance_walks_a_cycle_only_once() {
+        let mut config = group_named("wallet", None);
+        config.groups[0].groups = vec!["b".into()];
+        config.groups.push(honk_config::group::Group {
+            name: "b".into(),
+            groups: vec!["wallet".into()],
+            policy: honk_config::group::GroupPolicy::Selector,
+            ..Default::default()
+        });
+        assert!(detour_of_group(&config, "wallet").is_none());
     }
 }

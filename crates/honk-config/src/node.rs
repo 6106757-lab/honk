@@ -429,8 +429,10 @@ pub struct Group {
     /// Unlike a node's own detour, a group's cannot be bound to anything ahead
     /// of time: which member carries a flow is decided when the flow arrives.
     /// The name is therefore resolved on each dial and applied to whichever
-    /// member the group then picks, so a member reached directly through
-    /// another group keeps its own path out.
+    /// member the group then picks. A group naming none inherits the detour of
+    /// the first nested group in `groups` that has one, because
+    /// `filter: group(X)` borrows X's selection rather than copying a node
+    /// list. An explicit name, including `direct`, stops that walk.
     ///
     /// Groups that name no detour serialize exactly as they always have:
     /// a `"detour": null` on every group would be noise in every written
