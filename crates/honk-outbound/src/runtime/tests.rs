@@ -341,6 +341,33 @@ async fn dns_fork_owns_sessions_but_preserves_dial_limits() {
 }
 
 #[test]
+fn dns_fork_carries_the_detour_bindings() {
+    use crate::proxy::detour::DetourPath;
+    use crate::proxy::ProxyRegistry;
+
+    let front = canonical_node("fork-front");
+    let mut back = canonical_node("fork-back");
+    back.detour = Some("fork-front".into());
+    let generation = Arc::new(
+        OutboundRuntimeRegistry::build(&[front.clone(), back.clone()]).unwrap(),
+    );
+    let path = DetourPath::new(
+        Arc::new(ProxyRegistry::new()),
+        Arc::clone(&generation),
+        front.id,
+    );
+    assert!(generation.bind_detour(back.id, Arc::new(path)));
+    assert!(generation.get(&back.id).unwrap().detour().is_some());
+
+    // The fork rebuilds every runtime fresh; without the carry-over the
+    // forked runtime holds no detour and every DNS dial for `back` would
+    // be refused with "detour ... is not bound in this generation".
+    let dns = generation.fork_for_dns().unwrap();
+    assert!(dns.get(&back.id).unwrap().detour().is_some());
+    assert!(dns.get(&front.id).unwrap().detour().is_none());
+}
+
+#[test]
 fn udp_capability_matrix() {
     let anytls = node("x", NodeProtocol::AnyTLS);
     assert!((crate::descriptor::descriptor(anytls.protocol()).supports_udp)(&anytls));

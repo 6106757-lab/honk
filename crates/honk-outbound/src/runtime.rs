@@ -922,6 +922,14 @@ impl OutboundRuntimeRegistry {
     /// configuration. The fork owns fresh protocol sessions and terminal
     /// lifecycle state, while sharing this generation's dial admission and
     /// startup dial/VLESS-carrier ceilings.
+    ///
+    /// The detour bindings are carried over: the fork rebuilds every runtime
+    /// fresh, and a fresh runtime holds no detour, so a node whose config
+    /// names one would refuse every DNS dial with "detour ... is not bound
+    /// in this generation" even though this generation bound it — and the
+    /// fork is rebuilt on every boot, so a restart would not help either.
+    /// The carried path stays pinned to *this* generation, the one that
+    /// resolved the name and owns the target's live runtime.
     pub fn fork_for_dns(&self) -> Result<Self, RuntimeRegistryError> {
         let nodes: Vec<Node> = self
             .nodes
@@ -939,6 +947,13 @@ impl OutboundRuntimeRegistry {
             None,
         )?;
         fork.dial_semaphore = Arc::clone(&self.dial_semaphore);
+        for (id, runtime) in &self.nodes {
+            if let Some(detour) = runtime.detour()
+                && let Some(fork_runtime) = fork.nodes.get(id)
+            {
+                fork_runtime.bind_detour(detour);
+            }
+        }
         Ok(fork)
     }
 
