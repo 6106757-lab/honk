@@ -26,7 +26,12 @@ use honk_ebpf_common::{
 const UDP_CONN_STATE_UPDATE_INTERVAL_NS: u64 = 1_000_000_000;
 
 /// Atomically reserve a fresh UDP tuple for this producer, never replacing a hit.
-#[inline(always)]
+///
+/// `#[inline(never)]`: the 80B `FlowMapValue` staging temp otherwise inflates
+/// every caller's frame — `do_tproxy_lan_ingress` sits at the verifier's
+/// 512B combined-stack limit on pre-6.12 kernels, and so does the
+/// `__mark_udp_seen` chain under it.
+#[inline(never)]
 pub fn claim_udp_preparing(key: &TuplesKey, mac: &[u8; 6]) -> Option<u64> {
     if tuple_retiring(key) {
         return None;
