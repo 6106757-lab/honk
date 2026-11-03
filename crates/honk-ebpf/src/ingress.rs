@@ -426,6 +426,50 @@ fn pass_through_classified(ctx: &TcContext) -> Verdict {
     Err(TC_ACT_OK)
 }
 
+/// Socket probe for local-reply attribution. `#[inline(never)]`: keeps the
+/// 36B `bpf_sock_tuple` and the inlined FIB lookup's ~48B `bpf_fib_lookup`
+/// scratch off the LAN classifier's near-limit combined stack (they are
+/// simultaneously live on the wildcard path).
+#[inline(never)]
+fn probe_local_udp_socket(ctx: &TcContext, pkt: &ParsedPacket) -> bool {
+    let mut tuple: bpf_sock_tuple = unsafe { mem::zeroed() };
+    let tuple_size = if pkt.ethh.ether_type == ETH_P_IP.to_be() {
+        unsafe {
+            tuple.__bindgen_anon_1.ipv4.daddr = pkt.tuples.five.dst_ip.u6_addr32[3];
+            tuple.__bindgen_anon_1.ipv4.saddr = pkt.tuples.five.src_ip.u6_addr32[3];
+            tuple.__bindgen_anon_1.ipv4.dport = pkt.tuples.five.dst_port.to_be();
+            tuple.__bindgen_anon_1.ipv4.sport = pkt.tuples.five.src_port.to_be();
+        }
+        mem::size_of::<bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1>() as u32
+    } else {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                pkt.tuples.five.dst_ip.u6_addr32.as_ptr(),
+                tuple.__bindgen_anon_1.ipv6.daddr.as_mut_ptr(),
+                4,
+            );
+            core::ptr::copy_nonoverlapping(
+                pkt.tuples.five.src_ip.u6_addr32.as_ptr(),
+                tuple.__bindgen_anon_1.ipv6.saddr.as_mut_ptr(),
+                4,
+            );
+            tuple.__bindgen_anon_1.ipv6.dport = pkt.tuples.five.dst_port.to_be();
+            tuple.__bindgen_anon_1.ipv6.sport = pkt.tuples.five.src_port.to_be();
+        }
+        mem::size_of::<bpf_sock_tuple__bindgen_ty_1__bindgen_ty_2>() as u32
+    };
+
+    let param = PARAM.load();
+    if let Some(probe) =
+        sk::probe_udp_socket(ctx, &mut tuple, tuple_size, param.dae_netns_id as u64)
+        && !probe.is_dae_socket
+        && (!probe.is_wildcard || wildcard_socket_destination_is_local(ctx, pkt))
+    {
+        return true;
+    }
+    false
+}
+
 /// Confirm that a wildcard socket match names a host-local route. Socket
 /// lookup also matches forwarded destinations; only `NOT_FWDED` is eligible
 /// after the earlier broadcast/multicast rejection. Every forwarded or
@@ -650,39 +694,7 @@ fn do_tproxy_lan_ingress(ctx: &TcContext, link_h_len: u32) -> Verdict {
         if crate::contrack::udp::local_udp_reply_seen(&pkt.tuples.five) {
             return pass_through_classified(ctx);
         }
-        let mut tuple: bpf_sock_tuple = unsafe { mem::zeroed() };
-        let tuple_size = if pkt.ethh.ether_type == ETH_P_IP.to_be() {
-            unsafe {
-                tuple.__bindgen_anon_1.ipv4.daddr = pkt.tuples.five.dst_ip.u6_addr32[3];
-                tuple.__bindgen_anon_1.ipv4.saddr = pkt.tuples.five.src_ip.u6_addr32[3];
-                tuple.__bindgen_anon_1.ipv4.dport = pkt.tuples.five.dst_port.to_be();
-                tuple.__bindgen_anon_1.ipv4.sport = pkt.tuples.five.src_port.to_be();
-            }
-            mem::size_of::<bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1>() as u32
-        } else {
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    pkt.tuples.five.dst_ip.u6_addr32.as_ptr(),
-                    tuple.__bindgen_anon_1.ipv6.daddr.as_mut_ptr(),
-                    4,
-                );
-                core::ptr::copy_nonoverlapping(
-                    pkt.tuples.five.src_ip.u6_addr32.as_ptr(),
-                    tuple.__bindgen_anon_1.ipv6.saddr.as_mut_ptr(),
-                    4,
-                );
-                tuple.__bindgen_anon_1.ipv6.dport = pkt.tuples.five.dst_port.to_be();
-                tuple.__bindgen_anon_1.ipv6.sport = pkt.tuples.five.src_port.to_be();
-            }
-            mem::size_of::<bpf_sock_tuple__bindgen_ty_1__bindgen_ty_2>() as u32
-        };
-
-        let param = PARAM.load();
-        if let Some(probe) =
-            sk::probe_udp_socket(ctx, &mut tuple, tuple_size, param.dae_netns_id as u64)
-            && !probe.is_dae_socket
-            && (!probe.is_wildcard || wildcard_socket_destination_is_local(ctx, pkt))
-        {
+        if probe_local_udp_socket(ctx, pkt) {
             // No routing witness is consumed after this local-service exit.
             // Its tuple keeps nested expiry hints off the bounded TC stack.
             crate::contrack::udp::observe_local_udp_reply(

@@ -32,35 +32,38 @@ pub fn claim_udp_preparing(key: &TuplesKey, mac: &[u8; 6]) -> Option<u64> {
         return None;
     }
     let incarnation = allocate_flow_incarnation()?;
-    // Field-by-field initialization instead of a bulk `mem::zeroed()`: a
-    // contiguous constant-zero store run is merged by LLVM into a call to the
-    // embedded memset subprogram, whose frame adds 32 bytes to every verifier
-    // call chain through here (see event.rs for the full rationale). Zero
-    // stores are interleaved with the runtime stores so no two of them cover
-    // adjacent addresses back to back; `dir|state|flags|token` (bytes 0..8)
-    // and `pid|trace_id` (48..56), `tcp_syn_isn|reserved` (64..72) collapse
-    // into single wider stores.
-    let mut state = core::mem::MaybeUninit::<ConnState>::uninit();
-    let p = state.as_mut_ptr();
+    // Field-by-field initialization directly into a `FlowMapValue` (instead of
+    // a bulk `mem::zeroed()`): a contiguous constant-zero store run is merged
+    // by LLVM into a call to the embedded memset subprogram, whose frame adds
+    // 32 bytes to every verifier call chain through here (see event.rs for
+    // the full rationale). Zero stores are interleaved with the runtime stores
+    // so no two of them cover adjacent addresses back to back; `dir|state|
+    // flags|token` (bytes 0..8) and `pid|trace_id` (48..56), `tcp_syn_isn|
+    // reserved` (64..72) collapse into single wider stores. Building the
+    // `FlowMapValue` in place also removes the 72B intermediate `ConnState`
+    // stack local and the `FlowMapValue::new` zero+copy (a further memset(80)
+    // source).
+    let mut entry = core::mem::MaybeUninit::<FlowMapValue<ConnState>>::uninit();
+    let p = entry.as_mut_ptr();
+    let vp = unsafe { core::ptr::addr_of_mut!((*p).value) };
     let now_ns = unsafe { bpf_ktime_get_ns() };
     unsafe {
-        (
-            p.cast::<u64>()).write_unaligned((UdpDecisionState::Preparing as u64) << 8, // Z dir=0,state=Preparing,flags=0,token=0
+        (p.cast::<u64>()).write_unaligned(0); // Z lock+padding (0..8)
+        (vp.cast::<u64>()).write_unaligned((UdpDecisionState::Preparing as u64) << 8, // Z dir=0,state=Preparing,flags=0,token=0
         );
-        (&raw mut (*p).last_seen_ns).write_unaligned(now_ns); // R
-        (&raw mut (*p).meta).write_unaligned(RoutingMeta { raw: 0 }); // Z @16
-        core::ptr::addr_of_mut!((*p).mac).write(*mac); // R
-        (&raw mut (*p).padding).write_unaligned([0; 2]); // Z @30
-        ((&raw mut (*p).pname).cast::<u64>().add(1)).write_unaligned(0); // Z @40
-        (&raw mut (*p).incarnation).write_unaligned(incarnation); // R
-        ((&raw mut (*p).pname).cast::<u64>()).write_unaligned(0); // Z @32
-        ((&raw mut (*p).pid).cast::<u64>()).write_unaligned(0); // Z @48 pid+trace_id
-        ((&raw mut (*p).tcp_syn_isn).cast::<u64>()).write_unaligned(0); // Z @64 isn+reserved
+        (&raw mut (*vp).last_seen_ns).write_unaligned(now_ns); // R
+        (&raw mut (*vp).meta).write_unaligned(RoutingMeta { raw: 0 }); // Z @16
+        core::ptr::addr_of_mut!((*vp).mac).write(*mac); // R
+        (&raw mut (*vp).padding).write_unaligned([0; 2]); // Z @30
+        ((&raw mut (*vp).pname).cast::<u64>().add(1)).write_unaligned(0); // Z @40
+        (&raw mut (*vp).incarnation).write_unaligned(incarnation); // R
+        ((&raw mut (*vp).pname).cast::<u64>()).write_unaligned(0); // Z @32
+        ((&raw mut (*vp).pid).cast::<u64>()).write_unaligned(0); // Z @48 pid+trace_id
+        ((&raw mut (*vp).tcp_syn_isn).cast::<u64>()).write_unaligned(0); // Z @64 isn+reserved
     }
-    let state = unsafe { state.assume_init() };
 
     if CONN_STATE_MAP
-        .insert(key, FlowMapValue::new(state), BPF_NOEXIST as u64)
+        .insert(key, unsafe { entry.assume_init_ref() }, BPF_NOEXIST as u64)
         .is_ok()
     {
         occupancy_add(OCCUPANCY_INSERTS);
