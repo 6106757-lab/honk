@@ -22,6 +22,7 @@ use honk_ebpf_common::{
         TcpState, tcp_conn_state_expired,
     },
     redirect_need::TuplesKey,
+    RoutingMeta,
 };
 use network_types::tcp::TcpHdr;
 
@@ -338,20 +339,53 @@ fn publish_fresh_tcp(
         return core::ptr::null_mut();
     }
     let new_state = unsafe { &mut *output };
-    *new_state = unsafe { core::mem::zeroed() };
-    new_state.incarnation = incarnation;
-    new_state.tcp_syn_isn = args.tcp_syn_isn;
-    new_state.state = TcpState::TcpStateActive as u8;
-    new_state.last_seen_ns = now;
-    new_state.pid = args.pid;
-    new_state.trace_id = if args.has_routing() {
-        args.trace_id
-    } else if ptr_opt.is_some() {
-        u32::MAX
-    } else {
-        0
-    };
-    if args.has_routing() {
+    // Field-by-field initialization of the invocation scratch instead of a
+    // bulk `mem::zeroed()`: a contiguous constant-zero store run is merged by
+    // LLVM into a call to the embedded memset subprogram, whose frame adds 32
+    // bytes to every verifier call chain through here — on pre-6.12 kernels
+    // the WAN classifier sits exactly at the 512B combined-stack limit. Every
+    // byte is written exactly once, and the zero stores are interleaved with
+    // runtime stores so no two of them cover adjacent addresses back to back
+    // (see event.rs for the same pattern).
+    let has_routing = args.has_routing();
+    let has_mac = has_routing && args.has_mac();
+    let has_pname = has_routing && args.has_pname();
+    unsafe {
+        if !has_routing {
+            core::ptr::write_volatile(&raw mut (*output).meta, RoutingMeta { raw: 0 }); // Z @16
+        }
+        core::ptr::write_volatile(&raw mut (*output).last_seen_ns, now); // R
+        if !has_mac {
+            // mac[6] + padding[2] are adjacent: one zero store covers both.
+            core::ptr::write_volatile((&raw mut (*output).mac).cast::<u64>(), 0); // Z @24
+        }
+        core::ptr::write_volatile(&raw mut (*output).incarnation, incarnation); // R
+        if !has_pname {
+            core::ptr::write_volatile((&raw mut (*output).pname).cast::<u64>(), 0); // Z @32
+        }
+        core::ptr::write_volatile(&raw mut (*output).tcp_syn_isn, args.tcp_syn_isn); // R
+        if !has_pname {
+            core::ptr::write_volatile((&raw mut (*output).pname).cast::<u64>().add(1), 0); // Z @40
+        }
+        core::ptr::write_volatile(&raw mut (*output).pid, args.pid); // R
+        if has_mac {
+            core::ptr::write_volatile(&raw mut (*output).padding, [0; 2]); // Z @30
+        }
+        // dir(0) + state(TcpStateActive = 0) + flags(0) + token(0): bytes 0..8.
+        core::ptr::write_volatile(output.cast::<u64>(), 0); // Z @0
+        core::ptr::write_volatile(
+            &raw mut (*output).trace_id,
+            if has_routing {
+                args.trace_id
+            } else if ptr_opt.is_some() {
+                u32::MAX
+            } else {
+                0
+            },
+        ); // R
+        core::ptr::write_volatile(&raw mut (*output).reserved, 0); // Z @68
+    }
+    if has_routing {
         update_tcp_locked(new_state, args, now, false);
     }
     if let Some(ptr) = ptr_opt {

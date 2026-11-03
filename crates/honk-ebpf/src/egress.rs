@@ -216,11 +216,7 @@ pub fn do_tproxy_lan_egress(ctx: &TcContext, link_h_len: u32) -> Verdict {
 
 /// WAN egress TCP handler: route new connections and cache the decision;
 /// for established flows, reuse the cached routing.
-///
-/// `#[inline(never)]`: the TCP and UDP handlers take mutually exclusive
-/// branches; separate subprograms keep the WAN classifier's combined
-/// call-chain stack under the 512B limit on pre-6.12 kernels.
-#[inline(never)]
+#[inline(always)]
 fn do_tproxy_wan_egress_tcp(
     ctx: &TcContext,
     link_h_len: u32,
@@ -589,11 +585,7 @@ fn fast_path_decision(
 }
 
 /// WAN egress UDP handler.
-///
-/// `#[inline(never)]`: see the TCP handler note — mutually exclusive
-/// subprograms keep the WAN classifier's combined stack under 512B on
-/// pre-6.12 kernels.
-#[inline(never)]
+#[inline(always)]
 fn do_tproxy_wan_egress_udp(
     ctx: &TcContext,
     link_h_len: u32,

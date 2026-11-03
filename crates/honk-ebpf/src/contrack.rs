@@ -75,24 +75,60 @@ impl ConntrackArgs {
         mac: Option<&[u8; 6]>,
         pname: Option<&[u8; TASK_COMM_LEN]>,
     ) {
-        *self = unsafe { mem::zeroed() };
-        self.dscp = dscp;
-        self.pid = pid;
-
-        if let Some((outbound, mark, must)) = routing {
-            self.flags |= CT_ARGS_HAS_ROUTING;
-            self.outbound = *outbound;
-            self.mark = *mark;
-            self.must = *must;
+        // Field-by-field initialization of the per-CPU scratch instead of a
+        // bulk `mem::zeroed()`: a contiguous constant-zero store run is merged
+        // by LLVM into a call to the embedded memset subprogram, whose frame
+        // adds 32 bytes to every verifier call chain through the TC
+        // classifiers (see event.rs for the full rationale). Zero stores are
+        // interleaved with the runtime stores so no two of them cover adjacent
+        // addresses back to back; `tcp_syn_isn|tcp_padding` (48..56) collapses
+        // into one wider store.
+        let has_routing = routing.is_some();
+        let has_mac = mac.is_some();
+        let has_pname = pname.is_some();
+        unsafe {
+            core::ptr::write_volatile(&raw mut (*self).incarnation, 0); // Z @40
+            core::ptr::write_volatile(&raw mut (*self).dscp, dscp); // R
+            if !has_mac {
+                // mac[6] + padding[2] are adjacent: one zero store covers both.
+                core::ptr::write_volatile((&raw mut (*self).mac).cast::<u64>(), 0); // Z @12
+            }
+            core::ptr::write_volatile(&raw mut (*self).pid, pid); // R
+            if !has_pname {
+                core::ptr::write_volatile((&raw mut (*self).pname).cast::<u64>().add(1), 0); // Z @28
+            }
+            match routing {
+                Some((outbound, mark, must)) => {
+                    core::ptr::write_volatile(&raw mut (*self).mark, *mark); // R
+                    core::ptr::write_volatile(&raw mut (*self).outbound, *outbound); // R
+                    core::ptr::write_volatile(&raw mut (*self).must, *must); // R
+                }
+                None => {
+                    core::ptr::write_volatile(&raw mut (*self).mark, 0); // Z @4
+                    core::ptr::write_volatile(&raw mut (*self).outbound, 0); // Z @1
+                    core::ptr::write_volatile(&raw mut (*self).must, 0); // Z @2
+                }
+            }
+            if !has_pname {
+                core::ptr::write_volatile((&raw mut (*self).pname).cast::<u64>(), 0); // Z @20
+            }
+            core::ptr::write_volatile(&raw mut (*self).trace_id, 0); // Z @36
+            core::ptr::write_volatile(
+                (&raw mut (*self).tcp_syn_isn).cast::<u64>(),
+                0, // Z @48 isn+tcp_padding
+            );
+            // flags is fully defined here: the three presence bits only.
+            core::ptr::write_volatile(
+                &raw mut (*self).flags,
+                (has_routing as u8) * CT_ARGS_HAS_ROUTING
+                    | (has_mac as u8) * CT_ARGS_HAS_MAC
+                    | (has_pname as u8) * CT_ARGS_HAS_PNAME,
+            ); // R/Z @0
         }
-
         if let Some(mac_addr) = mac {
-            self.flags |= CT_ARGS_HAS_MAC;
             self.mac.copy_from_slice(mac_addr);
         }
-
         if let Some(pname_bytes) = pname {
-            self.flags |= CT_ARGS_HAS_PNAME;
             self.pname.copy_from_slice(pname_bytes);
         }
     }

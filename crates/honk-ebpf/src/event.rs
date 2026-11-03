@@ -4,34 +4,21 @@ use crate::maps::{EVENT_RINGBUF, FLOW_EXPIRY_HINT, FlowExpiryHint};
 use aya_ebpf_bindings::helpers::bpf_ktime_get_ns;
 use honk_ebpf_common::event::DaeEvent;
 
-/// Zero a ringbuf event slot with volatile word stores.
+/// Initialize a ringbuf event slot field-by-field with volatile stores.
 ///
-/// `write_bytes` lowers to a call to the embedded `memset` subprogram, whose
+/// A bulk `write_bytes(0)` (or any contiguous run of constant-zero stores)
+/// is merged by LLVM into a call to the embedded `memset` subprogram, whose
 /// frame adds 32 bytes to every verifier call chain that ends in an event —
 /// on pre-6.12 kernels the TC classifiers sit exactly at that 512B combined
-/// stack limit. Volatile stores cannot be merged back into a `memset` call,
-/// and the event is written in ringbuf memory, so per-packet cost is
-/// unchanged (same stores the helper would perform).
-#[inline(always)]
-fn zero_event_volatile(ptr: *mut DaeEvent) {
-    let words = core::mem::size_of::<DaeEvent>() / 8;
-    let tail = core::mem::size_of::<DaeEvent>() % 8;
-    let wp = ptr.cast::<u64>();
-    let mut i = 0;
-    while i < words {
-        unsafe { core::ptr::write_volatile(wp.add(i), 0) };
-        i += 1;
-    }
-    if tail != 0 {
-        let bp = ptr.cast::<u8>();
-        let mut j = words * 8;
-        while j < core::mem::size_of::<DaeEvent>() {
-            unsafe { core::ptr::write_volatile(bp.add(j), 0) };
-            j += 1;
-        }
-    }
-}
-
+/// stack limit. This helper writes every byte exactly once: fields the caller
+/// supplies get their runtime value, the rest get zero, and the constant-zero
+/// stores are ordered so that no two of them cover adjacent addresses back to
+/// back. Without a contiguous zero-run LLVM cannot form a `memset` call, and
+/// the payload is written in ringbuf memory, so per-event cost is unchanged.
+///
+/// DaeEvent layout (80 bytes): timestamp@0, type_@8, pid@12, pname@16,
+/// outbound@32, l4proto@33, pad@34, sip@36, dip@52, sport@68, dport@70,
+/// incarnation@72.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn send_dae_event(
@@ -48,29 +35,41 @@ pub fn send_dae_event(
     let Some(mut reservation) = EVENT_RINGBUF.reserve(0) else {
         return -1;
     };
-    let e: &mut DaeEvent = unsafe {
-        zero_event_volatile(reservation.as_mut_ptr());
-        reservation.assume_init_mut()
-    };
-
-    e.timestamp = unsafe { bpf_ktime_get_ns() };
-    e.type_ = type_;
-    e.pid = pid;
-    e.outbound = outbound;
-    e.l4proto = l4proto;
-    e.sport = sport;
-    e.dport = dport;
-
-    if let Some(p) = pname {
-        e.pname.copy_from_slice(p);
+    let p: *mut DaeEvent = reservation.as_mut_ptr();
+    unsafe {
+        // Zero-only stores are interleaved with runtime stores (marked R) so
+        // no two zero stores cover adjacent addresses consecutively.
+        core::ptr::write_volatile(&raw mut (*p).timestamp, bpf_ktime_get_ns()); // R
+        core::ptr::write_volatile(&raw mut (*p).incarnation, 0); // Z @72
+        core::ptr::write_volatile(&raw mut (*p).type_, type_); // R
+        core::ptr::write_volatile(&raw mut (*p).pad, [0; 2]); // Z @34
+        core::ptr::write_volatile(&raw mut (*p).pid, pid); // R
+        match pname {
+            Some(src) => core::ptr::copy_nonoverlapping(src.as_ptr(), (*p).pname.as_mut_ptr(), 16), // R
+            None => core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>().add(1), 0), // Z @24
+        }
+        core::ptr::write_volatile(&raw mut (*p).sport, sport); // R
+        match sip {
+            Some(src) => core::ptr::copy_nonoverlapping(src.as_ptr(), (*p).sip.as_mut_ptr(), 4), // R
+            None => core::ptr::write_volatile((&raw mut (*p).sip).cast::<u64>().add(1), 0), // Z @44
+        }
+        if pname.is_none() {
+            core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>(), 0); // Z @16
+        }
+        core::ptr::write_volatile(&raw mut (*p).dport, dport); // R
+        match dip {
+            Some(src) => core::ptr::copy_nonoverlapping(src.as_ptr(), (*p).dip.as_mut_ptr(), 4), // R
+            None => core::ptr::write_volatile((&raw mut (*p).dip).cast::<u64>().add(1), 0), // Z @60
+        }
+        core::ptr::write_volatile(&raw mut (*p).outbound, outbound); // R
+        if sip.is_none() {
+            core::ptr::write_volatile((&raw mut (*p).sip).cast::<u64>(), 0); // Z @36
+        }
+        if dip.is_none() {
+            core::ptr::write_volatile((&raw mut (*p).dip).cast::<u64>(), 0); // Z @52
+        }
+        core::ptr::write_volatile(&raw mut (*p).l4proto, l4proto); // R
     }
-    if let Some(s) = sip {
-        e.sip.copy_from_slice(s);
-    }
-    if let Some(d) = dip {
-        e.dip.copy_from_slice(d);
-    }
-
     reservation.submit(0);
     0
 }
@@ -93,18 +92,27 @@ pub fn send_flow_expired(key: &honk_ebpf_common::redirect_need::TuplesKey, incar
     let Some(mut reservation) = EVENT_RINGBUF.reserve(0) else {
         return;
     };
-    let event: &mut DaeEvent = unsafe {
-        zero_event_volatile(reservation.as_mut_ptr());
-        reservation.assume_init_mut()
-    };
-    event.timestamp = now;
-    event.type_ = honk_ebpf_common::event::DaeEventType::FlowExpired as u32;
-    event.incarnation = incarnation;
-    event.l4proto = key.l4proto;
-    event.sip = unsafe { key.src_ip.u6_addr32 };
-    event.dip = unsafe { key.dst_ip.u6_addr32 };
-    event.sport = key.src_port;
-    event.dport = key.dst_port;
+    let p: *mut DaeEvent = reservation.as_mut_ptr();
+    unsafe {
+        // Zero-only stores (pid, pname, outbound, pad) are interleaved with
+        // the runtime stores; FlowExpired != 0 so type_ is a barrier too.
+        core::ptr::write_volatile(&raw mut (*p).timestamp, now); // R
+        core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>().add(1), 0); // Z @24
+        core::ptr::write_volatile(&raw mut (*p).incarnation, incarnation); // R
+        core::ptr::addr_of_mut!((*p).sip).write(key.src_ip.u6_addr32); // R
+        core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>(), 0); // Z @16
+        core::ptr::addr_of_mut!((*p).dip).write(key.dst_ip.u6_addr32); // R
+        core::ptr::write_volatile(&raw mut (*p).pid, 0); // Z @12
+        core::ptr::write_volatile(&raw mut (*p).outbound, 0); // Z @32
+        core::ptr::write_volatile(
+            &raw mut (*p).type_,
+            honk_ebpf_common::event::DaeEventType::FlowExpired as u32,
+        ); // R (nonzero)
+        core::ptr::write_volatile(&raw mut (*p).pad, [0; 2]); // Z @34
+        core::ptr::write_volatile(&raw mut (*p).l4proto, key.l4proto); // R
+        core::ptr::write_volatile(&raw mut (*p).sport, key.src_port); // R
+        core::ptr::write_volatile(&raw mut (*p).dport, key.dst_port); // R
+    }
     reservation.submit(0);
     if let Some(previous) = FLOW_EXPIRY_HINT.get_ptr_mut(key) {
         let previous = unsafe { &mut *previous };

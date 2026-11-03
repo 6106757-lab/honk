@@ -32,11 +32,33 @@ pub fn claim_udp_preparing(key: &TuplesKey, mac: &[u8; 6]) -> Option<u64> {
         return None;
     }
     let incarnation = allocate_flow_incarnation()?;
-    let mut state: ConnState = unsafe { core::mem::zeroed() };
-    state.state = UdpDecisionState::Preparing as u8;
-    state.incarnation = incarnation;
-    state.last_seen_ns = unsafe { bpf_ktime_get_ns() };
-    state.mac.copy_from_slice(mac);
+    // Field-by-field initialization instead of a bulk `mem::zeroed()`: a
+    // contiguous constant-zero store run is merged by LLVM into a call to the
+    // embedded memset subprogram, whose frame adds 32 bytes to every verifier
+    // call chain through here (see event.rs for the full rationale). Zero
+    // stores are interleaved with the runtime stores so no two of them cover
+    // adjacent addresses back to back; `dir|state|flags|token` (bytes 0..8)
+    // and `pid|trace_id` (48..56), `tcp_syn_isn|reserved` (64..72) collapse
+    // into single wider stores.
+    let mut state = core::mem::MaybeUninit::<ConnState>::uninit();
+    let p = state.as_mut_ptr();
+    let now_ns = unsafe { bpf_ktime_get_ns() };
+    unsafe {
+        core::ptr::write_volatile(
+            p.cast::<u64>(),
+            (UdpDecisionState::Preparing as u64) << 8, // Z dir=0,state=Preparing,flags=0,token=0
+        );
+        core::ptr::write_volatile(&raw mut (*p).last_seen_ns, now_ns); // R
+        core::ptr::write_volatile(&raw mut (*p).meta, RoutingMeta { raw: 0 }); // Z @16
+        core::ptr::addr_of_mut!((*p).mac).write(*mac); // R
+        core::ptr::write_volatile(&raw mut (*p).padding, [0; 2]); // Z @30
+        core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>().add(1), 0); // Z @40
+        core::ptr::write_volatile(&raw mut (*p).incarnation, incarnation); // R
+        core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>(), 0); // Z @32
+        core::ptr::write_volatile((&raw mut (*p).pid).cast::<u64>(), 0); // Z @48 pid+trace_id
+        core::ptr::write_volatile((&raw mut (*p).tcp_syn_isn).cast::<u64>(), 0); // Z @64 isn+reserved
+    }
+    let state = unsafe { state.assume_init() };
 
     if CONN_STATE_MAP
         .insert(key, FlowMapValue::new(state), BPF_NOEXIST as u64)
@@ -122,13 +144,26 @@ pub fn populate_udp_conn_state(
     decision_token: u32,
     incarnation: u64,
 ) {
-    *conn = unsafe { core::mem::zeroed() };
-    conn.state = state as u8;
-    conn.decision_token = decision_token;
-    conn.incarnation = incarnation;
-    conn.last_seen_ns = unsafe { bpf_ktime_get_ns() };
-    conn.meta = meta;
-    conn.mac.copy_from_slice(mac);
+    // Field-by-field initialization of the target scratch (see event.rs and
+    // claim_udp_preparing: a bulk zero lowers to a memset subprogram call
+    // whose frame breaks the pre-6.12 512B combined-stack budget). Zero
+    // stores are interleaved with runtime stores; `pid|trace_id` (48..56)
+    // and `tcp_syn_isn|reserved` (64..72) collapse into single wider stores.
+    unsafe {
+        core::ptr::write_volatile(&raw mut (*conn).is_wan_ingress_direction, 0); // Z @0
+        core::ptr::write_volatile(&raw mut (*conn).state, state as u8); // R
+        core::ptr::write_volatile(&raw mut (*conn).tcp_syn_flags, 0); // Z @2
+        core::ptr::write_volatile(&raw mut (*conn).decision_token, decision_token); // R
+        core::ptr::write_volatile(&raw mut (*conn).padding, [0; 2]); // Z @30
+        core::ptr::write_volatile(&raw mut (*conn).incarnation, incarnation); // R
+        core::ptr::write_volatile((&raw mut (*conn).pname).cast::<u64>().add(1), 0); // Z @40
+        core::ptr::write_volatile(&raw mut (*conn).last_seen_ns, unsafe { bpf_ktime_get_ns() }); // R
+        core::ptr::write_volatile((&raw mut (*conn).pname).cast::<u64>(), 0); // Z @32
+        core::ptr::write_volatile(&raw mut (*conn).meta, meta); // R
+        core::ptr::write_volatile((&raw mut (*conn).pid).cast::<u64>(), 0); // Z @48 pid+trace_id
+        conn.mac.copy_from_slice(mac); // R
+        core::ptr::write_volatile((&raw mut (*conn).tcp_syn_isn).cast::<u64>(), 0); // Z @64 isn+reserved
+    }
 }
 
 /// Allocate each generation-tagged mark token once until userspace rotates it.
@@ -297,19 +332,50 @@ fn __mark_udp_seen(
         return core::ptr::null_mut();
     };
     let has_rt = args.has_routing();
+    let has_mac = has_rt && args.has_mac();
+    let has_pname = has_rt && args.has_pname();
 
-    unsafe { core::ptr::write_bytes(output, 0, 1) };
+    // Field-by-field initialization of the invocation scratch instead of
+    // `write_bytes(0)` (see event.rs: a bulk zero lowers to a memset
+    // subprogram call whose frame breaks the pre-6.12 512B combined-stack
+    // budget). Every byte is written exactly once; zero stores are
+    // interleaved with runtime stores and `tcp_syn_isn|reserved` (64..72)
+    // collapses into one wider store.
     let new_state = unsafe { &mut *output };
-    new_state.is_wan_ingress_direction = (is_wan_ingress_direction != 0) as u8;
-    new_state.state = UdpDecisionState::None as u8;
-    new_state.incarnation = incarnation;
-    new_state.last_seen_ns = now;
-    new_state.pid = args.pid;
-    new_state.trace_id = args.trace_id;
-
+    unsafe {
+        core::ptr::write_volatile(
+            &raw mut (*output).is_wan_ingress_direction,
+            (is_wan_ingress_direction != 0) as u8,
+        ); // R
+        core::ptr::write_volatile(&raw mut (*output).state, UdpDecisionState::None as u8); // Z @1
+        core::ptr::write_volatile(&raw mut (*output).pid, args.pid); // R
+        core::ptr::write_volatile(&raw mut (*output).tcp_syn_flags, 0); // Z @2
+        core::ptr::write_volatile(&raw mut (*output).incarnation, incarnation); // R
+        core::ptr::write_volatile(&raw mut (*output).decision_token, 0); // Z @4
+        if has_rt {
+            new_state.meta = build_routing_meta(args.outbound, args.mark, args.must, args.dscp);
+            new_state.meta.raw |= routing_meta_flags;
+        } else {
+            core::ptr::write_volatile(&raw mut (*output).meta, RoutingMeta { raw: 0 }); // Z @16
+        }
+        core::ptr::write_volatile(&raw mut (*output).last_seen_ns, now); // R
+        if !has_mac {
+            // mac[6] + padding[2] are adjacent: one zero store covers both.
+            core::ptr::write_volatile((&raw mut (*output).mac).cast::<u64>(), 0); // Z @24
+        }
+        if has_pname {
+            core::ptr::write_volatile(&raw mut (*output).padding, [0; 2]); // Z @30
+        }
+        if !has_pname {
+            core::ptr::write_volatile((&raw mut (*output).pname).cast::<u64>().add(1), 0); // Z @40
+        }
+        core::ptr::write_volatile(&raw mut (*output).trace_id, args.trace_id); // R
+        if !has_pname {
+            core::ptr::write_volatile((&raw mut (*output).pname).cast::<u64>(), 0); // Z @32
+        }
+        core::ptr::write_volatile((&raw mut (*output).tcp_syn_isn).cast::<u64>(), 0); // Z @64 isn+reserved
+    }
     if has_rt {
-        new_state.meta = build_routing_meta(args.outbound, args.mark, args.must, args.dscp);
-        unsafe { new_state.meta.raw |= routing_meta_flags };
         if args.has_mac() {
             new_state.mac.copy_from_slice(&args.mac);
         }
