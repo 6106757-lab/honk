@@ -285,7 +285,7 @@ pub(crate) fn available_tuple_lifecycle(
 fn conntrack_output() -> Option<*mut ConnState> {
     // Keep array keys on stack, away from overridable zero-valued globals.
     let mut zero = 0u32;
-    unsafe { (&mut zero).write_unaligned(0) };
+    unsafe { core::ptr::write_volatile(&mut zero, 0) };
     CONNTRACK_SNAPSHOT_MAP.get_ptr_mut(unsafe { core::ptr::read_volatile(&zero) })
 }
 
