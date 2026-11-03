@@ -353,14 +353,25 @@ async fn wrap_ws(
     let mut request = uri
         .into_client_request()
         .map_err(|e| anyhow::anyhow!("WebSocket request build failed: {}", e))?;
-    if let Some(ws_host) = transport.ws_host.as_deref() {
-        request.headers_mut().insert(
-            tokio_tungstenite::tungstenite::http::header::HOST,
-            ws_host
-                .parse()
-                .map_err(|e| anyhow::anyhow!("invalid WebSocket host header: {}", e))?,
-        );
-    }
+    // The handshake Host is the endpoint host (no port) unless the operator
+    // configured an explicit ws host; a bare IPv6 literal must be bracketed
+    // here too, or the header value is an invalid authority.
+    let ws_host = transport
+        .ws_host
+        .as_deref()
+        .map(|h| h.trim_start_matches('[').trim_end_matches(']').to_string())
+        .unwrap_or_else(|| host.to_string());
+    let ws_host = if ws_host.contains(':') {
+        format!("[{ws_host}]")
+    } else {
+        ws_host
+    };
+    request.headers_mut().insert(
+        tokio_tungstenite::tungstenite::http::header::HOST,
+        ws_host
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid WebSocket host header: {}", e))?,
+    );
 
     let (ws_stream, _response) = tokio_tungstenite::client_async(request, stream)
         .await
