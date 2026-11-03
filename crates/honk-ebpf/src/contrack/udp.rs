@@ -44,19 +44,18 @@ pub fn claim_udp_preparing(key: &TuplesKey, mac: &[u8; 6]) -> Option<u64> {
     let p = state.as_mut_ptr();
     let now_ns = unsafe { bpf_ktime_get_ns() };
     unsafe {
-        core::ptr::write_volatile(
-            p.cast::<u64>(),
-            (UdpDecisionState::Preparing as u64) << 8, // Z dir=0,state=Preparing,flags=0,token=0
+        (
+            p.cast::<u64>()).write_unaligned((UdpDecisionState::Preparing as u64) << 8, // Z dir=0,state=Preparing,flags=0,token=0
         );
-        core::ptr::write_volatile(&raw mut (*p).last_seen_ns, now_ns); // R
-        core::ptr::write_volatile(&raw mut (*p).meta, RoutingMeta { raw: 0 }); // Z @16
+        (&raw mut (*p).last_seen_ns).write_unaligned(now_ns); // R
+        (&raw mut (*p).meta).write_unaligned(RoutingMeta { raw: 0 }); // Z @16
         core::ptr::addr_of_mut!((*p).mac).write(*mac); // R
-        core::ptr::write_volatile(&raw mut (*p).padding, [0; 2]); // Z @30
-        core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>().add(1), 0); // Z @40
-        core::ptr::write_volatile(&raw mut (*p).incarnation, incarnation); // R
-        core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>(), 0); // Z @32
-        core::ptr::write_volatile((&raw mut (*p).pid).cast::<u64>(), 0); // Z @48 pid+trace_id
-        core::ptr::write_volatile((&raw mut (*p).tcp_syn_isn).cast::<u64>(), 0); // Z @64 isn+reserved
+        (&raw mut (*p).padding).write_unaligned([0; 2]); // Z @30
+        ((&raw mut (*p).pname).cast::<u64>().add(1)).write_unaligned(0); // Z @40
+        (&raw mut (*p).incarnation).write_unaligned(incarnation); // R
+        ((&raw mut (*p).pname).cast::<u64>()).write_unaligned(0); // Z @32
+        ((&raw mut (*p).pid).cast::<u64>()).write_unaligned(0); // Z @48 pid+trace_id
+        ((&raw mut (*p).tcp_syn_isn).cast::<u64>()).write_unaligned(0); // Z @64 isn+reserved
     }
     let state = unsafe { state.assume_init() };
 
@@ -150,19 +149,19 @@ pub fn populate_udp_conn_state(
     // stores are interleaved with runtime stores; `pid|trace_id` (48..56)
     // and `tcp_syn_isn|reserved` (64..72) collapse into single wider stores.
     unsafe {
-        core::ptr::write_volatile(&raw mut (*conn).is_wan_ingress_direction, 0); // Z @0
-        core::ptr::write_volatile(&raw mut (*conn).state, state as u8); // R
-        core::ptr::write_volatile(&raw mut (*conn).tcp_syn_flags, 0); // Z @2
-        core::ptr::write_volatile(&raw mut (*conn).decision_token, decision_token); // R
-        core::ptr::write_volatile(&raw mut (*conn).padding, [0; 2]); // Z @30
-        core::ptr::write_volatile(&raw mut (*conn).incarnation, incarnation); // R
-        core::ptr::write_volatile((&raw mut (*conn).pname).cast::<u64>().add(1), 0); // Z @40
-        core::ptr::write_volatile(&raw mut (*conn).last_seen_ns, unsafe { bpf_ktime_get_ns() }); // R
-        core::ptr::write_volatile((&raw mut (*conn).pname).cast::<u64>(), 0); // Z @32
-        core::ptr::write_volatile(&raw mut (*conn).meta, meta); // R
-        core::ptr::write_volatile((&raw mut (*conn).pid).cast::<u64>(), 0); // Z @48 pid+trace_id
+        (&raw mut (*conn).is_wan_ingress_direction).write_unaligned(0); // Z @0
+        (&raw mut (*conn).state).write_unaligned(state as u8); // R
+        (&raw mut (*conn).tcp_syn_flags).write_unaligned(0); // Z @2
+        (&raw mut (*conn).decision_token).write_unaligned(decision_token); // R
+        (&raw mut (*conn).padding).write_unaligned([0; 2]); // Z @30
+        (&raw mut (*conn).incarnation).write_unaligned(incarnation); // R
+        ((&raw mut (*conn).pname).cast::<u64>().add(1)).write_unaligned(0); // Z @40
+        (&raw mut (*conn).last_seen_ns).write_unaligned(unsafe { bpf_ktime_get_ns() }); // R
+        ((&raw mut (*conn).pname).cast::<u64>()).write_unaligned(0); // Z @32
+        (&raw mut (*conn).meta).write_unaligned(meta); // R
+        ((&raw mut (*conn).pid).cast::<u64>()).write_unaligned(0); // Z @48 pid+trace_id
         conn.mac.copy_from_slice(mac); // R
-        core::ptr::write_volatile((&raw mut (*conn).tcp_syn_isn).cast::<u64>(), 0); // Z @64 isn+reserved
+        ((&raw mut (*conn).tcp_syn_isn).cast::<u64>()).write_unaligned(0); // Z @64 isn+reserved
     }
 }
 
@@ -343,37 +342,36 @@ fn __mark_udp_seen(
     // collapses into one wider store.
     let new_state = unsafe { &mut *output };
     unsafe {
-        core::ptr::write_volatile(
-            &raw mut (*output).is_wan_ingress_direction,
-            (is_wan_ingress_direction != 0) as u8,
+        (
+            &raw mut (*output).is_wan_ingress_direction).write_unaligned((is_wan_ingress_direction != 0) as u8,
         ); // R
-        core::ptr::write_volatile(&raw mut (*output).state, UdpDecisionState::None as u8); // Z @1
-        core::ptr::write_volatile(&raw mut (*output).pid, args.pid); // R
-        core::ptr::write_volatile(&raw mut (*output).tcp_syn_flags, 0); // Z @2
-        core::ptr::write_volatile(&raw mut (*output).incarnation, incarnation); // R
-        core::ptr::write_volatile(&raw mut (*output).decision_token, 0); // Z @4
+        (&raw mut (*output).state).write_unaligned(UdpDecisionState::None as u8); // Z @1
+        (&raw mut (*output).pid).write_unaligned(args.pid); // R
+        (&raw mut (*output).tcp_syn_flags).write_unaligned(0); // Z @2
+        (&raw mut (*output).incarnation).write_unaligned(incarnation); // R
+        (&raw mut (*output).decision_token).write_unaligned(0); // Z @4
         if has_rt {
             new_state.meta = build_routing_meta(args.outbound, args.mark, args.must, args.dscp);
             new_state.meta.raw |= routing_meta_flags;
         } else {
-            core::ptr::write_volatile(&raw mut (*output).meta, RoutingMeta { raw: 0 }); // Z @16
+            (&raw mut (*output).meta).write_unaligned(RoutingMeta { raw: 0 }); // Z @16
         }
-        core::ptr::write_volatile(&raw mut (*output).last_seen_ns, now); // R
+        (&raw mut (*output).last_seen_ns).write_unaligned(now); // R
         if !has_mac {
             // mac[6] + padding[2] are adjacent: one zero store covers both.
-            core::ptr::write_volatile((&raw mut (*output).mac).cast::<u64>(), 0); // Z @24
+            ((&raw mut (*output).mac).cast::<u64>()).write_unaligned(0); // Z @24
         }
         if has_pname {
-            core::ptr::write_volatile(&raw mut (*output).padding, [0; 2]); // Z @30
+            (&raw mut (*output).padding).write_unaligned([0; 2]); // Z @30
         }
         if !has_pname {
-            core::ptr::write_volatile((&raw mut (*output).pname).cast::<u64>().add(1), 0); // Z @40
+            ((&raw mut (*output).pname).cast::<u64>().add(1)).write_unaligned(0); // Z @40
         }
-        core::ptr::write_volatile(&raw mut (*output).trace_id, args.trace_id); // R
+        (&raw mut (*output).trace_id).write_unaligned(args.trace_id); // R
         if !has_pname {
-            core::ptr::write_volatile((&raw mut (*output).pname).cast::<u64>(), 0); // Z @32
+            ((&raw mut (*output).pname).cast::<u64>()).write_unaligned(0); // Z @32
         }
-        core::ptr::write_volatile((&raw mut (*output).tcp_syn_isn).cast::<u64>(), 0); // Z @64 isn+reserved
+        ((&raw mut (*output).tcp_syn_isn).cast::<u64>()).write_unaligned(0); // Z @64 isn+reserved
     }
     if has_rt {
         if args.has_mac() {

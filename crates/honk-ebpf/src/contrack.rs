@@ -87,40 +87,38 @@ impl ConntrackArgs {
         let has_mac = mac.is_some();
         let has_pname = pname.is_some();
         unsafe {
-            core::ptr::write_volatile(&raw mut (*self).incarnation, 0); // Z @40
-            core::ptr::write_volatile(&raw mut (*self).dscp, dscp); // R
+            (&raw mut (*self).incarnation).write_unaligned(0); // Z @40
+            (&raw mut (*self).dscp).write_unaligned(dscp); // R
             if !has_mac {
                 // mac[6] + padding[2] are adjacent: one zero store covers both.
-                core::ptr::write_volatile((&raw mut (*self).mac).cast::<u64>(), 0); // Z @12
+                ((&raw mut (*self).mac).cast::<u64>()).write_unaligned(0); // Z @12
             }
-            core::ptr::write_volatile(&raw mut (*self).pid, pid); // R
+            (&raw mut (*self).pid).write_unaligned(pid); // R
             if !has_pname {
-                core::ptr::write_volatile((&raw mut (*self).pname).cast::<u64>().add(1), 0); // Z @28
+                ((&raw mut (*self).pname).cast::<u64>().add(1)).write_unaligned(0); // Z @28
             }
             match routing {
                 Some((outbound, mark, must)) => {
-                    core::ptr::write_volatile(&raw mut (*self).mark, *mark); // R
-                    core::ptr::write_volatile(&raw mut (*self).outbound, *outbound); // R
-                    core::ptr::write_volatile(&raw mut (*self).must, *must); // R
+                    (&raw mut (*self).mark).write_unaligned(*mark); // R
+                    (&raw mut (*self).outbound).write_unaligned(*outbound); // R
+                    (&raw mut (*self).must).write_unaligned(*must); // R
                 }
                 None => {
-                    core::ptr::write_volatile(&raw mut (*self).mark, 0); // Z @4
-                    core::ptr::write_volatile(&raw mut (*self).outbound, 0); // Z @1
-                    core::ptr::write_volatile(&raw mut (*self).must, 0); // Z @2
+                    (&raw mut (*self).mark).write_unaligned(0); // Z @4
+                    (&raw mut (*self).outbound).write_unaligned(0); // Z @1
+                    (&raw mut (*self).must).write_unaligned(0); // Z @2
                 }
             }
             if !has_pname {
-                core::ptr::write_volatile((&raw mut (*self).pname).cast::<u64>(), 0); // Z @20
+                ((&raw mut (*self).pname).cast::<u64>()).write_unaligned(0); // Z @20
             }
-            core::ptr::write_volatile(&raw mut (*self).trace_id, 0); // Z @36
-            core::ptr::write_volatile(
-                (&raw mut (*self).tcp_syn_isn).cast::<u64>(),
-                0, // Z @48 isn+tcp_padding
+            (&raw mut (*self).trace_id).write_unaligned(0); // Z @36
+            (
+                (&raw mut (*self).tcp_syn_isn).cast::<u64>()).write_unaligned(0, // Z @48 isn+tcp_padding
             );
             // flags is fully defined here: the three presence bits only.
-            core::ptr::write_volatile(
-                &raw mut (*self).flags,
-                (has_routing as u8) * CT_ARGS_HAS_ROUTING
+            (
+                &raw mut (*self).flags).write_unaligned((has_routing as u8) * CT_ARGS_HAS_ROUTING
                     | (has_mac as u8) * CT_ARGS_HAS_MAC
                     | (has_pname as u8) * CT_ARGS_HAS_PNAME,
             ); // R/Z @0
@@ -287,7 +285,7 @@ pub(crate) fn available_tuple_lifecycle(
 fn conntrack_output() -> Option<*mut ConnState> {
     // Keep array keys on stack, away from overridable zero-valued globals.
     let mut zero = 0u32;
-    unsafe { core::ptr::write_volatile(&mut zero, 0) };
+    unsafe { (&mut zero).write_unaligned(0) };
     CONNTRACK_SNAPSHOT_MAP.get_ptr_mut(unsafe { core::ptr::read_volatile(&zero) })
 }
 

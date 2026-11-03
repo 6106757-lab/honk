@@ -39,36 +39,36 @@ pub fn send_dae_event(
     unsafe {
         // Zero-only stores are interleaved with runtime stores (marked R) so
         // no two zero stores cover adjacent addresses consecutively.
-        core::ptr::write_volatile(&raw mut (*p).timestamp, bpf_ktime_get_ns()); // R
-        core::ptr::write_volatile(&raw mut (*p).incarnation, 0); // Z @72
-        core::ptr::write_volatile(&raw mut (*p).type_, type_); // R
-        core::ptr::write_volatile(&raw mut (*p).pad, [0; 2]); // Z @34
-        core::ptr::write_volatile(&raw mut (*p).pid, pid); // R
+        (&raw mut (*p).timestamp).write_unaligned(bpf_ktime_get_ns()); // R
+        (&raw mut (*p).incarnation).write_unaligned(0); // Z @72
+        (&raw mut (*p).type_).write_unaligned(type_); // R
+        (&raw mut (*p).pad).write_unaligned([0; 2]); // Z @34
+        (&raw mut (*p).pid).write_unaligned(pid); // R
         match pname {
             Some(src) => core::ptr::copy_nonoverlapping(src.as_ptr(), (*p).pname.as_mut_ptr(), 16), // R
-            None => core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>().add(1), 0), // Z @24
+            None => ((&raw mut (*p).pname).cast::<u64>().add(1)).write_unaligned(0), // Z @24
         }
-        core::ptr::write_volatile(&raw mut (*p).sport, sport); // R
+        (&raw mut (*p).sport).write_unaligned(sport); // R
         match sip {
             Some(src) => core::ptr::copy_nonoverlapping(src.as_ptr(), (*p).sip.as_mut_ptr(), 4), // R
-            None => core::ptr::write_volatile((&raw mut (*p).sip).cast::<u64>().add(1), 0), // Z @44
+            None => ((&raw mut (*p).sip).cast::<u64>().add(1)).write_unaligned(0), // Z @44
         }
         if pname.is_none() {
-            core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>(), 0); // Z @16
+            ((&raw mut (*p).pname).cast::<u64>()).write_unaligned(0); // Z @16
         }
-        core::ptr::write_volatile(&raw mut (*p).dport, dport); // R
+        (&raw mut (*p).dport).write_unaligned(dport); // R
         match dip {
             Some(src) => core::ptr::copy_nonoverlapping(src.as_ptr(), (*p).dip.as_mut_ptr(), 4), // R
-            None => core::ptr::write_volatile((&raw mut (*p).dip).cast::<u64>().add(1), 0), // Z @60
+            None => ((&raw mut (*p).dip).cast::<u64>().add(1)).write_unaligned(0), // Z @60
         }
-        core::ptr::write_volatile(&raw mut (*p).outbound, outbound); // R
+        (&raw mut (*p).outbound).write_unaligned(outbound); // R
         if sip.is_none() {
-            core::ptr::write_volatile((&raw mut (*p).sip).cast::<u64>(), 0); // Z @36
+            ((&raw mut (*p).sip).cast::<u64>()).write_unaligned(0); // Z @36
         }
         if dip.is_none() {
-            core::ptr::write_volatile((&raw mut (*p).dip).cast::<u64>(), 0); // Z @52
+            ((&raw mut (*p).dip).cast::<u64>()).write_unaligned(0); // Z @52
         }
-        core::ptr::write_volatile(&raw mut (*p).l4proto, l4proto); // R
+        (&raw mut (*p).l4proto).write_unaligned(l4proto); // R
     }
     reservation.submit(0);
     0
@@ -96,22 +96,21 @@ pub fn send_flow_expired(key: &honk_ebpf_common::redirect_need::TuplesKey, incar
     unsafe {
         // Zero-only stores (pid, pname, outbound, pad) are interleaved with
         // the runtime stores; FlowExpired != 0 so type_ is a barrier too.
-        core::ptr::write_volatile(&raw mut (*p).timestamp, now); // R
-        core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>().add(1), 0); // Z @24
-        core::ptr::write_volatile(&raw mut (*p).incarnation, incarnation); // R
+        (&raw mut (*p).timestamp).write_unaligned(now); // R
+        ((&raw mut (*p).pname).cast::<u64>().add(1)).write_unaligned(0); // Z @24
+        (&raw mut (*p).incarnation).write_unaligned(incarnation); // R
         core::ptr::addr_of_mut!((*p).sip).write(key.src_ip.u6_addr32); // R
-        core::ptr::write_volatile((&raw mut (*p).pname).cast::<u64>(), 0); // Z @16
+        ((&raw mut (*p).pname).cast::<u64>()).write_unaligned(0); // Z @16
         core::ptr::addr_of_mut!((*p).dip).write(key.dst_ip.u6_addr32); // R
-        core::ptr::write_volatile(&raw mut (*p).pid, 0); // Z @12
-        core::ptr::write_volatile(&raw mut (*p).outbound, 0); // Z @32
-        core::ptr::write_volatile(
-            &raw mut (*p).type_,
-            honk_ebpf_common::event::DaeEventType::FlowExpired as u32,
+        (&raw mut (*p).pid).write_unaligned(0); // Z @12
+        (&raw mut (*p).outbound).write_unaligned(0); // Z @32
+        (
+            &raw mut (*p).type_).write_unaligned(honk_ebpf_common::event::DaeEventType::FlowExpired as u32,
         ); // R (nonzero)
-        core::ptr::write_volatile(&raw mut (*p).pad, [0; 2]); // Z @34
-        core::ptr::write_volatile(&raw mut (*p).l4proto, key.l4proto); // R
-        core::ptr::write_volatile(&raw mut (*p).sport, key.src_port); // R
-        core::ptr::write_volatile(&raw mut (*p).dport, key.dst_port); // R
+        (&raw mut (*p).pad).write_unaligned([0; 2]); // Z @34
+        (&raw mut (*p).l4proto).write_unaligned(key.l4proto); // R
+        (&raw mut (*p).sport).write_unaligned(key.src_port); // R
+        (&raw mut (*p).dport).write_unaligned(key.dst_port); // R
     }
     reservation.submit(0);
     if let Some(previous) = FLOW_EXPIRY_HINT.get_ptr_mut(key) {

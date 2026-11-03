@@ -352,30 +352,29 @@ fn publish_fresh_tcp(
     let has_pname = has_routing && args.has_pname();
     unsafe {
         if !has_routing {
-            core::ptr::write_volatile(&raw mut (*output).meta, RoutingMeta { raw: 0 }); // Z @16
+            (&raw mut (*output).meta).write_unaligned(RoutingMeta { raw: 0 }); // Z @16
         }
-        core::ptr::write_volatile(&raw mut (*output).last_seen_ns, now); // R
+        (&raw mut (*output).last_seen_ns).write_unaligned(now); // R
         if !has_mac {
             // mac[6] + padding[2] are adjacent: one zero store covers both.
-            core::ptr::write_volatile((&raw mut (*output).mac).cast::<u64>(), 0); // Z @24
+            ((&raw mut (*output).mac).cast::<u64>()).write_unaligned(0); // Z @24
         }
-        core::ptr::write_volatile(&raw mut (*output).incarnation, incarnation); // R
+        (&raw mut (*output).incarnation).write_unaligned(incarnation); // R
         if !has_pname {
-            core::ptr::write_volatile((&raw mut (*output).pname).cast::<u64>(), 0); // Z @32
+            ((&raw mut (*output).pname).cast::<u64>()).write_unaligned(0); // Z @32
         }
-        core::ptr::write_volatile(&raw mut (*output).tcp_syn_isn, args.tcp_syn_isn); // R
+        (&raw mut (*output).tcp_syn_isn).write_unaligned(args.tcp_syn_isn); // R
         if !has_pname {
-            core::ptr::write_volatile((&raw mut (*output).pname).cast::<u64>().add(1), 0); // Z @40
+            ((&raw mut (*output).pname).cast::<u64>().add(1)).write_unaligned(0); // Z @40
         }
-        core::ptr::write_volatile(&raw mut (*output).pid, args.pid); // R
+        (&raw mut (*output).pid).write_unaligned(args.pid); // R
         if has_mac {
-            core::ptr::write_volatile(&raw mut (*output).padding, [0; 2]); // Z @30
+            (&raw mut (*output).padding).write_unaligned([0; 2]); // Z @30
         }
         // dir(0) + state(TcpStateActive = 0) + flags(0) + token(0): bytes 0..8.
-        core::ptr::write_volatile(output.cast::<u64>(), 0); // Z @0
-        core::ptr::write_volatile(
-            &raw mut (*output).trace_id,
-            if has_routing {
+        (output.cast::<u64>()).write_unaligned(0); // Z @0
+        (
+            &raw mut (*output).trace_id).write_unaligned(if has_routing {
                 args.trace_id
             } else if ptr_opt.is_some() {
                 u32::MAX
@@ -383,7 +382,7 @@ fn publish_fresh_tcp(
                 0
             },
         ); // R
-        core::ptr::write_volatile(&raw mut (*output).reserved, 0); // Z @68
+        (&raw mut (*output).reserved).write_unaligned(0); // Z @68
     }
     if has_routing {
         update_tcp_locked(new_state, args, now, false);
