@@ -677,17 +677,15 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
 
     let peer = tokio::spawn(async move {
         let (mut socket, _) = front.accept().await.unwrap();
-        // The manual probe dials `back` through its named front, so the front is
-        // the SOCKS5 entry point: a single handshake is what the probe asks the
-        // front to perform, and the target it names is the check address. This
-        // matches `wire.rs`, which rides `detour_for(back)` to reach `front`
-        // and then dials the check through it -- exactly one SOCKS5 hop, not a
-        // two-stage back-then-check tunnel the peer never actually modelled.
-        // The probe dials `back` through its named front, so the front is the
-        // SOCKS5 entry point and the single hop the peer plays. This mirrors the
-        // verified server in `group_http_probe_measures_loopback_node...`: read
-        // the greeting as version + nmethods + nmethods bytes (not a fixed two
-        // bytes) so the trailing method byte does not poison the CONNECT parse.
+        // `connect_server` tunnels to the back node's own server through the
+        // front and then `dial_with_stream` speaks the back protocol over that
+        // tunnel, so one TCP connection to the front carries two SOCKS5
+        // stages: the front is asked to reach back.example:9, and over that
+        // link the back server is asked for the check address. Each greeting
+        // is read as version + nmethods + nmethods bytes -- not a fixed two
+        // bytes -- so the trailing method byte cannot poison the CONNECT
+        // parse.
+        // Stage one: the front is asked to reach the back node's own server.
         assert_eq!(
             socket.read_u8().await.unwrap(),
             5,
@@ -709,6 +707,36 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
         socket.read_exact(&mut destination).await.unwrap();
         assert_eq!(
             &destination,
+            &[127, 0, 0, 1, 0, 9],
+            "the front must be asked to reach the back server"
+        );
+        socket
+            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+            .await
+            .unwrap();
+        // Stage two: over that link the back protocol speaks to the check
+        // target, so the same peer now plays the back server's role.
+        assert_eq!(
+            socket.read_u8().await.unwrap(),
+            5,
+            "the back must speak SOCKS5 over the tunnel"
+        );
+        let methods = socket.read_u8().await.unwrap();
+        let mut offered = vec![0u8; usize::from(methods)];
+        socket.read_exact(&mut offered).await.unwrap();
+        assert!(offered.contains(&0), "the back must be offered no-auth");
+        socket.write_all(&[5, 0]).await.unwrap();
+        let mut header = [0; 4];
+        socket.read_exact(&mut header).await.unwrap();
+        assert_eq!(
+            header,
+            [5, 1, 0, 1],
+            "the back must receive a CONNECT for an IPv4 target"
+        );
+        let mut destination = [0; 6];
+        socket.read_exact(&mut destination).await.unwrap();
+        assert_eq!(
+            &destination,
             &[
                 127,
                 0,
@@ -717,7 +745,7 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
                 (check_port >> 8) as u8,
                 (check_port & 0xff) as u8
             ],
-            "the front must be asked for the check address"
+            "the back must be asked for the check address"
         );
         socket
             .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
