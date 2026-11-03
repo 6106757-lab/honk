@@ -117,7 +117,8 @@ async fn resolve_endpoint(address: &str) -> anyhow::Result<SocketAddr> {
     let port: u16 = port
         .parse()
         .map_err(|_| anyhow::anyhow!("masque endpoint {address} has a bad port"))?;
-    let ip = crate::bootstrap::resolve(host)
+    let resolution = Box::pin(crate::bootstrap::resolve(host));
+    let ip = resolution
         .await?
         .into_iter()
         .next()

@@ -57,7 +57,12 @@ pub async fn resolve_endpoint(address: &str) -> anyhow::Result<SocketAddr> {
     let port: u16 = port
         .parse()
         .map_err(|_| anyhow::anyhow!("endpoint {address} has a bad port"))?;
-    let ip = crate::bootstrap::resolve(host)
+    // The resolver future is large; box it so callers that compose this dial
+    // into deep async stacks do not blow the crate recursion limit while the
+    // compiler computes nested future layouts (same trick `connect_marked`
+    // uses for its flow-observed resolution).
+    let resolution = Box::pin(crate::bootstrap::resolve(host));
+    let ip = resolution
         .await?
         .into_iter()
         .next()
