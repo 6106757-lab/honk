@@ -340,7 +340,10 @@ async fn wrap_ws(
     // `http::Request` passed to `client_async` is sent as-is and real
     // servers reject the missing key. A bare IPv6 literal must be
     // bracketed in the authority, or the URI parses as an invalid host.
-    let host = node.host();
+    // Strip any brackets first: share links parse through `url::Url`,
+    // which already returns bare literals, but a hand-written config or
+    // another provider may carry them.
+    let host = node.host().trim_start_matches('[').trim_end_matches(']');
     let authority = if host.contains(':') {
         format!("[{host}]:{}", node.port)
     } else {
