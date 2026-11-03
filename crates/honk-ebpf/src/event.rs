@@ -4,6 +4,34 @@ use crate::maps::{EVENT_RINGBUF, FLOW_EXPIRY_HINT, FlowExpiryHint};
 use aya_ebpf_bindings::helpers::bpf_ktime_get_ns;
 use honk_ebpf_common::event::DaeEvent;
 
+/// Zero a ringbuf event slot with volatile word stores.
+///
+/// `write_bytes` lowers to a call to the embedded `memset` subprogram, whose
+/// frame adds 32 bytes to every verifier call chain that ends in an event —
+/// on pre-6.12 kernels the TC classifiers sit exactly at that 512B combined
+/// stack limit. Volatile stores cannot be merged back into a `memset` call,
+/// and the event is written in ringbuf memory, so per-packet cost is
+/// unchanged (same stores the helper would perform).
+#[inline(always)]
+fn zero_event_volatile(ptr: *mut DaeEvent) {
+    let words = core::mem::size_of::<DaeEvent>() / 8;
+    let tail = core::mem::size_of::<DaeEvent>() % 8;
+    let wp = ptr.cast::<u64>();
+    let mut i = 0;
+    while i < words {
+        unsafe { core::ptr::write_volatile(wp.add(i), 0) };
+        i += 1;
+    }
+    if tail != 0 {
+        let bp = ptr.cast::<u8>();
+        let mut j = words * 8;
+        while j < core::mem::size_of::<DaeEvent>() {
+            unsafe { core::ptr::write_volatile(bp.add(j), 0) };
+            j += 1;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn send_dae_event(
@@ -21,7 +49,7 @@ pub fn send_dae_event(
         return -1;
     };
     let e: &mut DaeEvent = unsafe {
-        reservation.as_mut_ptr().write_bytes(0, 1);
+        zero_event_volatile(reservation.as_mut_ptr());
         reservation.assume_init_mut()
     };
 
@@ -66,7 +94,7 @@ pub fn send_flow_expired(key: &honk_ebpf_common::redirect_need::TuplesKey, incar
         return;
     };
     let event: &mut DaeEvent = unsafe {
-        reservation.as_mut_ptr().write_bytes(0, 1);
+        zero_event_volatile(reservation.as_mut_ptr());
         reservation.assume_init_mut()
     };
     event.timestamp = now;

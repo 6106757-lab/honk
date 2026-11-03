@@ -210,13 +210,7 @@ fn evaluate_policy(
 }
 
 /// Invoke the committed policy and return its decision and descriptor generation.
-///
-/// `#[inline(never)]`: `evaluate_policy` allocates the largest locals in the
-/// classifier path (decision, pname scratch). Outlining keeps callers like
-/// `do_tproxy_lan_ingress` within the verifier's 512B combined call-chain
-/// stack budget on kernels without the 2KiB JIT stack (pre-6.12), while
-/// staying well under the per-frame limit everywhere else.
-#[inline(never)]
+#[inline(always)]
 pub fn route(
     input: &mut RoutingInput,
     pname: Option<&[u8; 16]>,

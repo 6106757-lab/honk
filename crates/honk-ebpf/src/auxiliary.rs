@@ -81,7 +81,11 @@ fn stateless_publication(key: &TuplesKey, token: u32, incarnation: u64) -> bool 
 }
 
 // Project through existing scratch to avoid another key/value pair on the TC stack.
-#[inline(always)]
+//
+// `#[inline(never)]`: its scratch-key temp materialization is the deepest
+// stack point of `stage_udp_decision`, which sits at the verifier's 512B
+// combined call-chain limit on pre-6.12 kernels.
+#[inline(never)]
 fn publish_client_reply(key: &TuplesKey, scratch: &mut UdpDecisionScratch) {
     if key.l4proto != crate::transport::IPPROTO_UDP
         || key.dst_port == 53

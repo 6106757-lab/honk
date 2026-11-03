@@ -430,7 +430,11 @@ fn pass_through_classified(ctx: &TcContext) -> Verdict {
 /// lookup also matches forwarded destinations; only `NOT_FWDED` is eligible
 /// after the earlier broadcast/multicast rejection. Every forwarded or
 /// ambiguous FIB result stays on the transparent routing path.
-#[inline(always)]
+///
+/// `#[inline(never)]`: the 64-byte `BpfFibLookup` scratch stays out of the
+/// LAN classifier frame, which sits at the verifier's 512B combined
+/// call-chain stack limit on pre-6.12 kernels.
+#[inline(never)]
 fn wildcard_socket_destination_is_local(ctx: &TcContext, pkt: &ParsedPacket) -> bool {
     let mut fib: BpfFibLookup = unsafe { mem::zeroed() };
     fib.family = if pkt.ethh.ether_type == ETH_P_IP.to_be() {
