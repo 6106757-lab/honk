@@ -334,31 +334,30 @@ async fn wrap_ws(
 
     let transport = node.transport().unwrap();
     let ws_path = transport.ws_path.as_deref().unwrap_or("/");
-    let ws_host = transport
-        .ws_host
-        .as_deref()
-        .unwrap_or(node.host())
-        .to_string();
 
     // Build the request from the URI so tungstenite generates the full
     // handshake header set (Sec-WebSocket-Key, Upgrade, ...); a bare
     // `http::Request` passed to `client_async` is sent as-is and real
-    // servers reject the missing key.
-    let uri = format!(
-        "ws://{}:{}{}",
-        node.host(),
-        node.port,
-        encode_uri_path(ws_path)
-    );
+    // servers reject the missing key. A bare IPv6 literal must be
+    // bracketed in the authority, or the URI parses as an invalid host.
+    let host = node.host();
+    let authority = if host.contains(':') {
+        format!("[{host}]:{}", node.port)
+    } else {
+        format!("{host}:{}", node.port)
+    };
+    let uri = format!("ws://{authority}{}", encode_uri_path(ws_path));
     let mut request = uri
         .into_client_request()
         .map_err(|e| anyhow::anyhow!("WebSocket request build failed: {}", e))?;
-    request.headers_mut().insert(
-        tokio_tungstenite::tungstenite::http::header::HOST,
-        ws_host
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid WebSocket host header: {}", e))?,
-    );
+    if let Some(ws_host) = transport.ws_host.as_deref() {
+        request.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::header::HOST,
+            ws_host
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid WebSocket host header: {}", e))?,
+        );
+    }
 
     let (ws_stream, _response) = tokio_tungstenite::client_async(request, stream)
         .await
