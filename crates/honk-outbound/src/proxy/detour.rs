@@ -45,11 +45,24 @@ pub fn ensure_bound(node: &Node, detour: Option<&DetourPath>) -> anyhow::Result<
 /// The detour is dialled by address, so the name has to be resolved here
 /// rather than inside the detour node: only this end knows which host the
 /// node's traffic is actually for.
+///
+/// The lookup goes through the bootstrap resolver, the same path every
+/// direct server dial takes (`connect_marked`): libc NSS resolution is
+/// deliberately not used anywhere in the control plane, and a detoured
+/// node's hostname must not resolve differently from an undetoured one.
 pub async fn resolve_endpoint(address: &str) -> anyhow::Result<SocketAddr> {
-    tokio::net::lookup_host(address)
+    let (host, port) = address
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("endpoint {address} is not a host:port pair"))?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| anyhow::anyhow!("endpoint {address} has a bad port"))?;
+    let ip = crate::bootstrap::resolve(host)
         .await?
+        .into_iter()
         .next()
-        .ok_or_else(|| anyhow::anyhow!("endpoint {address} resolved to nothing"))
+        .ok_or_else(|| anyhow::anyhow!("endpoint {address} resolved to nothing"))?;
+    Ok(SocketAddr::new(ip, port))
 }
 
 /// What the operator named: one node, or a group that picks one.

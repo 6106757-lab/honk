@@ -107,11 +107,22 @@ async fn open_h2(
 }
 
 /// Resolve the endpoint literal to an address a detour can dial.
+///
+/// Server hostnames resolve through the bootstrap resolver, the same path
+/// direct server dials take; libc NSS resolution is deliberately not used.
 async fn resolve_endpoint(address: &str) -> anyhow::Result<SocketAddr> {
-    tokio::net::lookup_host(address)
+    let (host, port) = address
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("masque endpoint {address} is not a host:port pair"))?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| anyhow::anyhow!("masque endpoint {address} has a bad port"))?;
+    let ip = crate::bootstrap::resolve(host)
         .await?
+        .into_iter()
         .next()
-        .ok_or_else(|| anyhow::anyhow!("masque endpoint {address} resolved to nothing"))
+        .ok_or_else(|| anyhow::anyhow!("masque endpoint {address} resolved to nothing"))?;
+    Ok(SocketAddr::new(ip, port))
 }
 
 /// The node's `host:port`, bracketed when the endpoint is an IPv6 literal.

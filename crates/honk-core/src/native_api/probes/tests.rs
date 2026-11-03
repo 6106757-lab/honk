@@ -664,71 +664,98 @@ async fn a_node_probe_rides_the_detour_the_node_names() {
 
     let mut config = Config::default();
     config.global.tcp_check_url = vec![format!("http://127.0.0.1:{check_port}/check")];
-    let hosts = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(hosts.path(), "back.example 127.0.0.1\n").unwrap();
-    config.dns.hosts = vec![hosts.path().to_string_lossy().into_owned()];
     config
         .nodes
         .push(Node::from_share_link(&format!("socks5://127.0.0.1:{front_port}#front")).unwrap());
-    let back = Node::from_share_link("socks5://back.example:9?dialer-proxy=front#back").unwrap();
+    // The back node's own server is named by a literal address: the dial
+    // resolves it at this end (see `detour::resolve_endpoint`) and then asks
+    // the front to carry it, so no DNS is involved in the test.
+    let back = Node::from_share_link("socks5://127.0.0.1:9?dialer-proxy=front#back").unwrap();
     let back_id = back.id;
     config.nodes.push(back);
     let state = state(config).await;
 
-    // Diagnostics: the API collapses the actionable dial error to a generic
-    // `probe_failed`, so this run turns the dial path's tracing on -- the
-    // wire records the underlying cause with `tracing::warn!` -- and prints
-    // every byte the peer receives.
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_writer(std::io::stderr)
-        .try_init();
-
-    fn hexs(bytes: &[u8]) -> String {
-        bytes
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
     let peer = tokio::spawn(async move {
         let (mut socket, _) = front.accept().await.unwrap();
-        eprintln!("PEER: front connection accepted");
-        let mut buf = [0u8; 512];
+        // `connect_server` tunnels to the back node's own server through the
+        // front and then `dial_with_stream` speaks the back protocol over that
+        // tunnel, so one TCP connection to the front carries two SOCKS5
+        // stages: the front is asked to reach the back server, and over that
+        // link the back server is asked for the check address. Each greeting
+        // is read as version + nmethods + nmethods bytes -- not a fixed two
+        // bytes -- so the trailing method byte cannot poison the CONNECT
+        // parse.
         // Stage one: the front is asked to reach the back node's own server.
-        let n = socket.read(&mut buf).await.unwrap();
-        eprintln!("PEER stage1 read {n}: {}", hexs(&buf[..n]));
-        socket.write_all(&[5, 0]).await.unwrap();
-        let n = socket.read(&mut buf).await.unwrap();
-        eprintln!("PEER stage1 read {n}: {}", hexs(&buf[..n]));
-        eprintln!("PEER stage1 replying success");
-        socket
-            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
-            .await
-            .unwrap();
-        // Stage two: over that link the back protocol speaks to the check.
-        let n = socket.read(&mut buf).await.unwrap();
-        eprintln!("PEER stage2 read {n}: {}", hexs(&buf[..n]));
-        socket.write_all(&[5, 0]).await.unwrap();
-        let n = socket.read(&mut buf).await.unwrap();
-        eprintln!("PEER stage2 read {n}: {}", hexs(&buf[..n]));
-        eprintln!("PEER stage2 replying success");
-        socket
-            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
-            .await
-            .unwrap();
-        // The probe's HTTP request, then the check answer.
-        let n = socket.read(&mut buf).await.unwrap();
-        eprintln!(
-            "PEER http read {n}: {:?}",
-            String::from_utf8_lossy(&buf[..n])
+        assert_eq!(
+            socket.read_u8().await.unwrap(),
+            5,
+            "the front must speak SOCKS5"
         );
+        let methods = socket.read_u8().await.unwrap();
+        let mut offered = vec![0u8; usize::from(methods)];
+        socket.read_exact(&mut offered).await.unwrap();
+        assert!(offered.contains(&0), "the front must offer no-auth");
+        socket.write_all(&[5, 0]).await.unwrap();
+        let mut header = [0; 4];
+        socket.read_exact(&mut header).await.unwrap();
+        assert_eq!(
+            header,
+            [5, 1, 0, 1],
+            "the front must receive a CONNECT for an IPv4 target"
+        );
+        let mut destination = [0; 6];
+        socket.read_exact(&mut destination).await.unwrap();
+        assert_eq!(
+            &destination,
+            &[127, 0, 0, 1, 0, 9],
+            "the front must be asked to reach the back server"
+        );
+        socket
+            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+            .await
+            .unwrap();
+        // Stage two: over that link the back protocol speaks to the check
+        // target, so the same peer now plays the back server's role.
+        assert_eq!(
+            socket.read_u8().await.unwrap(),
+            5,
+            "the back must speak SOCKS5 over the tunnel"
+        );
+        let methods = socket.read_u8().await.unwrap();
+        let mut offered = vec![0u8; usize::from(methods)];
+        socket.read_exact(&mut offered).await.unwrap();
+        assert!(offered.contains(&0), "the back must be offered no-auth");
+        socket.write_all(&[5, 0]).await.unwrap();
+        let mut header = [0; 4];
+        socket.read_exact(&mut header).await.unwrap();
+        assert_eq!(
+            header,
+            [5, 1, 0, 1],
+            "the back must receive a CONNECT for an IPv4 target"
+        );
+        let mut destination = [0; 6];
+        socket.read_exact(&mut destination).await.unwrap();
+        assert_eq!(
+            &destination,
+            &[
+                127,
+                0,
+                0,
+                1,
+                (check_port >> 8) as u8,
+                (check_port & 0xff) as u8
+            ],
+            "the back must be asked for the check address"
+        );
+        socket
+            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+            .await
+            .unwrap();
+        receive_headers(&mut socket).await;
         socket
             .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
             .await
             .unwrap();
-        eprintln!("PEER: finished");
     });
 
     let input = request(
