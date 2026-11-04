@@ -1,5 +1,6 @@
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 
@@ -284,6 +285,22 @@ pub(crate) fn recv_datagram(fd: RawFd, capacity: usize) -> io::Result<Bytes> {
     Ok(buffer.freeze())
 }
 
+/// nf_tables acknowledges a batch as a whole. Kernels that only echo
+/// BATCH_END (observed on 6.6) never produce one NLMSG_ERROR per inner
+/// message, so counting to `expected` blocks forever and startup hangs with
+/// the datapath closed. Accept the batch-end echo, and bound the wait so a
+/// silent kernel degrades to "nfqueue unavailable" instead of a deadlock.
+const ACK_TIMEOUT: Duration = Duration::from_secs(3);
+
+fn is_batch_end_ack(message: &Message) -> bool {
+    // NLMSG_ERROR body: i32 error code followed by the echoed nlmsghdr.
+    if message.body.len() < 4 + NLMSG_HDRLEN {
+        return false;
+    }
+    let original_type = u16::from_ne_bytes([message.body[4], message.body[5]]);
+    original_type == NFNL_MSG_BATCH_END
+}
+
 pub(crate) fn send_and_acks(
     fd: RawFd,
     request: &[u8],
@@ -292,8 +309,39 @@ pub(crate) fn send_and_acks(
 ) -> io::Result<()> {
     debug_assert_ne!(expected, 0);
     send(fd, request)?;
+    let deadline = Instant::now() + ACK_TIMEOUT;
     let mut received = 0usize;
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            if received == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "nf_tables batch was not acknowledged",
+                ));
+            }
+            // Part of the batch was acknowledged with no error reply, which
+            // means the kernel applied the transaction. Return instead of
+            // waiting for acknowledgements that will never come.
+            return Ok(());
+        }
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let ready = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            continue;
+        }
         let datagram = recv_datagram(fd, 64 * 1024)?;
         for message in messages(datagram) {
             let message = message.map_err(invalid_data)?;
@@ -311,7 +359,7 @@ pub(crate) fn send_and_acks(
                 return Err(io::Error::from_raw_os_error(-code));
             }
             received += 1;
-            if received == expected {
+            if received >= expected || is_batch_end_ack(&message) {
                 return Ok(());
             }
         }
