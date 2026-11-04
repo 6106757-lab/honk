@@ -771,12 +771,8 @@ impl ParseTransportExt for ParseTransportCtx {
 
     #[inline(always)]
     fn parse(&mut self, ctx: &TcContext, link_h_len: u32) -> Result<(), c_long> {
-        // MEASUREMENT ONLY (revert before shipping): return the fallback error
-        // instead of running the byte-wise slow parser, so the verifier never
-        // explores parse_slow. Tells us how much of wan_egress_l3's state
-        // explosion belongs to the fallback path.
         match self.parse_fast(ctx, link_h_len) {
-            Err(ERR_FALLBACK) => Err(ERR_FALLBACK),
+            Err(ERR_FALLBACK) => self.parse_slow(ctx, link_h_len),
             other => other,
         }
     }
