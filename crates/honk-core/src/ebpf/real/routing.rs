@@ -13,11 +13,21 @@ use std::io;
 use std::mem::{offset_of, size_of};
 use std::os::fd::{FromRawFd, OwnedFd};
 
+/// Programs that carry the `honk_route_slotN` subprogram and therefore accept
+/// the generated routing extension.
+///
+/// A freplace link is only accepted when the target program's own func_info
+/// holds the attach btf id; `BPF_LINK_CREATE` returns EINVAL otherwise. The WAN
+/// egress classifier hands a parsed packet to `wan_egress_{tcp,udp}_tail`
+/// through `WAN_EGRESS_TAIL`, so the routing call site now lives in the tail
+/// programs and `wan_egress_l2` / `wan_egress_l3` no longer carry the slot at
+/// all. Listing them made the initial policy publication fail with
+/// `BPF_LINK_CREATE EXT ... EINVAL` right after a successful load.
 const ROUTING_TARGETS: [&str; 4] = [
     "lan_ingress_l2",
     "lan_ingress_l3",
-    "wan_egress_l2",
-    "wan_egress_l3",
+    "wan_egress_tcp_tail",
+    "wan_egress_udp_tail",
 ];
 const FACT_MAP_CAPACITY: u32 = 2_048_000;
 const BPF_F_NO_PREALLOC: u32 = 1;
