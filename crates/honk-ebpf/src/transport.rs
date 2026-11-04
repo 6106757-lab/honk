@@ -275,6 +275,11 @@ pub fn udp_has_quic_long_header(ctx: &TcContext, link_h_len: u32, pkt: &ParsedPa
             if offset > IPV6_EXT_CHAIN_MAX {
                 return false;
             }
+            // Make the carried offset opaque: fragment steps advance it by an
+            // exact 8 while extension steps advance a range, and the 6.6
+            // verifier only merges latch states whose registers match. An
+            // opaque re-read gives every path the identical latch state.
+            offset = unsafe { core::ptr::read_volatile(&offset) };
             if nexthdr == IPPROTO_UDP {
                 break;
             }
@@ -460,6 +465,10 @@ impl ParseTransportExt for ParseTransportCtx {
                 if offset > IPV6_EXT_CHAIN_MAX {
                     return Err(ERR_MALFORMED);
                 }
+                // Make the carried offset opaque so fragment (exact +8) and
+                // extension (ranged) steps yield the identical latch state
+                // and the walk stops forking verifier states on 6.6.
+                offset = unsafe { core::ptr::read_volatile(&offset) };
                 if nexthdr == IPPROTO_NONE {
                     return Err(ERR_MALFORMED);
                 }
@@ -663,6 +672,10 @@ impl ParseTransportExt for ParseTransportCtx {
                 if offset > IPV6_EXT_CHAIN_MAX {
                     return Err(ERR_MALFORMED);
                 }
+                // Make the carried offset opaque so fragment (exact +8) and
+                // extension (ranged) steps yield the identical latch state
+                // and the walk stops forking verifier states on 6.6.
+                offset = unsafe { core::ptr::read_volatile(&offset) };
                 if nexthdr == IPPROTO_NONE {
                     return Err(ERR_MALFORMED);
                 }
