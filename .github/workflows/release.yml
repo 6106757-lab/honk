@@ -200,7 +200,7 @@ jobs:
           esac
           features="ebpf,rprx,$features"
           if [[ "${{ matrix.suffix }}" != "-stock" ]]; then
-            features+=,mimalloc
+            features+=,jemalloc
           fi
           echo "FEATURES=$features" >> "$GITHUB_ENV"
 
