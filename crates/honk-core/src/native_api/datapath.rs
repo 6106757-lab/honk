@@ -269,8 +269,13 @@ pub(super) async fn get(
 ) -> Result<Response, ApiError> {
     let full = full_detail(&parse_query(uri, &["detail"], id)?, id)?;
     let (observation, healthy) = {
+        // 6.6 debugging: the panel hangs here, so report which acquisition
+        // never completes. Remove once the blocker is known.
+        tracing::warn!("diag datapath: acquiring config");
         let _config = state.config.read().await;
+        tracing::warn!("diag datapath: config held, acquiring backend");
         let backend = state.backend.read().await;
+        tracing::warn!("diag datapath: backend held, observing");
         (
             backend.observe_datapath(),
             state.healthy.load(Ordering::Acquire),

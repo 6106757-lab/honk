@@ -398,7 +398,11 @@ async fn runtime(state: &NativeState, uri: &Uri, id: &RequestId) -> Result<Respo
         datapath_observation,
         degradations,
     ) = {
+        // 6.6 debugging: the panel's dashboard request never answers, so report
+        // which acquisition blocks. Remove once the blocker is known.
+        tracing::warn!("diag runtime: acquiring config");
         let _config = state.config.read().await;
+        tracing::warn!("diag runtime: config held, acquiring backend");
         let generation = state.diagnostics.read().generation;
         #[cfg(test)]
         {
@@ -416,7 +420,12 @@ async fn runtime(state: &NativeState, uri: &Uri, id: &RequestId) -> Result<Respo
             state.observation.core.activated_at(generation),
             state.observation.configuration.sources.revision(),
             state.observation.configuration.last_reload(),
-            state.backend.read().await.observe_datapath(),
+            {
+                tracing::warn!("diag runtime: acquiring backend");
+                let observation = state.backend.read().await.observe_datapath();
+                tracing::warn!("diag runtime: backend released, observed");
+                observation
+            },
             // Reload updates these under the config writer, like the generation.
             state.observation.degradations.snapshot(),
         )
