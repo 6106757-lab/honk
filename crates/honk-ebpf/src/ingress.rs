@@ -714,9 +714,9 @@ fn do_tproxy_lan_ingress(ctx: &TcContext, link_h_len: u32) -> Verdict {
     let short_lived_udp =
         pkt.l4proto == IPPROTO_UDP && crate::contrack::is_short_lived_udp_traffic(&pkt.tuples.five);
     if pkt.l4proto == IPPROTO_UDP && !short_lived_udp {
-        if let Some(incarnation) =
-            crate::contrack::udp::claim_udp_preparing(&pkt.tuples.five, &pkt.ethh.src_addr)
-        {
+        let incarnation =
+            crate::contrack::udp::claim_udp_preparing(&pkt.tuples.five, &pkt.ethh.src_addr);
+        if incarnation != 0 {
             pkt.incarnation = incarnation;
         } else if let Some(state) = crate::contrack::udp::lookup_udp_seen(&pkt.tuples.five) {
             return cached_udp_decision(ctx, link_h_len, pkt, state);

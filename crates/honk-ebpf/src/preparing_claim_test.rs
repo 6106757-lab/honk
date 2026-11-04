@@ -45,9 +45,10 @@ pub fn preparing_claim_interleaving_test(ctx: *mut __sk_buff) -> c_long {
     let Some(key) = PREPARING_TEST_KEY.get(zero) else {
         return TC_ACT_SHOT;
     };
-    let Some(incarnation) = claim_udp_preparing(key, &[0x02, 0, 0, 0, 0, 1]) else {
+    let incarnation = claim_udp_preparing(key, &[0x02, 0, 0, 0, 0, 1]);
+    if incarnation == 0 {
         return TC_ACT_SHOT;
-    };
+    }
     unsafe {
         (&raw mut (*ctx).cb[1]).write_volatile(incarnation as u32);
         (&raw mut (*ctx).cb[2]).write_volatile((incarnation >> 32) as u32);

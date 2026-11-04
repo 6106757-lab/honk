@@ -27,16 +27,24 @@ const UDP_CONN_STATE_UPDATE_INTERVAL_NS: u64 = 1_000_000_000;
 
 /// Atomically reserve a fresh UDP tuple for this producer, never replacing a hit.
 ///
+/// Returns the fresh incarnation, or 0 on failure (incarnation 0 is
+/// exclusion-only and never a valid allocation).
+///
 /// `#[inline(never)]`: the 80B `FlowMapValue` staging temp otherwise inflates
 /// every caller's frame — `do_tproxy_lan_ingress` sits at the verifier's
 /// 512B combined-stack limit on pre-6.12 kernels, and so does the
-/// `__mark_udp_seen` chain under it.
+/// `__mark_udp_seen` chain under it. The scalar return also keeps the
+/// cross-subprogram ABI single-register: a 16B `Option<u64>` would come back
+/// in the r0:r2 pair, and the pre-6.12 verifier rejects reads of r2 after a
+/// bpf-to-bpf call (`R2 !read_ok`).
 #[inline(never)]
-pub fn claim_udp_preparing(key: &TuplesKey, mac: &[u8; 6]) -> Option<u64> {
+pub fn claim_udp_preparing(key: &TuplesKey, mac: &[u8; 6]) -> u64 {
     if tuple_retiring(key) {
-        return None;
+        return 0;
     }
-    let incarnation = allocate_flow_incarnation()?;
+    let Some(incarnation) = allocate_flow_incarnation() else {
+        return 0;
+    };
     // Field-by-field initialization directly into a `FlowMapValue` (instead of
     // a bulk `mem::zeroed()`): a contiguous constant-zero store run is merged
     // by LLVM into a call to the embedded memset subprogram, whose frame adds
@@ -72,7 +80,7 @@ pub fn claim_udp_preparing(key: &TuplesKey, mac: &[u8; 6]) -> Option<u64> {
         .is_ok()
     {
         occupancy_add(OCCUPANCY_INSERTS);
-        return Some(incarnation);
+        return incarnation;
     }
 
     if CONN_STATE_MAP.get_ptr(key).is_none() {
@@ -94,7 +102,7 @@ pub fn claim_udp_preparing(key: &TuplesKey, mac: &[u8; 6]) -> Option<u64> {
             key.dst_port,
         );
     }
-    None
+    0
 }
 
 /// Publish only the captured unpublished claim; followers cannot complete it.
@@ -335,9 +343,10 @@ fn __mark_udp_seen(
         return core::ptr::null_mut();
     };
     let mac = if args.has_mac() { args.mac } else { [0; 6] };
-    let Some(incarnation) = claim_udp_preparing(key, &mac) else {
+    let incarnation = claim_udp_preparing(key, &mac);
+    if incarnation == 0 {
         return core::ptr::null_mut();
-    };
+    }
     let has_rt = args.has_routing();
     let has_mac = has_rt && args.has_mac();
     let has_pname = has_rt && args.has_pname();
