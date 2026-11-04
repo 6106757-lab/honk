@@ -1,7 +1,7 @@
 use aya_ebpf::Global;
 use aya_ebpf::btf_maps::{
-    Array, ArrayOfMaps, HashMap, LruHashMap, LruPerCpuHashMap, PerCpuArray, RingBuf, SkStorage,
-    SockMap,
+    Array, ArrayOfMaps, HashMap, LruHashMap, LruPerCpuHashMap, PerCpuArray, ProgramArray, RingBuf,
+    SkStorage, SockMap,
 };
 use aya_ebpf::macros::btf_map;
 use honk_ebpf_common::conn::{
@@ -265,6 +265,22 @@ pub static FLOW_EXPIRY_HINT: LruPerCpuHashMap<TuplesKey, FlowExpiryHint, 4096> =
 
 #[btf_map]
 pub static PKT_SCRATCH_KEY: PerCpuArray<ParsedPacket, 1> = PerCpuArray::new();
+
+/// WAN egress L4 handlers, reached only from the classifier through
+/// `bpf_tail_call`. Slot 0 is TCP, slot 1 is UDP; the loader fills both before
+/// any interface is bound.
+///
+/// The split exists for the 6.6 verifier only: instruction and state budgets
+/// are per loaded program, so parsing plus conntrack plus handoff in one
+/// classifier exceeded the shared 1M-insn cap, while the same work split over
+/// three loads stays far below it. No packet decision depends on the boundary.
+#[btf_map]
+pub static WAN_EGRESS_TAIL: ProgramArray<2> = ProgramArray::new();
+
+/// Link header length the classifier measured, handed to the tail-call target.
+/// Per-CPU, so the slot a sender fills is the slot the callee reads.
+#[btf_map]
+pub static WAN_TAIL_LINK_HLEN: PerCpuArray<u32, 1> = PerCpuArray::new();
 
 #[btf_map]
 pub static CONNTRACK_ARGS_MAP: PerCpuArray<crate::contrack::ConntrackArgs, 1> = PerCpuArray::new();

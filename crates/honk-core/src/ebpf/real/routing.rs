@@ -609,6 +609,7 @@ impl RealEbpfBackend {
         loader.override_global("PARAM", &param, true);
         let mut bpf = loader.load(obj)?;
         layout::validate_loaded_maps(&bpf)?;
+        bindings::populate_wan_tails(&mut bpf)?;
         let retirement_grace_inner = retirement::init_retirement_grace(&mut bpf)?;
         let tcp_live_pins = tcp_binding::take_live_pins(&mut bpf)?;
         Ok(Self {

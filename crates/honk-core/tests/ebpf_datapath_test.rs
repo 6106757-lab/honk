@@ -42,6 +42,10 @@ const TC_PROGRAMS: &[&str] = &[
     "wan_egress_l3",
 ];
 
+/// WAN egress jump-table targets, in slot order: 0 = TCP, 1 = UDP. Never
+/// attached to a link; the classifier reaches them with `bpf_tail_call`.
+const WAN_TAIL_PROGRAMS: [&str; 2] = ["wan_egress_tcp_tail", "wan_egress_udp_tail"];
+
 struct Fixture {
     bpf: Ebpf,
     _pin: tempfile::TempDir,
@@ -126,6 +130,34 @@ impl Fixture {
                 .unwrap_or_else(|error| panic!("load TC program {name}: {error}"));
         }
         set_array(&mut bpf, "DATAPATH_STATE_MAP", 0, 1u32).expect("open datapath admission");
+        // Load and install the WAN egress jump-table targets, mirroring the
+        // production loader: an empty slot would make every WAN egress case
+        // fall through as UNSPEC instead of exercising the handler.
+        let mut wan_tails = Vec::new();
+        for (index, name) in WAN_TAIL_PROGRAMS.iter().enumerate() {
+            let program: &mut SchedClassifier = bpf
+                .program_mut(name)
+                .unwrap_or_else(|| panic!("missing TC program {name}"))
+                .try_into()
+                .unwrap_or_else(|error| panic!("{name} is not SCHED_CLS: {error}"));
+            program
+                .load()
+                .unwrap_or_else(|error| panic!("load TC program {name}: {error}"));
+            let fd = program
+                .fd()
+                .expect("loaded program fd")
+                .try_clone()
+                .expect("duplicate program fd");
+            wan_tails.push((index as u32, fd));
+        }
+        {
+            let map = bpf.map_mut("WAN_EGRESS_TAIL").expect("jump table present");
+            let mut table =
+                aya::maps::ProgramArray::try_from(map).expect("jump table map type/layout");
+            for (index, fd) in wan_tails {
+                table.set(index, &fd, 0).expect("install tail-call target");
+            }
+        }
         Self { bpf, _pin: pin }
     }
 

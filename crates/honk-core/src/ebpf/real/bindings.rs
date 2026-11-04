@@ -1,14 +1,14 @@
 //! Single owner of the TCX links on configured interfaces.
 //!
-//! The backend holds the eight preloaded TC program FDs and one owned link per
-//! `(ifindex, direction)`. [`apply`] turns one validated [`InterfacePlan`] into
-//! a [`BindingCommit`] without any lock held: it creates links by interface
-//! index, updates a link in place when the program changes, and proves a
-//! retained link is still on the namespace-local chain with `BPF_PROG_QUERY`
-//! (a link FD alone survives its device being deleted or moved). Aya cannot do
-//! this: `SchedClassifier::attach` resolves the name itself and
-//! `attach_to_link` consumes the old link on failure. Every `unsafe` syscall of
-//! the module is here.
+//! The backend holds the eight preloaded TC program FDs, the two WAN egress
+//! jump-table targets, and one owned link per `(ifindex, direction)`. [`apply`]
+//! turns one validated [`InterfacePlan`] into a [`BindingCommit`] without any
+//! lock held: it creates links by interface index, updates a link in place when
+//! the program changes, and proves a retained link is still on the
+//! namespace-local chain with `BPF_PROG_QUERY` (a link FD alone survives its
+//! device being deleted or moved). Aya cannot do this: `SchedClassifier::attach`
+//! resolves the name itself and `attach_to_link` consumes the old link on
+//! failure. Every `unsafe` syscall of the module is here.
 
 use std::collections::HashMap;
 use std::ffi::c_long;
@@ -19,6 +19,7 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 use anyhow::Context as _;
 use aya::Ebpf;
+use aya::maps::ProgramArray;
 use aya::programs::{ProgramError, SchedClassifier};
 use aya_obj::generated::{
     BPF_F_AFTER, BPF_F_REPLACE, bpf_attach_type, bpf_attr, bpf_cmd, bpf_link_info,
@@ -37,6 +38,12 @@ mod tests;
 /// Kernel mprog chains hold at most 64 programs.
 const CHAIN_CAPACITY: usize = 64;
 
+/// The WAN egress jump table, in slot order: 0 = TCP, 1 = UDP. These programs
+/// are never attached to a link; the classifier reaches them with
+/// `bpf_tail_call`. Each is loaded by its own `BPF_PROG_LOAD` and therefore
+/// gets its own verifier instruction budget.
+const WAN_TAIL_PROGRAMS: [&str; 2] = ["wan_egress_tcp_tail", "wan_egress_udp_tail"];
+
 type Key = (NonZeroU32, Direction);
 
 #[derive(Default)]
@@ -52,31 +59,12 @@ impl InterfaceBindings {
     pub(super) fn preload(bpf: &mut Ebpf) -> anyhow::Result<Self> {
         let mut programs = Vec::with_capacity(TcProgram::ALL.len());
         for program in TcProgram::ALL {
-            let name = program.name();
-            let classifier: &mut SchedClassifier = bpf
-                .program_mut(name)
-                .ok_or_else(|| anyhow::anyhow!("TC program '{name}' not found"))?
-                .try_into()?;
-            match classifier.load() {
-                Ok(()) | Err(ProgramError::AlreadyLoaded) => {}
-                Err(error) => {
-                    // 6.6 debugging: persist the full verifier log. The kernel
-                    // log for a large classifier can be tens of MB, far past
-                    // what a syslog line can carry.
-                    if let ProgramError::LoadError { verifier_log, .. } = &error {
-                        let _ =
-                            std::fs::write("/tmp/honk_vlog.txt", verifier_log.to_string());
-                    }
-                    anyhow::bail!("load TC program '{name}': {error}")
-                }
-            }
-            let fd = classifier
-                .fd()?
-                .as_fd()
-                .try_clone_to_owned()
-                .with_context(|| format!("duplicate TC program '{name}' fd"))?;
-            programs.push((program, fd));
+            programs.push((program, load_tc_program(bpf, program.name())?));
         }
+        // Every classifier that jumps through WAN_EGRESS_TAIL must be loaded
+        // before the table is filled; the reverse order would leave a jump to
+        // an empty slot.
+        populate_wan_tails(bpf)?;
         Ok(Self {
             programs,
             owned: Vec::new(),
@@ -116,6 +104,61 @@ impl InterfaceBindings {
     pub(super) fn release(&mut self) {
         self.owned.clear();
     }
+}
+
+/// Load one TC program and return a dup of its program FD, so no
+/// `BPF_PROG_LOAD` (and no verifier run) happens while reconciling.
+fn load_tc_program(bpf: &mut Ebpf, name: &str) -> anyhow::Result<OwnedFd> {
+    let classifier: &mut SchedClassifier = bpf
+        .program_mut(name)
+        .ok_or_else(|| anyhow::anyhow!("TC program '{name}' not found"))?
+        .try_into()?;
+    match classifier.load() {
+        Ok(()) | Err(ProgramError::AlreadyLoaded) => {}
+        Err(error) => {
+            // 6.6 debugging: persist the full verifier log. The kernel log for
+            // a large classifier can be tens of MB, far past what a syslog
+            // line can carry.
+            if let ProgramError::LoadError { verifier_log, .. } = &error {
+                let _ = std::fs::write("/tmp/honk_vlog.txt", verifier_log.to_string());
+            }
+            anyhow::bail!("load TC program '{name}': {error}")
+        }
+    }
+    classifier
+        .fd()?
+        .as_fd()
+        .try_clone_to_owned()
+        .with_context(|| format!("duplicate TC program '{name}' fd"))
+}
+
+/// Load the WAN egress jump-table targets and fill `WAN_EGRESS_TAIL`.
+///
+/// A table entry is the only strong reference to a tail-call program, so this
+/// must run after the target programs are loaded and before any classifier
+/// reaches the table at run time.
+pub(super) fn populate_wan_tails(bpf: &mut Ebpf) -> anyhow::Result<()> {
+    let mut slots = Vec::with_capacity(WAN_TAIL_PROGRAMS.len());
+    for (index, name) in WAN_TAIL_PROGRAMS.iter().enumerate() {
+        load_tc_program(bpf, name)?;
+        let classifier: &SchedClassifier = bpf
+            .program(name)
+            .ok_or_else(|| anyhow::anyhow!("TC program '{name}' not found"))?
+            .try_into()?;
+        // Cloned so the table can borrow the map while the entry still holds
+        // the fd it points at.
+        slots.push((index as u32, classifier.fd()?.try_clone()?));
+    }
+    let map = bpf
+        .map_mut("WAN_EGRESS_TAIL")
+        .ok_or_else(|| anyhow::anyhow!("required WAN_EGRESS_TAIL map not found"))?;
+    let mut tail = ProgramArray::try_from(map)
+        .map_err(|error| anyhow::anyhow!("required WAN_EGRESS_TAIL open: {error}"))?;
+    for (index, fd) in slots {
+        tail.set(index, &fd, 0)
+            .map_err(|error| anyhow::anyhow!("WAN_EGRESS_TAIL[{index}]: {error}"))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]

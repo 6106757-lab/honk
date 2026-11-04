@@ -31,7 +31,7 @@ use crate::{
     },
     maps::{
         OUTBOUND_CONNECTIVITY_MAP, PARAM, PKT_SCRATCH_KEY, ROUTING_HANDOFF_MAP,
-        UDP_DECISION_SCRATCH_MAP, increment_bpf_stat,
+        UDP_DECISION_SCRATCH_MAP, WAN_EGRESS_TAIL, WAN_TAIL_LINK_HLEN, increment_bpf_stat,
     },
     route::{OUTBOUND_BLOCK, OUTBOUND_DIRECT},
     socket_identity,
@@ -839,19 +839,37 @@ fn do_tproxy_wan_egress(ctx: &TcContext, link_h_len: u32) -> Verdict {
     if pkt.l4proto != IPPROTO_TCP && crate::contrack::tuple_unavailable(&pkt.tuples.five) {
         return Err(TC_ACT_SHOT);
     }
-    let mut tcp_publisher = crate::contrack::tcp::TcpPublisher::new(&pkt.tuples.five);
-    if pkt.l4proto == IPPROTO_TCP && is_new_tcp_connection(&pkt.tcph) {
-        if !tcp_publisher.acquire(ctx, &pkt.tcph) {
-            return Err(TC_ACT_SHOT);
-        }
-        pkt.incarnation = tcp_publisher.incarnation;
-    }
 
+    // The L4 handlers are separate programs behind a jump table. On 6.6 the
+    // instruction and state budgets belong to one loaded program, and parse +
+    // conntrack + handoff for both transports in a single classifier measured
+    // 50777 verifier states against a 1M-insn cap. Splitting costs one helper
+    // call per packet and changes no decision: the TCP publisher claim and the
+    // fragment verdict moved with the code they belong to.
     match pkt.l4proto {
-        IPPROTO_TCP => do_tproxy_wan_egress_tcp(ctx, link_h_len, pkt, &tcp_publisher),
-        IPPROTO_UDP => do_tproxy_wan_egress_udp(ctx, link_h_len, pkt),
+        IPPROTO_TCP => wan_tail_call(ctx, WAN_TAIL_TCP, link_h_len),
+        IPPROTO_UDP => wan_tail_call(ctx, WAN_TAIL_UDP, link_h_len),
         _ => Ok(TC_ACT_UNSPEC),
     }
+}
+
+/// Jump-table slots of [`WAN_EGRESS_TAIL`].
+const WAN_TAIL_TCP: u32 = 0;
+const WAN_TAIL_UDP: u32 = 1;
+
+/// Hand an admitted, parsed packet to its L4 handler program.
+///
+/// `bpf_tail_call` only returns when the slot is empty or the call budget is
+/// exhausted. The loader fills both slots before any interface is bound, so a
+/// return here means the table is wrong; the packet is then left on the native
+/// path instead of being black-holed.
+#[inline(always)]
+fn wan_tail_call(ctx: &TcContext, index: u32, link_h_len: u32) -> Verdict {
+    if let Some(slot) = WAN_TAIL_LINK_HLEN.get_ptr_mut(0) {
+        unsafe { slot.write_volatile(link_h_len) };
+    }
+    unsafe { WAN_EGRESS_TAIL.tail_call(ctx, index) };
+    Err(TC_ACT_UNSPEC)
 }
 
 // TC entry points use raw __sk_buff pointer for verifier compatibility.
@@ -884,4 +902,64 @@ pub fn wan_egress_l3(ctx: *mut __sk_buff) -> i32 {
     let ctx = TcContext::new(ctx);
     let link_h_len = crate::transport::l3_link_h_len(&ctx);
     crate::fragment::record(flatten(do_tproxy_wan_egress(&ctx, link_h_len)))
+}
+
+/// The link header length the classifier measured for this packet.
+///
+/// A tail call starts a fresh verifier state, so the value cannot ride in a
+/// register; it is per-CPU and written immediately before the jump.
+#[inline(always)]
+fn wan_tail_link_h_len() -> Option<u32> {
+    WAN_TAIL_LINK_HLEN.get(0).copied()
+}
+
+/// WAN egress TCP handler, entered from the classifier's jump table.
+///
+/// Everything up to the parse, every admission rule, and the transport choice
+/// already ran in the classifier; `PKT_SCRATCH_KEY` carries the parsed packet
+/// across the jump.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "classifier")]
+pub fn wan_egress_tcp_tail(ctx: *mut __sk_buff) -> i32 {
+    let ctx = TcContext::new(ctx);
+    crate::fragment::record(flatten(do_wan_egress_tcp_tail(&ctx)))
+}
+
+#[inline(always)]
+fn do_wan_egress_tcp_tail(ctx: &TcContext) -> Verdict {
+    let Some(link_h_len) = wan_tail_link_h_len() else {
+        return Err(TC_ACT_UNSPEC);
+    };
+    let Some(pkt) = PKT_SCRATCH_KEY.get_ptr_mut(0) else {
+        return Err(TC_ACT_SHOT);
+    };
+    let pkt = unsafe { &mut *pkt };
+
+    let mut publisher = crate::contrack::tcp::TcpPublisher::new(&pkt.tuples.five);
+    if is_new_tcp_connection(&pkt.tcph) {
+        if !publisher.acquire(ctx, &pkt.tcph) {
+            return Err(TC_ACT_SHOT);
+        }
+        pkt.incarnation = publisher.incarnation;
+    }
+    do_tproxy_wan_egress_tcp(ctx, link_h_len, pkt, &publisher)
+}
+
+/// WAN egress UDP handler, entered from the classifier's jump table.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "classifier")]
+pub fn wan_egress_udp_tail(ctx: *mut __sk_buff) -> i32 {
+    let ctx = TcContext::new(ctx);
+    crate::fragment::record(flatten(do_wan_egress_udp_tail(&ctx)))
+}
+
+#[inline(always)]
+fn do_wan_egress_udp_tail(ctx: &TcContext) -> Verdict {
+    let Some(link_h_len) = wan_tail_link_h_len() else {
+        return Err(TC_ACT_UNSPEC);
+    };
+    let Some(pkt) = PKT_SCRATCH_KEY.get_ptr_mut(0) else {
+        return Err(TC_ACT_SHOT);
+    };
+    do_tproxy_wan_egress_udp(ctx, link_h_len, unsafe { &mut *pkt })
 }
