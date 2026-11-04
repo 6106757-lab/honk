@@ -34,6 +34,17 @@ pub const IPPROTO_FRAGMENT: u8 = 44;
 pub const IPPROTO_DSTOPTS: u8 = 60;
 pub const IPV6_MAX_EXTENSIONS: usize = 8;
 
+/// Opaque trip count for the IPv6 extension-header walks. A constant bound
+/// lets LLVM fully unroll the walk, multiplying the per-iteration `nexthdr`
+/// branches into a verifier state explosion (the 1M-insn cap on 6.6). The
+/// volatile load keeps the bound runtime-opaque so the walk stays a loop and
+/// its states merge at the latch.
+#[inline(never)]
+fn ipv6_max_extensions() -> usize {
+    let n = IPV6_MAX_EXTENSIONS;
+    unsafe { core::ptr::read_volatile(&n) }
+}
+
 /// True for IPv6 extension headers (hop-by-hop, routing, fragment, destination options).
 #[inline(always)]
 pub fn is_extension_header(nexthdr: u8) -> bool {
@@ -194,7 +205,7 @@ pub fn udp_has_quic_long_header(ctx: &TcContext, link_h_len: u32, pkt: &ParsedPa
         }
         offset += mem::size_of::<Ipv6Hdr>() as u32;
 
-        for _ in 0..IPV6_MAX_EXTENSIONS {
+        for _ in 0..ipv6_max_extensions() {
             if nexthdr == IPPROTO_UDP {
                 break;
             }
@@ -402,7 +413,7 @@ impl ParseTransportExt for ParseTransportCtx {
             self.ihl = (mem::size_of::<Ipv6Hdr>() / 4) as u8;
             let mut nexthdr = self.ipv6h.next_hdr;
 
-            for _ in 0..IPV6_MAX_EXTENSIONS {
+            for _ in 0..ipv6_max_extensions() {
                 if nexthdr == IPPROTO_NONE {
                     return Err(ERR_MALFORMED);
                 }
@@ -608,7 +619,7 @@ impl ParseTransportExt for ParseTransportCtx {
 
             let mut nexthdr = ipv6h.next_hdr;
 
-            for _ in 0..IPV6_MAX_EXTENSIONS {
+            for _ in 0..ipv6_max_extensions() {
                 if nexthdr == IPPROTO_NONE {
                     return Err(ERR_MALFORMED);
                 }
