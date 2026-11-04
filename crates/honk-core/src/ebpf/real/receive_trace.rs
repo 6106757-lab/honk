@@ -276,7 +276,7 @@ impl ReceiveTrace {
         // The candidate hook decides the flavour: only the probe spelling stages the
         // socket argument, so a tracing family next to a probe candidate would leave
         // every candidate invalid. Keep the whole trace on one mechanism.
-        let probes_only = matches!(candidate, CandidateHook::Probe);
+        let probes_only = matches!(candidate, CandidateHook::Probe(_));
         let ipv4 = attach_family(bpf, btf, ipv4, probes_only);
         let ipv6 = attach_family(bpf, btf, ipv6, probes_only);
         if let (Err(ipv4), Err(ipv6)) = (&ipv4, &ipv6) {
