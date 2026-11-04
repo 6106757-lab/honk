@@ -95,7 +95,7 @@ unsafe fn copy_packet_chunks(dst: *mut u8, src: *const u8, bytes: usize) {
     }
     if bytes - off >= 2 {
         ((d as *mut u8).add(off) as *mut u16)
-            .write_unaligned((s as *const u8).add(off) as *mut u16);
+            .write_unaligned(((s as *const u8).add(off) as *const u16).read_unaligned());
         off += 2;
     }
     if bytes > off {
