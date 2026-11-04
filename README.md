@@ -46,7 +46,7 @@ Download a prebuilt archive from [this fork's Releases](https://github.com/61067
 | `native-api` | Yes | No | No |
 | `clash-api` | No | Yes | No |
 
-Every build comes as a static musl binary; `full` also comes linked against glibc (`gnu`). Archives with `stock` in the name use the system allocator instead of mimalloc. Each release's Downloads section lists checksums and provenance.
+Every build comes as a static musl binary; `full` also comes linked against glibc (`gnu`). Archives with `stock` in the name use the system allocator instead of jemalloc. Each release's Downloads section lists checksums and provenance.
 
 For OpenWrt, use the [daeuniverse package feed](https://openwrt.daeuniverse.org/en/).
 

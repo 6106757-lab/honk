@@ -120,9 +120,9 @@ jobs:
           echo "HONK_DOONA_DIR=$dir" >> "$GITHUB_ENV"
 
       # The full variant is what this fork deploys: eBPF offload plus the
-      # clash API and the embedded UI, on mimalloc.
+      # clash API and the embedded UI, on jemalloc.
       - name: Resolve feature set
-        run: echo "FEATURES=ebpf,rprx,clash-api,native-ui,mimalloc" >> "$GITHUB_ENV"
+        run: echo "FEATURES=ebpf,rprx,clash-api,native-ui,jemalloc" >> "$GITHUB_ENV"
 
       - name: Build honk-core (cross via zig wrappers)
         run: |
