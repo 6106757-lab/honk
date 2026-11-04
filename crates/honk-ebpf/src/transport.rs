@@ -34,6 +34,14 @@ pub const IPPROTO_FRAGMENT: u8 = 44;
 pub const IPPROTO_DSTOPTS: u8 = 60;
 pub const IPV6_MAX_EXTENSIONS: usize = 8;
 
+/// Upper bound for a walked IPv6 extension-header chain. Real chains are a
+/// few tens of bytes; the bound also converges the verifier: without it the
+/// per-iteration offset range keeps widening (fragment steps are +8 exact,
+/// extension steps +8..2048 ranges) and latch states never merge, which
+/// alone blew the 6.6 verifier's 1M-insn cap. Oversized chains take the
+/// same MALFORMED path a >8-header chain already took.
+pub const IPV6_EXT_CHAIN_MAX: u32 = 512;
+
 /// Opaque trip count for the IPv6 extension-header walks. A constant bound
 /// lets LLVM fully unroll the walk, multiplying the per-iteration `nexthdr`
 /// branches into a verifier state explosion (the 1M-insn cap on 6.6). The
@@ -264,6 +272,9 @@ pub fn udp_has_quic_long_header(ctx: &TcContext, link_h_len: u32, pkt: &ParsedPa
         offset += mem::size_of::<Ipv6Hdr>() as u32;
 
         for _ in 0..ipv6_max_extensions() {
+            if offset > IPV6_EXT_CHAIN_MAX {
+                return false;
+            }
             if nexthdr == IPPROTO_UDP {
                 break;
             }
@@ -446,6 +457,9 @@ impl ParseTransportExt for ParseTransportCtx {
             let mut nexthdr = self.ipv6h.next_hdr;
 
             for _ in 0..ipv6_max_extensions() {
+                if offset > IPV6_EXT_CHAIN_MAX {
+                    return Err(ERR_MALFORMED);
+                }
                 if nexthdr == IPPROTO_NONE {
                     return Err(ERR_MALFORMED);
                 }
@@ -646,6 +660,9 @@ impl ParseTransportExt for ParseTransportCtx {
             let mut nexthdr = ipv6h.next_hdr;
 
             for _ in 0..ipv6_max_extensions() {
+                if offset > IPV6_EXT_CHAIN_MAX {
+                    return Err(ERR_MALFORMED);
+                }
                 if nexthdr == IPPROTO_NONE {
                     return Err(ERR_MALFORMED);
                 }
