@@ -68,13 +68,15 @@ CONFIG_NETFILTER_NETLINK_QUEUE=y|m
 2. 未设置覆盖路径时，读取 `/sys/kernel/btf/vmlinux`。
 3. 前一默认路径不可读时，读取 `/usr/lib/debug/boot/vmlinux`。OpenWrt 的 `vmlinux-btf` 包将文件安装在此处。
 
-只有可选的 `native-api` UDP 接收追踪回退（UDP 接收优先级辅助元数据不可用时使用）会挂载 fentry/fexit 程序。它需要内核自带 BTF（`HONK_VMLINUX_BTF` 不能替代）与 ftrace，缺少时降级运行：
+只有可选的 `native-api` UDP 接收追踪回退（UDP 接收优先级辅助元数据不可用时使用）会挂载 kprobe/kretprobe 程序。它需要内核自带 BTF（`HONK_VMLINUX_BTF` 不能替代）与 kprobe PMU，缺少时降级运行：
 
 ```text
 CONFIG_DEBUG_INFO_BTF=y
-CONFIG_FUNCTION_TRACER=y
-CONFIG_DYNAMIC_FTRACE=y
+CONFIG_KPROBES=y
+CONFIG_PERF_EVENTS=y
 ```
+
+之所以用探针而不用 fentry/fexit，是因为路由器内核普遍关闭了函数跟踪器；可用 `cat /sys/kernel/debug/tracing/available_tracers`（输出只有 `nop` 即表示 ftrace 挂钩不可用）与 `ls /sys/bus/event_source/devices/kprobe` 自查。
 
 `udp_recvmsg` 或 `udpv6_recvmsg` hook 缺失或不兼容时，只禁用对应套接字地址族的回退机制；两个地址族都依赖共享的 `__skb_recv_udp` hook。回退机制部分成功或失败后，不会在监听器重载时重试；修改内核/BTF 支持后需重启。见[接收追踪所有权](./design/control-plane.md#启动与关闭)。
 

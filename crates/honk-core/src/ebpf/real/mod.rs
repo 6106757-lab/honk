@@ -834,9 +834,7 @@ impl EbpfBackend for RealEbpfBackend {
                     "kernel UDP trace unavailable: checked BTF offsets missing"
                 );
             } else {
-                let result = btf::load_kernel().and_then(|(_, kernel_btf)| {
-                    receive_trace::ReceiveTrace::attach(self.bpf_mut()?, &kernel_btf)
-                });
+                let result = self.bpf_mut().and_then(receive_trace::ReceiveTrace::attach);
                 match result {
                     Ok(trace) => self.receive_trace = Some(trace),
                     Err(error) => warn!(

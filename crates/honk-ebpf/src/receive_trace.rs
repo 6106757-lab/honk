@@ -3,9 +3,9 @@
 use aya_ebpf::{
     Global,
     helpers::{bpf_get_current_pid_tgid, bpf_probe_read_kernel},
-    macros::{fentry, fexit, map},
+    macros::{kprobe, kretprobe, map},
     maps::HashMap,
-    programs::{FEntryContext, FExitContext},
+    programs::{ProbeContext, RetProbeContext},
 };
 use honk_ebpf_common::receive_trace::{
     RECEIVE_TRACE_BATCH_SIZE, RECEIVE_TRACE_SOCKETS, RECEIVE_TRACE_VALID, ReceiveTraceBatch,
@@ -92,33 +92,42 @@ fn exit(sk: *const u8, result: Result<i32, i32>) {
     batch.candidate.valid = 0;
 }
 
-#[fentry]
-pub fn honk_udp_receive_enter(ctx: FEntryContext) -> u32 {
-    enter(ctx.arg(0), ctx.arg(3));
+#[kprobe]
+pub fn honk_udp_receive_enter(ctx: ProbeContext) -> u32 {
+    let Some(sk) = ctx.arg::<*const u8>(0) else {
+        return 0;
+    };
+    enter(sk, ctx.arg::<i32>(3).unwrap_or(0));
     0
 }
 
-#[fentry]
-pub fn honk_udp6_receive_enter(ctx: FEntryContext) -> u32 {
-    enter(ctx.arg(0), ctx.arg(3));
+#[kprobe]
+pub fn honk_udp6_receive_enter(ctx: ProbeContext) -> u32 {
+    let Some(sk) = ctx.arg::<*const u8>(0) else {
+        return 0;
+    };
+    enter(sk, ctx.arg::<i32>(3).unwrap_or(0));
     0
 }
 
-#[fexit]
-pub fn honk_udp_receive_exit(ctx: FExitContext) -> u32 {
-    exit(ctx.arg(0), ctx.ret());
+#[kretprobe]
+pub fn honk_udp_receive_exit(ctx: RetProbeContext) -> u32 {
+    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
+    exit(sk, Ok(ctx.ret::<i32>()));
     0
 }
 
-#[fexit]
-pub fn honk_udp6_receive_exit(ctx: FExitContext) -> u32 {
-    exit(ctx.arg(0), ctx.ret());
+#[kretprobe]
+pub fn honk_udp6_receive_exit(ctx: RetProbeContext) -> u32 {
+    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
+    exit(sk, Ok(ctx.ret::<i32>()));
     0
 }
 
-#[fexit]
-pub fn honk_udp_receive_candidate(ctx: FExitContext) -> u32 {
-    let Some(ptr) = state(ctx.arg(0)) else {
+#[kretprobe]
+pub fn honk_udp_receive_candidate(ctx: RetProbeContext) -> u32 {
+    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
+    let Some(ptr) = state(sk) else {
         return 0;
     };
     let batch = unsafe { &mut *ptr };
@@ -128,9 +137,7 @@ pub fn honk_udp_receive_candidate(ctx: FExitContext) -> u32 {
     }
     // A checksum-discarded candidate is overwritten by the next helper return.
     batch.candidate.valid = 0;
-    let Ok(skb) = ctx.ret::<*const u8>() else {
-        return 0;
-    };
+    let skb = ctx.ret::<*const u8>();
     if skb.is_null() || skb as usize >= usize::MAX - 4095 {
         return 0;
     }

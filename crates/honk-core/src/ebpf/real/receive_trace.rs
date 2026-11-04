@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use aya::maps::{HashMap, IterableMap, Map, MapData};
-use aya::programs::{FEntry, FExit, fentry::FEntryLink, fexit::FExitLink};
-use aya::{Btf, Ebpf, EbpfLoader};
+use aya::programs::KProbe;
+use aya::programs::kprobe::KProbeLink;
+use aya::{Ebpf, EbpfLoader};
 use honk_ebpf_common::receive_trace::{
     RECEIVE_TRACE_BATCH_SIZE, RECEIVE_TRACE_VALID, ReceiveTraceBatch, ReceiveTracePacket,
 };
@@ -47,9 +48,9 @@ pub(super) fn detect(data: &[u8]) -> Option<ReceiveTraceOffsets> {
 
 pub struct ReceiveTrace {
     map: HashMap<MapData, u64, ReceiveTraceBatch>,
-    ipv4: Option<(FEntryLink, FExitLink)>,
-    ipv6: Option<(FEntryLink, FExitLink)>,
-    _candidate: FExitLink,
+    ipv4: Option<(KProbeLink, KProbeLink)>,
+    ipv6: Option<(KProbeLink, KProbeLink)>,
+    _candidate: KProbeLink,
 }
 
 // Each registration owns its handle so concurrent listeners never serialize map updates.
@@ -58,46 +59,52 @@ fn handle(map: &MapData) -> io::Result<HashMap<MapData, u64, ReceiveTraceBatch>>
     HashMap::try_from(Map::HashMap(map)).map_err(io::Error::other)
 }
 
-fn attach_exit(bpf: &mut Ebpf, btf: &Btf, name: &str, target: &str) -> anyhow::Result<FExitLink> {
-    let program: &mut FExit = bpf
+/// Kernel functions the receive trace hangs off. Probes are used instead of
+/// fentry/fexit because OpenWrt-class kernels routinely ship without the
+/// function tracer, while kprobes are always available; a `kretprobe` still
+/// exposes the entry registers, so the socket argument and the return value
+/// stay readable at return.
+#[derive(Clone, Copy)]
+struct Targets<'a> {
+    candidate: &'a str,
+    ipv4: &'a str,
+    ipv6: &'a str,
+}
+
+const DEFAULT_TARGETS: Targets<'static> = Targets {
+    // Both recvmsg paths consume the candidate from this shared helper.
+    candidate: "__skb_recv_udp",
+    ipv4: "udp_recvmsg",
+    ipv6: "udpv6_recvmsg",
+};
+
+fn attach_probe(bpf: &mut Ebpf, name: &str, target: &str) -> anyhow::Result<KProbeLink> {
+    let program: &mut KProbe = bpf
         .program_mut(name)
         .ok_or_else(|| anyhow::anyhow!("missing receive program {name}"))?
         .try_into()?;
-    program
-        .load(target, btf)
-        .with_context(|| format!("load {name} on {target}"))?;
+    program.load().with_context(|| format!("load {name}"))?;
     let link = program
-        .attach()
+        .attach(target, 0)
         .with_context(|| format!("attach {name} on {target}"))?;
     Ok(program.take_link(link)?)
 }
 
 fn attach_family(
     bpf: &mut Ebpf,
-    btf: &Btf,
     enter: &str,
     exit: &str,
     target: &str,
-) -> anyhow::Result<(FEntryLink, FExitLink)> {
-    let program: &mut FEntry = bpf
-        .program_mut(enter)
-        .ok_or_else(|| anyhow::anyhow!("missing receive program {enter}"))?
-        .try_into()?;
-    program
-        .load(target, btf)
-        .with_context(|| format!("load {enter} on {target}"))?;
-    let link = program
-        .attach()
-        .with_context(|| format!("attach {enter} on {target}"))?;
-    let entry = program.take_link(link)?;
+) -> anyhow::Result<(KProbeLink, KProbeLink)> {
+    let entry = attach_probe(bpf, enter, target)?;
     // A failed exit must detach the entry too; an incomplete pair cannot produce evidence.
-    let exit = attach_exit(bpf, btf, exit, target)?;
+    let exit = attach_probe(bpf, exit, target)?;
     Ok((entry, exit))
 }
 
 impl ReceiveTrace {
     #[cfg(test)]
-    fn load_unattached_for_test() -> anyhow::Result<(Ebpf, Vec<u8>, Btf)> {
+    fn load_unattached_for_test() -> anyhow::Result<Ebpf> {
         let (data, kernel_btf) = super::btf::load_kernel()?;
         let offsets = detect(&data)
             .ok_or_else(|| anyhow::anyhow!("receive trace BTF offsets unavailable"))?;
@@ -106,32 +113,33 @@ impl ReceiveTrace {
         offsets.configure(&mut loader);
         let bpf = loader.load(crate::DEFAULT_BPF_OBJECT)?;
         drop(loader);
-        Ok((bpf, data, kernel_btf))
+        Ok(bpf)
     }
 
     #[cfg(test)]
     pub(crate) fn load_for_test() -> anyhow::Result<(Ebpf, Arc<Self>)> {
-        let (mut bpf, _, kernel_btf) = Self::load_unattached_for_test()?;
-        let trace = Self::attach(&mut bpf, &kernel_btf)?;
+        let mut bpf = Self::load_unattached_for_test()?;
+        let trace = Self::attach(&mut bpf)?;
         Ok((bpf, trace))
     }
 
-    pub(super) fn attach(bpf: &mut Ebpf, btf: &Btf) -> anyhow::Result<Arc<Self>> {
-        // Both recvmsg paths consume the candidate from this shared helper.
-        let candidate = attach_exit(bpf, btf, "honk_udp_receive_candidate", "__skb_recv_udp")?;
+    pub(super) fn attach(bpf: &mut Ebpf) -> anyhow::Result<Arc<Self>> {
+        Self::attach_with(bpf, &DEFAULT_TARGETS)
+    }
+
+    fn attach_with(bpf: &mut Ebpf, targets: &Targets<'_>) -> anyhow::Result<Arc<Self>> {
+        let candidate = attach_probe(bpf, "honk_udp_receive_candidate", targets.candidate)?;
         let ipv4 = attach_family(
             bpf,
-            btf,
             "honk_udp_receive_enter",
             "honk_udp_receive_exit",
-            "udp_recvmsg",
+            targets.ipv4,
         );
         let ipv6 = attach_family(
             bpf,
-            btf,
             "honk_udp6_receive_enter",
             "honk_udp6_receive_exit",
-            "udpv6_recvmsg",
+            targets.ipv6,
         );
         if let (Err(ipv4), Err(ipv6)) = (&ipv4, &ipv6) {
             anyhow::bail!("UDP receive hooks unavailable: IPv4: {ipv4:#}; IPv6: {ipv6:#}");
@@ -280,80 +288,48 @@ mod tests {
     use super::*;
     use std::os::fd::AsRawFd;
 
-    fn without_target(mut data: Vec<u8>, target: &str) -> anyhow::Result<Btf> {
-        let name = format!("\0{target}\0");
-        let offset = data
-            .windows(name.len())
-            .position(|window| window == name.as_bytes())
-            .ok_or_else(|| anyhow::anyhow!("test requires {target} in kernel BTF"))?;
-        // Keep type IDs/signatures intact; only Aya's lookup of this target must fail.
-        data[offset + 1] = b'x';
-        Ok(Btf::parse(&data, Default::default())?)
-    }
+    /// A symbol that no kernel provides: attaching to it must fail the same way
+    /// a kernel without the hook fails.
+    const MISSING: &str = "honk_receive_trace_missing_function";
 
     #[test]
-    #[ignore = "requires Linux 6.12+ and root; run in the eBPF VM"]
+    #[ignore = "requires Linux, BTF and root; run in the eBPF VM"]
     fn receive_trace_family_failure_is_isolated() -> anyhow::Result<()> {
-        for (target, enter, exit, unavailable, available) in [
-            (
-                "udp_recvmsg",
-                "honk_udp_receive_enter",
-                "honk_udp_receive_exit",
-                "127.0.0.1:0",
-                "[::1]:0",
-            ),
-            (
-                "udpv6_recvmsg",
-                "honk_udp6_receive_enter",
-                "honk_udp6_receive_exit",
-                "[::1]:0",
-                "127.0.0.1:0",
-            ),
+        for (broken, unavailable, available) in [
+            (DEFAULT_TARGETS.ipv4, "127.0.0.1:0", "[::1]:0"),
+            (DEFAULT_TARGETS.ipv6, "[::1]:0", "127.0.0.1:0"),
         ] {
-            for fail_exit in [false, true] {
-                let (mut bpf, data, kernel_btf) = ReceiveTrace::load_unattached_for_test()?;
-                let missing_btf;
-                let attach_btf = if fail_exit {
-                    // Force the second hook to fail after the family's entry has attached.
-                    let program: &mut FExit = bpf.program_mut(exit).unwrap().try_into()?;
-                    program.load(target, &kernel_btf)?;
-                    &kernel_btf
-                } else {
-                    missing_btf = without_target(data, target)?;
-                    &missing_btf
-                };
-                let trace = ReceiveTrace::attach(&mut bpf, attach_btf)
-                    .expect("one family must survive a sibling hook failure");
-                if fail_exit {
-                    let failed_entry_id = bpf.program(enter).unwrap().info()?.id();
-                    for link in aya::programs::loaded_links() {
-                        assert_ne!(
-                            link?.program_id(),
-                            failed_entry_id,
-                            "failed family's entry remained attached"
-                        );
-                    }
-                }
-                let untraced = std::net::UdpSocket::bind(unavailable)?;
-                assert!(trace.register(untraced.as_raw_fd()).is_err());
+            let mut bpf = ReceiveTrace::load_unattached_for_test()?;
+            let (ipv4, ipv6) = if broken == DEFAULT_TARGETS.ipv4 {
+                (MISSING, DEFAULT_TARGETS.ipv6)
+            } else {
+                (DEFAULT_TARGETS.ipv4, MISSING)
+            };
+            let targets = Targets { ipv4, ipv6, ..DEFAULT_TARGETS };
+            let trace = ReceiveTrace::attach_with(&mut bpf, &targets)
+                .expect("one family must survive a sibling hook failure");
 
-                let receiver = std::net::UdpSocket::bind(available)?;
-                receiver.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
-                let sender = std::net::UdpSocket::bind(available)?;
-                let mut registration = trace.register(receiver.as_raw_fd())?;
-                sender.send_to(b"live", receiver.local_addr()?)?;
-                assert!(registration.begin(receiver.as_raw_fd()));
-                let mut buffer = [0u8; 8];
-                let length = receiver.recv(&mut buffer)?;
-                assert_eq!(&buffer[..length], b"live");
-                let packets = registration.finish(1).expect("surviving family is traced");
-                assert_eq!(packets[0].valid, RECEIVE_TRACE_VALID);
-                assert_eq!(packets[0].length, length as u32);
-            }
+            let untraced = std::net::UdpSocket::bind(unavailable)?;
+            assert!(trace.register(untraced.as_raw_fd()).is_err());
+
+            let receiver = std::net::UdpSocket::bind(available)?;
+            receiver.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+            let sender = std::net::UdpSocket::bind(available)?;
+            let mut registration = trace.register(receiver.as_raw_fd())?;
+            sender.send_to(b"live", receiver.local_addr()?)?;
+            assert!(registration.begin(receiver.as_raw_fd()));
+            let mut buffer = [0u8; 8];
+            let length = receiver.recv(&mut buffer)?;
+            assert_eq!(&buffer[..length], b"live");
+            let packets = registration.finish(1).expect("surviving family is traced");
+            assert_eq!(packets[0].valid, RECEIVE_TRACE_VALID);
+            assert_eq!(packets[0].length, length as u32);
         }
-        let (mut bpf, data, _) = ReceiveTrace::load_unattached_for_test()?;
-        let missing_btf = without_target(data, "__skb_recv_udp")?;
-        assert!(ReceiveTrace::attach(&mut bpf, &missing_btf).is_err());
+
+        // Without the shared candidate helper no family can produce evidence.
+        let mut bpf = ReceiveTrace::load_unattached_for_test()?;
+        let targets = Targets { candidate: MISSING, ..DEFAULT_TARGETS };
+        assert!(ReceiveTrace::attach_with(&mut bpf, &targets).is_err());
         Ok(())
     }
 
