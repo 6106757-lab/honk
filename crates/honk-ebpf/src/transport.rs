@@ -789,9 +789,26 @@ pub fn parse_packet(ctx: &TcContext, link_h_len: u32, out: &mut ParsedPacket) ->
     }
 
     // Miss-only routing scratch must not add clearing work to cached packets.
-    out.ethh = tctx.ethh;
-    out.tcph = tctx.tcph;
-    out.udph = tctx.udph;
+    // Map-to-map struct assignments compile to byte loops whose per-iteration
+    // offsets are distinct verifier states on 6.6; chunk them like the packet
+    // reads above.
+    unsafe {
+        copy_packet_chunks(
+            &mut out.ethh as *mut _ as *mut u8,
+            &tctx.ethh as *const _ as *const u8,
+            mem::size_of::<EthHdr>(),
+        );
+        copy_packet_chunks(
+            &mut out.tcph as *mut _ as *mut u8,
+            &tctx.tcph as *const _ as *const u8,
+            mem::size_of::<TcpHdr>(),
+        );
+        copy_packet_chunks(
+            &mut out.udph as *mut _ as *mut u8,
+            &tctx.udph as *const _ as *const u8,
+            mem::size_of::<UdpHdr>(),
+        );
+    }
     out.l4proto = tctx.l4proto;
     out.listener_l4proto = tctx.listener_l4proto;
     out.is_fragmented = tctx.is_fragmented;
