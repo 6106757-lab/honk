@@ -1,11 +1,15 @@
 //! Candidate skb metadata becomes evidence only at successful outer recvmsg exit.
+//!
+//! Every hook exists twice: as fentry/fexit for kernels that carry the function
+//! tracer, and as kprobe/kretprobe for the many router kernels that disable it.
+//! Userspace attaches the cheap tracing pair first and falls back to the probes.
 
 use aya_ebpf::{
     Global,
     helpers::{bpf_get_current_pid_tgid, bpf_probe_read_kernel},
-    macros::{kprobe, kretprobe, map},
+    macros::{fentry, fexit, kprobe, kretprobe, map},
     maps::HashMap,
-    programs::{ProbeContext, RetProbeContext},
+    programs::{FEntryContext, FExitContext, ProbeContext, RetProbeContext},
 };
 use honk_ebpf_common::receive_trace::{
     RECEIVE_TRACE_BATCH_SIZE, RECEIVE_TRACE_SOCKETS, RECEIVE_TRACE_VALID, ReceiveTraceBatch,
@@ -92,54 +96,23 @@ fn exit(sk: *const u8, result: Result<i32, i32>) {
     batch.candidate.valid = 0;
 }
 
-#[kprobe]
-pub fn honk_udp_receive_enter(ctx: ProbeContext) -> u32 {
-    let Some(sk) = ctx.arg::<*const u8>(0) else {
-        return 0;
-    };
-    enter(sk, ctx.arg::<i32>(3).unwrap_or(0));
-    0
-}
-
-#[kprobe]
-pub fn honk_udp6_receive_enter(ctx: ProbeContext) -> u32 {
-    let Some(sk) = ctx.arg::<*const u8>(0) else {
-        return 0;
-    };
-    enter(sk, ctx.arg::<i32>(3).unwrap_or(0));
-    0
-}
-
-#[kretprobe]
-pub fn honk_udp_receive_exit(ctx: RetProbeContext) -> u32 {
-    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
-    exit(sk, Ok(ctx.ret::<i32>()));
-    0
-}
-
-#[kretprobe]
-pub fn honk_udp6_receive_exit(ctx: RetProbeContext) -> u32 {
-    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
-    exit(sk, Ok(ctx.ret::<i32>()));
-    0
-}
-
-#[kretprobe]
-pub fn honk_udp_receive_candidate(ctx: RetProbeContext) -> u32 {
-    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
+#[inline(always)]
+fn candidate(sk: *const u8, skb: Result<*const u8, i32>) {
     let Some(ptr) = state(sk) else {
-        return 0;
+        return;
     };
     let batch = unsafe { &mut *ptr };
     if batch.depth != 1 || batch.owner != bpf_get_current_pid_tgid() {
         batch.lost = 1;
-        return 0;
+        return;
     }
     // A checksum-discarded candidate is overwritten by the next helper return.
     batch.candidate.valid = 0;
-    let skb = ctx.ret::<*const u8>();
+    let Ok(skb) = skb else {
+        return;
+    };
     if skb.is_null() || skb as usize >= usize::MAX - 4095 {
-        return 0;
+        return;
     }
     let priority = unsafe {
         bpf_probe_read_kernel::<u32>(skb.add(RECEIVE_SKB_PRIORITY_OFFSET.load() as usize).cast())
@@ -152,5 +125,69 @@ pub fn honk_udp_receive_candidate(ctx: RetProbeContext) -> u32 {
         batch.candidate.mark = mark;
         batch.candidate.valid = RECEIVE_TRACE_VALID;
     }
+}
+
+#[fentry]
+pub fn honk_udp_receive_enter(ctx: FEntryContext) -> u32 {
+    enter(ctx.arg(0), ctx.arg(3));
+    0
+}
+
+#[fentry]
+pub fn honk_udp6_receive_enter(ctx: FEntryContext) -> u32 {
+    enter(ctx.arg(0), ctx.arg(3));
+    0
+}
+
+#[fexit]
+pub fn honk_udp_receive_exit(ctx: FExitContext) -> u32 {
+    exit(ctx.arg(0), ctx.ret());
+    0
+}
+
+#[fexit]
+pub fn honk_udp6_receive_exit(ctx: FExitContext) -> u32 {
+    exit(ctx.arg(0), ctx.ret());
+    0
+}
+
+#[fexit]
+pub fn honk_udp_receive_candidate(ctx: FExitContext) -> u32 {
+    candidate(ctx.arg(0), ctx.ret::<*const u8>());
+    0
+}
+
+#[kprobe]
+pub fn honk_udp_receive_enter_probe(ctx: ProbeContext) -> u32 {
+    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
+    enter(sk, ctx.arg::<i32>(3).unwrap_or(0));
+    0
+}
+
+#[kprobe]
+pub fn honk_udp6_receive_enter_probe(ctx: ProbeContext) -> u32 {
+    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
+    enter(sk, ctx.arg::<i32>(3).unwrap_or(0));
+    0
+}
+
+#[kretprobe]
+pub fn honk_udp_receive_exit_probe(ctx: RetProbeContext) -> u32 {
+    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
+    exit(sk, Ok(ctx.ret::<i32>()));
+    0
+}
+
+#[kretprobe]
+pub fn honk_udp6_receive_exit_probe(ctx: RetProbeContext) -> u32 {
+    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
+    exit(sk, Ok(ctx.ret::<i32>()));
+    0
+}
+
+#[kretprobe]
+pub fn honk_udp_receive_candidate_probe(ctx: RetProbeContext) -> u32 {
+    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
+    candidate(sk, Ok(ctx.ret::<*const u8>()));
     0
 }

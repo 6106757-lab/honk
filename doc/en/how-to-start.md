@@ -68,7 +68,7 @@ Startup always loads raw BTF for the eBPF loader's target BTF and the process-na
 2. `/sys/kernel/btf/vmlinux` when no override is set.
 3. `/usr/lib/debug/boot/vmlinux` when the preceding default path is unreadable. OpenWrt's `vmlinux-btf` package installs this file.
 
-Only the optional `native-api` UDP receive-trace fallback, used when UDP receive-priority ancillary metadata is unavailable, attaches kprobe/kretprobe programs. It needs the in-kernel BTF (`HONK_VMLINUX_BTF` does not substitute) and the kprobe PMU, and degrades without them:
+Only the optional `native-api` UDP receive-trace fallback, used when UDP receive-priority ancillary metadata is unavailable, attaches kernel hooks: fentry/fexit when the kernel carries the function tracer, kprobe/kretprobe on the router images that drop it. It needs the in-kernel BTF (`HONK_VMLINUX_BTF` does not substitute) plus one of the two hook mechanisms, and degrades without them:
 
 ```text
 CONFIG_DEBUG_INFO_BTF=y
@@ -76,7 +76,7 @@ CONFIG_KPROBES=y
 CONFIG_PERF_EVENTS=y
 ```
 
-Probes are used rather than fentry/fexit precisely because router kernels commonly disable the function tracer; check `cat /sys/kernel/debug/tracing/available_tracers` (only `nop` means ftrace-based hooks are unavailable) and `ls /sys/bus/event_source/devices/kprobe`.
+`cat /sys/kernel/debug/tracing/available_tracers` lists `function` and friends when the cheaper fentry/fexit path is available; an image that prints only `nop` falls back to kprobes, which only need `ls /sys/bus/event_source/devices/kprobe` to exist.
 
 A missing or incompatible `udp_recvmsg` or `udpv6_recvmsg` hook disables only that socket family's fallback; the shared `__skb_recv_udp` hook is required by both. A partial or failed fallback attachment is not retried on listener reload: restart after changing kernel/BTF support. See [receive-trace ownership](./design/control-plane.md#startup-and-shutdown).
 
