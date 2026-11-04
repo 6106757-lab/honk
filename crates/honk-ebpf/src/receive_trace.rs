@@ -47,9 +47,9 @@ fn stage(sk: *const u8) {
 
 #[inline(always)]
 fn staged() -> *const u8 {
-    match RECEIVE_PROBE_SK.get(bpf_get_current_pid_tgid()) {
-        Ok(sk) => *sk as *const u8,
-        Err(_) => core::ptr::null(),
+    match RECEIVE_PROBE_SK.get_ptr(bpf_get_current_pid_tgid()) {
+        Some(sk) => (unsafe { *sk }) as *const u8,
+        None => core::ptr::null(),
     }
 }
 
