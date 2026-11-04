@@ -59,7 +59,16 @@ impl InterfaceBindings {
                 .try_into()?;
             match classifier.load() {
                 Ok(()) | Err(ProgramError::AlreadyLoaded) => {}
-                Err(error) => anyhow::bail!("load TC program '{name}': {error}"),
+                Err(error) => {
+                    // 6.6 debugging: persist the full verifier log. The kernel
+                    // log for a large classifier can be tens of MB, far past
+                    // what a syslog line can carry.
+                    if let ProgramError::LoadError { verifier_log, .. } = &error {
+                        let _ =
+                            std::fs::write("/tmp/honk_vlog.txt", verifier_log.to_string());
+                    }
+                    anyhow::bail!("load TC program '{name}': {error}")
+                }
             }
             let fd = classifier
                 .fd()?
