@@ -1411,7 +1411,7 @@ pub(crate) fn retry_with_verifier_logs<T>(
     // head+tail. Allow growth to 64 MB, and treat E2BIG ("program too large")
     // as a grow trigger too: the verifier fails with E2BIG once the 1M insn
     // complexity budget dies, and without this the buffer stops at 100 KB.
-    const MAX_LOG_BUF_SIZE: usize = 256 * 1024 * 1024;
+    const MAX_LOG_BUF_SIZE: usize = 64 * 1024 * 1024;
 
     let mut log_buf = Vec::new();
     let mut retries = 0;
@@ -1424,7 +1424,7 @@ pub(crate) fn retry_with_verifier_logs<T>(
                     // E2BIG only while the buffer is still below 32 MB, so a
                     // genuine too-many-insns failure stops growing here.
                     || (io_error.raw_os_error() == Some(libc::E2BIG)
-                        && log_buf.capacity() < (128 * 1024 * 1024));
+                        && log_buf.capacity() < (32 * 1024 * 1024));
                 if grow {
                     let len = (log_buf.capacity() * 10).clamp(MIN_LOG_BUF_SIZE, MAX_LOG_BUF_SIZE);
                     log_buf.resize(len, 0);

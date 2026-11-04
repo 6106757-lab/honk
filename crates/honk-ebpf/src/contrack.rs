@@ -124,10 +124,10 @@ impl ConntrackArgs {
             ); // R/Z @0
         }
         if let Some(mac_addr) = mac {
-            self.mac.copy_from_slice(mac_addr);
+            unsafe { crate::copyfix::copy6(&raw mut self.mac, mac_addr) };
         }
         if let Some(pname_bytes) = pname {
-            self.pname.copy_from_slice(pname_bytes);
+            unsafe { crate::copyfix::copy16(&raw mut self.pname, pname_bytes) };
         }
     }
 

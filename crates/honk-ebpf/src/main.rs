@@ -25,6 +25,7 @@ pub mod process_name;
 mod receive_trace;
 pub mod route;
 pub mod routing;
+pub mod copyfix;
 pub mod sk;
 pub mod sk_lookup;
 mod socket_identity;

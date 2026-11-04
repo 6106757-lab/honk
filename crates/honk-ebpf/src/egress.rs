@@ -449,9 +449,9 @@ fn do_tproxy_wan_egress_tcp(
         handoff.result.pid = handoff_pid;
         handoff.result.dscp = tuples.dscp;
         handoff.result.decision_token = 0;
-        handoff.result.mac.copy_from_slice(&mac);
+        unsafe { crate::copyfix::copy6(&raw mut handoff.result.mac, &raw const mac) };
         if let Some(pname) = handoff_pname {
-            handoff.result.pname.copy_from_slice(pname);
+            unsafe { crate::copyfix::copy16(&raw mut handoff.result.pname, pname) };
         }
         crate::auxiliary::publish_handoff(&tuples.five, unsafe { &mut *scratch }, true)
             .map_err(|_| TC_ACT_SHOT)?;
@@ -567,9 +567,9 @@ fn fast_path_decision(
             handoff.result.pid = handoff_pid;
             handoff.result.dscp = tuples.dscp;
             handoff.result.decision_token = decision_token;
-            handoff.result.mac.copy_from_slice(&mac);
+            unsafe { crate::copyfix::copy6(&raw mut handoff.result.mac, &raw const mac) };
             if let Some(pname) = handoff_pname {
-                handoff.result.pname.copy_from_slice(pname);
+                unsafe { crate::copyfix::copy16(&raw mut handoff.result.pname, pname) };
             }
             if let Err(error) =
                 crate::auxiliary::publish_handoff(&tuples.five, unsafe { &mut *scratch }, false)

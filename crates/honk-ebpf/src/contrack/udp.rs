@@ -392,10 +392,10 @@ fn __mark_udp_seen(
     }
     if has_rt {
         if args.has_mac() {
-            new_state.mac.copy_from_slice(&args.mac);
+            unsafe { crate::copyfix::copy6(&raw mut (*output).mac, &raw const args.mac) };
         }
         if args.has_pname() {
-            new_state.pname.copy_from_slice(&args.pname);
+            unsafe { crate::copyfix::copy16(&raw mut (*output).pname, &raw const args.pname) };
         }
     }
 

@@ -232,30 +232,10 @@ fn update_tcp_locked(state: &mut ConnState, args: &ConntrackArgs, now: u64, fin_
     }
     if args.has_routing() {
         if args.has_mac() {
-            let mut i = 0;
-            while i < 6 {
-                unsafe {
-                    state
-                        .mac
-                        .as_mut_ptr()
-                        .add(i)
-                        .write_volatile(args.mac.as_ptr().add(i).read_volatile())
-                };
-                i += 1;
-            }
+            unsafe { crate::copyfix::copy6(&raw mut state.mac, &raw const args.mac) };
         }
         if args.has_pname() {
-            let mut i = 0;
-            while i < 16 {
-                unsafe {
-                    state
-                        .pname
-                        .as_mut_ptr()
-                        .add(i)
-                        .write_volatile(args.pname.as_ptr().add(i).read_volatile())
-                };
-                i += 1;
-            }
+            unsafe { crate::copyfix::copy16(&raw mut state.pname, &raw const args.pname) };
         }
         state.pid = args.pid;
         state.trace_id = args.trace_id;
@@ -471,17 +451,7 @@ pub fn publish_tcp_routing(key: &TuplesKey, snapshot: &ConnState) -> bool {
     if owned {
         current.meta = snapshot.meta;
         current.trace_id = snapshot.trace_id;
-        let mut i = 0;
-        while i < 6 {
-            unsafe {
-                current
-                    .mac
-                    .as_mut_ptr()
-                    .add(i)
-                    .write_volatile(snapshot.mac.as_ptr().add(i).read_volatile())
-            };
-            i += 1;
-        }
+        unsafe { crate::copyfix::copy6(&raw mut current.mac, &raw const snapshot.mac) };
     }
     unsafe { bpf_spin_unlock(&mut (*ptr).lock) };
     owned
