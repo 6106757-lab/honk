@@ -114,6 +114,11 @@ impl RealEbpfBackend {
         // allocators are opened separately because generation reuse is forbidden.
         let _ = std::fs::remove_file(pin_root.join("LISTEN_SOCKET_MAP"));
         let mut loader = EbpfLoader::new();
+        // 6.6 debugging aid (temporary): force a fixed-size, fully verbose
+        // verifier log. Ring-mode logging hides the middle of the exploration;
+        // a FIXED buffer returns -ENOSPC when it fills, which makes aya grow it
+        // and re-run, so the largest attempt captures the log head verbatim.
+        loader.verifier_log_level(aya::VerifierLogLevel::from_bits_truncate(1 | 2 | 4 | 8));
         loader
             .btf(Some(&kernel_btf))
             .override_global("PARAM", &dae_param, true)
