@@ -3,6 +3,10 @@
 //! Every hook exists twice: as fentry/fexit for kernels that carry the function
 //! tracer, and as kprobe/kretprobe for the many router kernels that disable it.
 //! Userspace attaches the cheap tracing pair first and falls back to the probes.
+//!
+//! A kretprobe is handed the callee's return registers only, so the `sock` argument
+//! is long gone by then; the probe path stages it per task on entry and consumes it
+//! on the way back out.
 
 use aya_ebpf::{
     Global,
@@ -12,7 +16,8 @@ use aya_ebpf::{
     programs::{FEntryContext, FExitContext, ProbeContext, RetProbeContext},
 };
 use honk_ebpf_common::receive_trace::{
-    RECEIVE_TRACE_BATCH_SIZE, RECEIVE_TRACE_SOCKETS, RECEIVE_TRACE_VALID, ReceiveTraceBatch,
+    RECEIVE_PROBE_TASKS, RECEIVE_TRACE_BATCH_SIZE, RECEIVE_TRACE_SOCKETS, RECEIVE_TRACE_VALID,
+    ReceiveTraceBatch,
 };
 
 #[unsafe(no_mangle)]
@@ -27,6 +32,31 @@ pub static RECEIVE_OWNER_TGID: Global<u32> = Global::new(0);
 #[map]
 pub static RECEIVE_TRACE: HashMap<u64, ReceiveTraceBatch> =
     HashMap::with_max_entries(RECEIVE_TRACE_SOCKETS, 0);
+
+/// The `sock` argument staged by a probe entry hook for the matching return hook.
+///
+/// Keyed by task so a migration between entry and return cannot mix sockets up.
+#[map]
+pub static RECEIVE_PROBE_SK: HashMap<u64, u64> = HashMap::with_max_entries(RECEIVE_PROBE_TASKS, 0);
+
+#[inline(always)]
+fn stage(sk: *const u8) {
+    let sk = if sk.is_null() { 0 } else { sk as u64 };
+    let _ = RECEIVE_PROBE_SK.insert(bpf_get_current_pid_tgid(), sk, 0);
+}
+
+#[inline(always)]
+fn staged() -> *const u8 {
+    match RECEIVE_PROBE_SK.get(bpf_get_current_pid_tgid()) {
+        Ok(sk) => *sk as *const u8,
+        Err(_) => core::ptr::null(),
+    }
+}
+
+#[inline(always)]
+fn unstage() {
+    let _ = RECEIVE_PROBE_SK.remove(bpf_get_current_pid_tgid());
+}
 
 #[inline(always)]
 fn state(sk: *const u8) -> Option<*mut ReceiveTraceBatch> {
@@ -46,14 +76,14 @@ fn state(sk: *const u8) -> Option<*mut ReceiveTraceBatch> {
 }
 
 #[inline(always)]
-fn enter(sk: *const u8, flags: i32) {
-    let Some(ptr) = state(sk) else { return };
+fn enter(sk: *const u8, flags: i32) -> bool {
+    let Some(ptr) = state(sk) else { return false };
     let batch = unsafe { &mut *ptr };
     let owner = bpf_get_current_pid_tgid();
     if batch.depth != 0 {
         batch.lost = 1;
         batch.depth = batch.depth.saturating_add(1);
-        return;
+        return true;
     }
     batch.owner = owner;
     batch.depth = 1;
@@ -62,6 +92,7 @@ fn enter(sk: *const u8, flags: i32) {
     if flags & (0x2 | 0x2000) != 0 {
         batch.lost = 1;
     }
+    true
 }
 
 #[inline(always)]
@@ -160,34 +191,43 @@ pub fn honk_udp_receive_candidate(ctx: FExitContext) -> u32 {
 #[kprobe]
 pub fn honk_udp_receive_enter_probe(ctx: ProbeContext) -> u32 {
     let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
-    enter(sk, ctx.arg::<i32>(3).unwrap_or(0));
+    if enter(sk, ctx.arg::<i32>(3).unwrap_or(0)) {
+        stage(sk);
+    }
     0
 }
 
 #[kprobe]
 pub fn honk_udp6_receive_enter_probe(ctx: ProbeContext) -> u32 {
     let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
-    enter(sk, ctx.arg::<i32>(3).unwrap_or(0));
+    if enter(sk, ctx.arg::<i32>(3).unwrap_or(0)) {
+        stage(sk);
+    }
     0
 }
 
 #[kretprobe]
 pub fn honk_udp_receive_exit_probe(ctx: RetProbeContext) -> u32 {
-    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
-    exit(sk, Ok(ctx.ret::<i32>()));
+    let sk = staged();
+    if !sk.is_null() {
+        exit(sk, Ok(ctx.ret::<i32>()));
+        unstage();
+    }
     0
 }
 
 #[kretprobe]
 pub fn honk_udp6_receive_exit_probe(ctx: RetProbeContext) -> u32 {
-    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
-    exit(sk, Ok(ctx.ret::<i32>()));
+    let sk = staged();
+    if !sk.is_null() {
+        exit(sk, Ok(ctx.ret::<i32>()));
+        unstage();
+    }
     0
 }
 
 #[kretprobe]
 pub fn honk_udp_receive_candidate_probe(ctx: RetProbeContext) -> u32 {
-    let sk = ctx.arg::<*const u8>(0).unwrap_or(core::ptr::null());
-    candidate(sk, Ok(ctx.ret::<*const u8>()));
+    candidate(staged(), Ok(ctx.ret::<*const u8>()));
     0
 }

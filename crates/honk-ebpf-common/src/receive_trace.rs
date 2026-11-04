@@ -2,6 +2,8 @@
 
 pub const RECEIVE_TRACE_BATCH_SIZE: usize = 8;
 pub const RECEIVE_TRACE_SOCKETS: u32 = 256;
+/// Upper bound on the tasks that can hold a staged socket argument at once.
+pub const RECEIVE_PROBE_TASKS: u32 = 256;
 pub const RECEIVE_TRACE_VALID: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -83,8 +83,9 @@ enum CandidateHook {
 ///
 /// fentry/fexit costs almost nothing but needs a kernel built with the function
 /// tracer, which router images routinely drop; kprobes only need `CONFIG_KPROBES`
-/// plus the kprobe perf PMU. A `kretprobe` still exposes the entry registers, so
-/// the socket argument and the return value stay readable at return.
+/// plus the kprobe perf PMU. A kretprobe only sees the callee's return registers,
+/// so the probe programs stage the socket argument per task on entry and read it
+/// back on return; the pair must therefore be attached together.
 #[derive(Clone, Copy)]
 struct Family<'a> {
     target: &'a str,
@@ -184,21 +185,32 @@ fn attach_probe_family(
     Ok((entry, exit))
 }
 
-fn attach_family(bpf: &mut Ebpf, btf: &Btf, family: &Family<'_>) -> anyhow::Result<FamilyHooks> {
-    let tracing = match attach_tracing_family(bpf, btf, family) {
-        Ok((entry, exit)) => return Ok(FamilyHooks::Tracing(entry, exit)),
-        Err(error) => error,
+fn attach_family(
+    bpf: &mut Ebpf,
+    btf: &Btf,
+    family: &Family<'_>,
+    probes_only: bool,
+) -> anyhow::Result<FamilyHooks> {
+    let tracing = if probes_only {
+        anyhow::anyhow!("the candidate hook fell back to probes")
+    } else {
+        match attach_tracing_family(bpf, btf, family) {
+            Ok((entry, exit)) => return Ok(FamilyHooks::Tracing(entry, exit)),
+            Err(error) => error,
+        }
     };
-    tracing::debug!(
-        symbol = family.target,
-        error = %format_args!("{tracing:#}"),
-        "UDP receive trace fentry/fexit unavailable; falling back to probes"
-    );
+    if !probes_only {
+        tracing::debug!(
+            symbol = family.target,
+            error = %format_args!("{tracing:#}"),
+            "UDP receive trace fentry/fexit unavailable; falling back to probes"
+        );
+    }
     attach_probe_family(bpf, family)
         .map(|(entry, exit)| FamilyHooks::Probe(entry, exit))
         .map_err(|probe| {
             probe.context(format!(
-                "hooks on {}: probes unavailable after fentry/fexit ({tracing:#})",
+                "hooks on {}: probes unavailable ({tracing:#})",
                 family.target
             ))
         })
@@ -261,8 +273,12 @@ impl ReceiveTrace {
         candidate: &Candidate<'_>,
     ) -> anyhow::Result<Arc<Self>> {
         let candidate = attach_candidate(bpf, btf, candidate)?;
-        let ipv4 = attach_family(bpf, btf, ipv4);
-        let ipv6 = attach_family(bpf, btf, ipv6);
+        // The candidate hook decides the flavour: only the probe spelling stages the
+        // socket argument, so a tracing family next to a probe candidate would leave
+        // every candidate invalid. Keep the whole trace on one mechanism.
+        let probes_only = matches!(candidate, CandidateHook::Probe);
+        let ipv4 = attach_family(bpf, btf, ipv4, probes_only);
+        let ipv6 = attach_family(bpf, btf, ipv6, probes_only);
         if let (Err(ipv4), Err(ipv6)) = (&ipv4, &ipv6) {
             anyhow::bail!("UDP receive hooks unavailable: IPv4: {ipv4:#}; IPv6: {ipv6:#}");
         }
