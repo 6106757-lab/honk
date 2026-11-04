@@ -34,50 +34,50 @@ pub const IPPROTO_FRAGMENT: u8 = 44;
 pub const IPPROTO_DSTOPTS: u8 = 60;
 pub const IPV6_MAX_EXTENSIONS: usize = 8;
 
-/// Upper bound for a walked IPv6 extension-header chain. Real chains are a
-/// few tens of bytes; the bound also converges the verifier: without it the
-/// per-iteration offset range keeps widening (fragment steps are +8 exact,
-/// extension steps +8..2048 ranges) and latch states never merge, which
-/// alone blew the 6.6 verifier's 1M-insn cap. Oversized chains take the
-/// same MALFORMED path a >8-header chain already took.
-pub const IPV6_EXT_CHAIN_MAX: u32 = 512;
-
 /// Opaque trip count for the IPv6 extension-header walks. A constant bound
 /// lets LLVM fully unroll the walk, multiplying the per-iteration `nexthdr`
 /// branches into a verifier state explosion (the 1M-insn cap on 6.6). The
-/// volatile load keeps the bound runtime-opaque so the walk stays a loop and
-/// its states merge at the latch.
+/// volatile load keeps the bound runtime-opaque so the walk stays a loop;
+/// combined with the opaque counter/offset reloads at the loop latch (see
+/// parse_fast), the 6.6 verifier merges the back-edge state and converges
+/// after exploring the body a constant number of times.
 #[inline(never)]
 fn ipv6_max_extensions() -> usize {
     let n = IPV6_MAX_EXTENSIONS;
     unsafe { core::ptr::read_volatile(&n) }
 }
 
-/// Zero a parse-scratch region in u64 chunks (`bytes` any size). A
-/// byte-granular bulk store compiles to a byte loop whose per-iteration map
-/// offsets each become a distinct verifier state — the parse_fast whole-scratch
-/// zero alone re-explored ~120 states per upstream state and blew past the
-/// 6.6 verifier's 1M-insn cap. Chunked stores keep the state count flat.
+/// Zero a parse-scratch region in u64 chunks (`bytes` any size). Two 6.6
+/// verifier hazards live here:
+///   1. A byte-granular bulk store compiles to a byte loop whose
+///      per-iteration map offsets each become a distinct verifier state.
+///   2. Even hand-chunked plain constant-zero stores get RE-merged by LLVM's
+///      MergeConsecutiveStores back into a `memset` call (measured: the 15
+///      u64 stores of the whole-scratch zero came back as memset(120), a
+///      120-iteration byte loop in the hottest parse path). Volatile stores
+///      cannot be merged or reordered away, and each unrolls to a single
+///      fixed-offset insn, keeping the verifier state count flat.
+/// The targets are per-cpu map values, so volatile costs no stack frame.
 #[inline(always)]
 unsafe fn zero_parse_chunks(ptr: *mut u8, bytes: usize) {
     let d = ptr as *mut u64;
     let words = bytes / 8;
     let mut i = 0;
     while i < words {
-        d.add(i).write_unaligned(0);
+        d.add(i).write_volatile(0);
         i += 1;
     }
     let mut off = words * 8;
     if bytes - off >= 4 {
-        ((d as *mut u8).add(off) as *mut u32).write_unaligned(0);
+        ((d as *mut u8).add(off) as *mut u32).write_volatile(0);
         off += 4;
     }
     if bytes - off >= 2 {
-        ((d as *mut u8).add(off) as *mut u16).write_unaligned(0);
+        ((d as *mut u8).add(off) as *mut u16).write_volatile(0);
         off += 2;
     }
     if bytes > off {
-        (d as *mut u8).add(off).write_unaligned(0);
+        (d as *mut u8).add(off).write_volatile(0);
     }
 }
 
@@ -271,15 +271,10 @@ pub fn udp_has_quic_long_header(ctx: &TcContext, link_h_len: u32, pkt: &ParsedPa
         }
         offset += mem::size_of::<Ipv6Hdr>() as u32;
 
-        for _ in 0..ipv6_max_extensions() {
-            if offset > IPV6_EXT_CHAIN_MAX {
-                return false;
-            }
-            // Make the carried offset opaque: fragment steps advance it by an
-            // exact 8 while extension steps advance a range, and the 6.6
-            // verifier only merges latch states whose registers match. An
-            // opaque re-read gives every path the identical latch state.
-            offset = unsafe { core::ptr::read_volatile(&offset) };
+        // Same latch-opaque walk as parse_fast (see the comment there).
+        let max_extensions = ipv6_max_extensions() as u32;
+        let mut ext_i: u32 = 0;
+        while ext_i < max_extensions {
             if nexthdr == IPPROTO_UDP {
                 break;
             }
@@ -298,6 +293,9 @@ pub fn udp_has_quic_long_header(ctx: &TcContext, link_h_len: u32, pkt: &ParsedPa
                 }
                 nexthdr = fragment.nexthdr;
                 offset += mem::size_of::<FragHdr>() as u32;
+                ext_i += 1;
+                ext_i = unsafe { core::ptr::read_volatile(&ext_i) };
+                offset = unsafe { core::ptr::read_volatile(&offset) };
                 continue;
             }
             if !is_extension_header(nexthdr) {
@@ -317,6 +315,9 @@ pub fn udp_has_quic_long_header(ctx: &TcContext, link_h_len: u32, pkt: &ParsedPa
             }
             nexthdr = extension[0];
             offset += ipv6_optlen(extension[1]);
+            ext_i += 1;
+            ext_i = unsafe { core::ptr::read_volatile(&ext_i) };
+            offset = unsafe { core::ptr::read_volatile(&offset) };
         }
         if nexthdr != IPPROTO_UDP {
             return false;
@@ -461,14 +462,12 @@ impl ParseTransportExt for ParseTransportCtx {
             self.ihl = (mem::size_of::<Ipv6Hdr>() / 4) as u8;
             let mut nexthdr = self.ipv6h.next_hdr;
 
-            for _ in 0..ipv6_max_extensions() {
-                if offset > IPV6_EXT_CHAIN_MAX {
-                    return Err(ERR_MALFORMED);
-                }
-                // Make the carried offset opaque so fragment (exact +8) and
-                // extension (ranged) steps yield the identical latch state
-                // and the walk stops forking verifier states on 6.6.
-                offset = unsafe { core::ptr::read_volatile(&offset) };
+            // Same latch-opaque walk as parse_fast: opaque trip count plus
+            // opaque counter/offset reloads at the back edge so the 6.6
+            // verifier merges the latch state instead of cycling.
+            let max_extensions = ipv6_max_extensions() as u32;
+            let mut ext_i: u32 = 0;
+            while ext_i < max_extensions {
                 if nexthdr == IPPROTO_NONE {
                     return Err(ERR_MALFORMED);
                 }
@@ -494,6 +493,9 @@ impl ParseTransportExt for ParseTransportCtx {
                     if frag_off & 0xFFF8 != 0 {
                         return Err(PARSE_FRAGMENT as c_long);
                     }
+                    ext_i += 1;
+                    ext_i = unsafe { core::ptr::read_volatile(&ext_i) };
+                    offset = unsafe { core::ptr::read_volatile(&offset) };
                     continue;
                 }
 
@@ -525,6 +527,9 @@ impl ParseTransportExt for ParseTransportCtx {
                     offset += ipv6_optlen(hdr_ext_len);
                     self.l4proto = nexthdr;
                 }
+                ext_i += 1;
+                ext_i = unsafe { core::ptr::read_volatile(&ext_i) };
+                offset = unsafe { core::ptr::read_volatile(&offset) };
             }
 
             if is_extension_header(nexthdr) {
@@ -668,14 +673,24 @@ impl ParseTransportExt for ParseTransportCtx {
 
             let mut nexthdr = ipv6h.next_hdr;
 
-            for _ in 0..ipv6_max_extensions() {
-                if offset > IPV6_EXT_CHAIN_MAX {
-                    return Err(ERR_MALFORMED);
-                }
-                // Make the carried offset opaque so fragment (exact +8) and
-                // extension (ranged) steps yield the identical latch state
-                // and the walk stops forking verifier states on 6.6.
-                offset = unsafe { core::ptr::read_volatile(&offset) };
+            // Walk the extension chain as a real loop whose back-edge state
+            // MERGES on the 6.6 verifier. Three properties are required:
+            //   - the trip count is opaque (volatile read), so LLVM cannot
+            //     unroll the walk into 8 copies of the nexthdr branches;
+            //   - the induction counter is reloaded opaquely at the back edge
+            //     (a plain counted loop keeps an exact counter, and exact
+            //     counter values never compare equal at the latch — measured:
+            //     the verifier burned the full 1M-insn budget cycling here);
+            //   - the carried offset is likewise reloaded opaquely at the
+            //     back edge, so fragment (+8 exact) and extension (ranged)
+            //     steps yield the identical latch state instead of a widening
+            //     range per iteration. Both reloads read back what was just
+            //     stored, so runtime semantics are unchanged.
+            // Memory safety is carried entirely by the data_end checks below;
+            // 8 iterations bound offset by ~16 KiB as in the 6.12 original.
+            let max_extensions = ipv6_max_extensions() as u32;
+            let mut ext_i: u32 = 0;
+            while ext_i < max_extensions {
                 if nexthdr == IPPROTO_NONE {
                     return Err(ERR_MALFORMED);
                 }
@@ -694,6 +709,9 @@ impl ParseTransportExt for ParseTransportCtx {
                     if frag_off & 0xFFF8 != 0 {
                         return Err(PARSE_FRAGMENT as c_long);
                     }
+                    ext_i += 1;
+                    ext_i = unsafe { core::ptr::read_volatile(&ext_i) };
+                    offset = unsafe { core::ptr::read_volatile(&offset) };
                     continue;
                 }
                 if !is_extension_header(nexthdr) {
@@ -707,6 +725,9 @@ impl ParseTransportExt for ParseTransportCtx {
                 let hdr_ext_len = unsafe { *ext_hdr.add(1) };
                 offset += ipv6_optlen(hdr_ext_len);
                 self.l4proto = nexthdr;
+                ext_i += 1;
+                ext_i = unsafe { core::ptr::read_volatile(&ext_i) };
+                offset = unsafe { core::ptr::read_volatile(&offset) };
             }
 
             if is_extension_header(nexthdr) {
