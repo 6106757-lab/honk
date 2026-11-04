@@ -45,6 +45,64 @@ fn ipv6_max_extensions() -> usize {
     unsafe { core::ptr::read_volatile(&n) }
 }
 
+/// Zero a parse-scratch region in u64 chunks (`bytes` any size). A
+/// byte-granular bulk store compiles to a byte loop whose per-iteration map
+/// offsets each become a distinct verifier state — the parse_fast whole-scratch
+/// zero alone re-explored ~120 states per upstream state and blew past the
+/// 6.6 verifier's 1M-insn cap. Chunked stores keep the state count flat.
+#[inline(always)]
+unsafe fn zero_parse_chunks(ptr: *mut u8, bytes: usize) {
+    let d = ptr as *mut u64;
+    let words = bytes / 8;
+    let mut i = 0;
+    while i < words {
+        d.add(i).write_unaligned(0);
+        i += 1;
+    }
+    let mut off = words * 8;
+    if bytes - off >= 4 {
+        ((d as *mut u8).add(off) as *mut u32).write_unaligned(0);
+        off += 4;
+    }
+    if bytes - off >= 2 {
+        ((d as *mut u8).add(off) as *mut u16).write_unaligned(0);
+        off += 2;
+    }
+    if bytes > off {
+        (d as *mut u8).add(off).write_unaligned(0);
+    }
+}
+
+/// Copy a packet header in u64 chunks (`bytes` any size). A byte-wise
+/// `ptr::read` walks the packet at per-byte offsets — each a distinct
+/// verifier state on 6.6 — while chunked words keep the state count flat.
+/// Unaligned packet words are permitted by the x86_64 JIT.
+#[inline(always)]
+unsafe fn copy_packet_chunks(dst: *mut u8, src: *const u8, bytes: usize) {
+    let d = dst as *mut u64;
+    let s = src as *const u64;
+    let words = bytes / 8;
+    let mut i = 0;
+    while i < words {
+        d.add(i).write_unaligned(s.add(i).read_unaligned());
+        i += 1;
+    }
+    let mut off = words * 8;
+    if bytes - off >= 4 {
+        ((d as *mut u8).add(off) as *mut u32)
+            .write_unaligned(((s as *const u8).add(off) as *const u32).read_unaligned());
+        off += 4;
+    }
+    if bytes - off >= 2 {
+        ((d as *mut u8).add(off) as *mut u16)
+            .write_unaligned((s as *const u8).add(off) as *mut u16);
+        off += 2;
+    }
+    if bytes > off {
+        (d as *mut u8).add(off).write_unaligned((s as *const u8).add(off).read());
+    }
+}
+
 /// True for IPv6 extension headers (hop-by-hop, routing, fragment, destination options).
 #[inline(always)]
 pub fn is_extension_header(nexthdr: u8) -> bool {
@@ -294,13 +352,7 @@ impl ParseTransportExt for ParseTransportCtx {
             }
             offset += mem::size_of::<EthHdr>() as u32;
         } else {
-            unsafe {
-                ptr::write_bytes(
-                    &mut self.ethh as *mut _ as *mut u8,
-                    0,
-                    mem::size_of::<EthHdr>(),
-                )
-            };
+            unsafe { zero_parse_chunks(&mut self.ethh as *mut _ as *mut u8, mem::size_of::<EthHdr>()) };
             self.ethh.ether_type = ctx.skb.protocol() as u16;
         }
 
@@ -309,31 +361,11 @@ impl ParseTransportExt for ParseTransportCtx {
         self.listener_l4proto = 0;
         self.is_fragmented = 0;
         unsafe {
-            ptr::write_bytes(
-                &mut self.iph as *mut _ as *mut u8,
-                0,
-                mem::size_of::<Ipv4Hdr>(),
-            );
-            ptr::write_bytes(
-                &mut self.ipv6h as *mut _ as *mut u8,
-                0,
-                mem::size_of::<Ipv6Hdr>(),
-            );
-            ptr::write_bytes(
-                &mut self.icmp6h as *mut _ as *mut u8,
-                0,
-                mem::size_of::<Icmpv6Hdr>(),
-            );
-            ptr::write_bytes(
-                &mut self.tcph as *mut _ as *mut u8,
-                0,
-                mem::size_of::<TcpHdr>(),
-            );
-            ptr::write_bytes(
-                &mut self.udph as *mut _ as *mut u8,
-                0,
-                mem::size_of::<UdpHdr>(),
-            );
+            zero_parse_chunks(&mut self.iph as *mut _ as *mut u8, mem::size_of::<Ipv4Hdr>());
+            zero_parse_chunks(&mut self.ipv6h as *mut _ as *mut u8, mem::size_of::<Ipv6Hdr>());
+            zero_parse_chunks(&mut self.icmp6h as *mut _ as *mut u8, mem::size_of::<Icmpv6Hdr>());
+            zero_parse_chunks(&mut self.tcph as *mut _ as *mut u8, mem::size_of::<TcpHdr>());
+            zero_parse_chunks(&mut self.udph as *mut _ as *mut u8, mem::size_of::<UdpHdr>());
         }
 
         if self.ethh.ether_type == ETH_P_IP.to_be() {
@@ -536,13 +568,7 @@ impl ParseTransportExt for ParseTransportCtx {
         let data_end = ctx.data_end() as *const u8;
         let mut offset = 0u32;
 
-        unsafe {
-            ptr::write_bytes(
-                self as *mut _ as *mut u8,
-                0,
-                mem::size_of::<ParseTransportCtx>(),
-            );
-        }
+        unsafe { zero_parse_chunks(self as *mut _ as *mut u8, mem::size_of::<ParseTransportCtx>()) };
 
         if link_h_len == ETH_HLEN {
             let eth_ptr = data as *const EthHdr;
@@ -570,7 +596,7 @@ impl ParseTransportExt for ParseTransportCtx {
 
             // Deep-copy the entire IP header struct to preserve bitfield fields
             // that cannot be assigned field-by-field through method getters.
-            self.iph = unsafe { ptr::read(iph_ptr) };
+            unsafe { copy_packet_chunks(&mut self.iph as *mut _ as *mut u8, iph_ptr as *const u8, mem::size_of::<Ipv4Hdr>()) };
             self.ihl = iph.ihl();
             self.l4proto = iph.proto;
 
@@ -589,7 +615,7 @@ impl ParseTransportExt for ParseTransportCtx {
                     if unsafe { data.add(l4_offset + mem::size_of::<TcpHdr>()) } > data_end {
                         return Err(ERR_FALLBACK);
                     }
-                    self.tcph = unsafe { ptr::read(tcph_ptr) };
+                    unsafe { copy_packet_chunks(&mut self.tcph as *mut _ as *mut u8, tcph_ptr as *const u8, mem::size_of::<TcpHdr>()) };
                     return Ok(());
                 }
                 IPPROTO_UDP => {
@@ -597,7 +623,7 @@ impl ParseTransportExt for ParseTransportCtx {
                     if unsafe { data.add(l4_offset + mem::size_of::<UdpHdr>()) } > data_end {
                         return Err(ERR_FALLBACK);
                     }
-                    self.udph = unsafe { ptr::read(udph_ptr) };
+                    unsafe { copy_packet_chunks(&mut self.udph as *mut _ as *mut u8, udph_ptr as *const u8, mem::size_of::<UdpHdr>()) };
                     self.listener_l4proto = IPPROTO_UDP;
                     return Ok(());
                 }
@@ -612,7 +638,7 @@ impl ParseTransportExt for ParseTransportCtx {
             }
             let ipv6h = unsafe { &*ipv6h_ptr };
 
-            self.ipv6h = unsafe { ptr::read(ipv6h_ptr) };
+            unsafe { copy_packet_chunks(&mut self.ipv6h as *mut _ as *mut u8, ipv6h_ptr as *const u8, mem::size_of::<Ipv6Hdr>()) };
             self.l4proto = ipv6h.next_hdr;
             self.ihl = (mem::size_of::<Ipv6Hdr>() / 4) as u8;
             offset += mem::size_of::<Ipv6Hdr>() as u32;
@@ -664,7 +690,7 @@ impl ParseTransportExt for ParseTransportCtx {
                     if unsafe { data.add(offset as usize + mem::size_of::<TcpHdr>()) } > data_end {
                         return Err(ERR_FALLBACK);
                     }
-                    self.tcph = unsafe { ptr::read(tcph_ptr) };
+                    unsafe { copy_packet_chunks(&mut self.tcph as *mut _ as *mut u8, tcph_ptr as *const u8, mem::size_of::<TcpHdr>()) };
                     return Ok(());
                 }
                 IPPROTO_UDP => {
@@ -672,7 +698,7 @@ impl ParseTransportExt for ParseTransportCtx {
                     if unsafe { data.add(offset as usize + mem::size_of::<UdpHdr>()) } > data_end {
                         return Err(ERR_FALLBACK);
                     }
-                    self.udph = unsafe { ptr::read(udph_ptr) };
+                    unsafe { copy_packet_chunks(&mut self.udph as *mut _ as *mut u8, udph_ptr as *const u8, mem::size_of::<UdpHdr>()) };
                     self.listener_l4proto = IPPROTO_UDP;
                     return Ok(());
                 }
@@ -682,7 +708,7 @@ impl ParseTransportExt for ParseTransportCtx {
                     {
                         return Err(ERR_FALLBACK);
                     }
-                    self.icmp6h = unsafe { ptr::read(icmp6h_ptr) };
+                    unsafe { copy_packet_chunks(&mut self.icmp6h as *mut _ as *mut u8, icmp6h_ptr as *const u8, mem::size_of::<Icmpv6Hdr>()) };
                     return Ok(());
                 }
                 _ => return Err(PASS_UNSUPPORTED),
@@ -702,7 +728,7 @@ impl ParseTransportExt for ParseTransportCtx {
 
     #[inline(always)]
     fn fill_tuples(&self, tuples: &mut Tuples) {
-        unsafe { ptr::write_bytes(tuples as *mut _ as *mut u8, 0, mem::size_of::<Tuples>()) };
+        unsafe { zero_parse_chunks(tuples as *mut _ as *mut u8, mem::size_of::<Tuples>()) };
         tuples.five.l4proto = self.l4proto;
 
         if self.iph.version() == 4 {
