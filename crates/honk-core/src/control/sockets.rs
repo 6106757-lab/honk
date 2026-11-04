@@ -23,6 +23,24 @@ pub(super) fn set_so_recvpriority(socket: &impl std::os::fd::AsRawFd) -> io::Res
         Ok(())
     }
 }
+
+/// Reports which UDP receive-trace mechanism won, once per process.
+///
+/// A silent `Ok` from `set_so_recvpriority` leaves no other trace, so an
+/// unused eBPF fallback and a kernel that honours the option look identical
+/// from the outside. Logging the decision keeps that distinguishable.
+#[cfg(all(feature = "ebpf", feature = "native-api", target_os = "linux"))]
+fn report_trace_mechanism(mechanism: &'static str, rejection: Option<&str>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    match rejection {
+        Some(error) => info!(mechanism, error, "UDP receive trace mechanism selected"),
+        None => info!(mechanism, "UDP receive trace mechanism selected"),
+    }
+}
 #[cfg(target_os = "linux")]
 fn set_ip_transparent(socket: &Socket, is_v6: bool) -> io::Result<()> {
     if is_v6 {
@@ -793,8 +811,12 @@ impl UdpRecvBatch {
         socket: &UdpSocket,
         trace: Option<Arc<crate::ebpf::real::receive_trace::ReceiveTrace>>,
     ) -> io::Result<()> {
-        if set_so_recvpriority(socket).is_ok() {
-            return Ok(());
+        match set_so_recvpriority(socket) {
+            Ok(()) => {
+                report_trace_mechanism("SO_RCVPRIORITY", None);
+                return Ok(());
+            }
+            Err(error) => report_trace_mechanism("eBPF", Some(&error.to_string())),
         }
         let trace = trace.ok_or_else(|| io::Error::other("UDP receive trace unavailable"))?;
         self.register_trace(socket, &trace)

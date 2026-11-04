@@ -368,6 +368,12 @@ impl ControlPlane {
                     .native_api
                     .record_flows;
             #[cfg(all(feature = "native-api", feature = "ebpf", target_os = "linux"))]
+            info!(
+                record_flows,
+                native = self.native.is_some(),
+                "UDP receive trace gate"
+            );
+            #[cfg(all(feature = "native-api", feature = "ebpf", target_os = "linux"))]
             let mut trace_error = None;
             #[cfg(all(feature = "native-api", feature = "ebpf", target_os = "linux"))]
             let mut trace_unavailable = [false; 2];
