@@ -814,7 +814,23 @@ fn datapath_observation_crosschecks_program_hook_root_and_admission() {
         )
         .unwrap();
         let before = backend.observe_datapath();
-        assert_eq!(before.programs, DatapathCheck::Absent);
+        // The 6.6 routing fixture preloads the two WAN egress tail programs so
+        // a generated policy can freplace into them before any hook exists.
+        // `observe_datapath` marks `programs` Verified as soon as a single
+        // program is loaded, so that coarse flag cannot distinguish this state
+        // from a fully loaded backend. Assert the exact preloaded set instead:
+        // the two tail programs and no interface classifier.
+        assert_eq!(before.programs, DatapathCheck::Verified);
+        assert_eq!(before.loaded_programs.len(), 2);
+        for name in ["wan_egress_tcp_tail", "wan_egress_udp_tail"] {
+            assert!(
+                before
+                    .loaded_programs
+                    .iter()
+                    .any(|program| program.name == name),
+                "missing preloaded WAN tail program {name}"
+            );
+        }
         assert_eq!(before.hooks, DatapathCheck::Absent);
         assert_eq!(before.routing, DatapathCheck::Absent);
         assert_eq!(before.admission, Some(false));
