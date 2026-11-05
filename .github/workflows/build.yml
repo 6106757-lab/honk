@@ -8,7 +8,7 @@ name: Build
 # main and keeps the artifact for 30 days instead of Release's one.
 on:
   push:
-    branches: [main]
+    branches: [main, kernel-floor-6.6]
     paths:
       - "crates/**"
       - "ci/**"
@@ -196,3 +196,30 @@ jobs:
             echo ""
             echo "Fetch it with \`gh/fetch.sh\`, or from this run's Artifacts list."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Push the freshly built musl binary to the VyOS router. The router path
+      # matches deploy-vyos in the Justfile. Requires SSH_PRIVATE_KEY in repo
+      # secrets; if the runner cannot reach the gateway (e.g. it is on a private
+      # subnet), this step is best-effort and the artifact above is the fallback.
+      - name: Deploy to router (172.20.1.1)
+        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        continue-on-error: true
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || '172.20.1.1' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/config/vyos-scripts/podman/dae/dae' }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$SSH_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          if timeout 120 scp -i /tmp/deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              target/x86_64-unknown-linux-musl/release/honk-core \
+              "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}"; then
+            timeout 60 ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${DEPLOY_USER}@${DEPLOY_HOST}" "chmod +x ${DEPLOY_PATH} && ${DEPLOY_PATH} --version"
+            echo "### Deploy: OK → ${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Deploy: SKIPPED/FAILED — runner cannot reach ${DEPLOY_HOST} (private subnet?) or SSH secret missing; use gh/fetch.sh on the gateway instead." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          rm -f /tmp/deploy_key
