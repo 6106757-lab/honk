@@ -38,9 +38,9 @@ proxies:
     udp_over_tcp:
       enabled: true
       version: 2
-  - name: udp-disabled
+  - name: smux-off
     type: vless
-    server: disabled.example
+    server: smux-off.example
     port: 443
     uuid: eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee
     smux:
@@ -78,7 +78,7 @@ proxies:
             ),
             (VlessUdpEncoding::UotV2, VlessMultiplex::Off, true,),
             (VlessUdpEncoding::UotV2, VlessMultiplex::Off, true,),
-            (VlessUdpEncoding::Auto, VlessMultiplex::Off, false,),
+            (VlessUdpEncoding::Auto, VlessMultiplex::Off, true,),
             (VlessUdpEncoding::Auto, VlessMultiplex::Off, true,),
         ]
     );
@@ -91,12 +91,12 @@ proxies:
 #[test]
 fn external_vless_options_preserve_clash_defaults() {
     for (options, encoding, multiplex, udp_enabled) in [
-        ("{}", VlessUdpEncoding::Auto, VlessMultiplex::Off, false),
+        ("{}", VlessUdpEncoding::Auto, VlessMultiplex::Off, true),
         (
             "packet-encoding: ''",
             VlessUdpEncoding::Auto,
             VlessMultiplex::Off,
-            false,
+            true,
         ),
         (
             "packet-encoding: none",
@@ -257,7 +257,7 @@ fn clash_vless_udp_true_defaults_to_xudp() {
 #[test]
 fn clash_vless_udp_gate_is_independent_from_selected_carrier() {
     let yaml = r#"proxies:
-  - {name: implicit-disabled, type: vless, server: disabled.example, port: 443, uuid: 00000000-0000-4000-8000-000000000041}
+  - {name: implicit-udp, type: vless, server: default-udp.example, port: 443, uuid: 00000000-0000-4000-8000-000000000041}
   - {name: source-xudp, type: vless, server: default.example, port: 443, uuid: 00000000-0000-4000-8000-000000000042, udp: true}
   - {name: native-enabled, type: vless, server: native.example, port: 443, uuid: 00000000-0000-4000-8000-000000000043, udp: true, packet-encoding: none}
   - {name: disabled-xudp, type: vless, server: xudp.example, port: 443, uuid: 00000000-0000-4000-8000-000000000044, udp: false, packet-encoding: xudp}
@@ -275,7 +275,7 @@ fn clash_vless_udp_gate_is_independent_from_selected_carrier() {
             .map(|node| node.name.as_str())
             .collect::<Vec<_>>(),
         [
-            "implicit-disabled",
+            "implicit-udp",
             "source-xudp",
             "native-enabled",
             "disabled-xudp",
@@ -293,7 +293,7 @@ fn clash_vless_udp_gate_is_independent_from_selected_carrier() {
             })
             .collect::<Vec<_>>(),
         [
-            (VlessUdpEncoding::Auto, VlessMultiplex::Off, false),
+            (VlessUdpEncoding::Auto, VlessMultiplex::Off, true),
             (VlessUdpEncoding::Xudp, VlessMultiplex::Off, true),
             (VlessUdpEncoding::Native, VlessMultiplex::Off, true),
             (VlessUdpEncoding::Auto, VlessMultiplex::Off, false),
@@ -420,4 +420,66 @@ fn empty_packet_encoding_does_not_shadow_xudp_declaration() {
         let nodes = parse_clash_subscription(&yaml, None).unwrap();
         assert_eq!(nodes[0].vless().unwrap().udp_encoding, expected);
     }
+}
+
+/// An undeclared `udp` must not disable VLESS UDP in either subscription
+/// dialect: the base64 share-link list and the mihomo/Clash YAML. Local
+/// `node {}` blocks already default to UDP-capable, so an imported copy of
+/// the same endpoint must behave identically.
+#[test]
+fn vless_defaults_to_udp_in_base64_and_mihomo_subscriptions() {
+    use base64::Engine as _;
+
+    let uuid = "11111111-1111-4111-8111-111111111111";
+    let link = format!(
+        "vless://{uuid}@vless.example:443?encryption=none&security=none&type=ws&path=%2F#vless-node"
+    );
+    let base64_body = base64::engine::general_purpose::STANDARD.encode(&link);
+    let simple = honk_config::subscription::Subscription {
+        sub_type: honk_config::types::SubscriptionType::Simple,
+        ..Default::default()
+    };
+
+    let yaml = format!(
+        r#"proxies:
+  - name: vless-node
+    type: vless
+    server: vless.example
+    port: 443
+    uuid: {uuid}
+  - name: udp-off
+    type: vless
+    server: vless.example
+    port: 8443
+    uuid: {uuid}
+    udp: false
+"#
+    );
+    let clash = honk_config::subscription::Subscription {
+        sub_type: honk_config::types::SubscriptionType::Clash,
+        ..Default::default()
+    };
+
+    let from_b64 = crate::subscription::parse_subscription_content(&simple, &base64_body).unwrap();
+    let from_yaml = crate::subscription::parse_subscription_content(&clash, &yaml).unwrap();
+
+    assert_eq!(from_b64.len(), 1, "base64 body must decode to one node");
+    assert_eq!(from_yaml.len(), 2, "mihomo body must yield both proxies");
+    for (dialect, config) in [
+        ("base64", from_b64[0].vless().unwrap()),
+        ("mihomo", from_yaml[0].vless().unwrap()),
+    ] {
+        assert!(
+            config.udp_enabled(),
+            "{dialect}: VLESS UDP must be enabled by default"
+        );
+        assert_eq!(
+            config.network, None,
+            "{dialect}: no network restriction must be recorded"
+        );
+    }
+    assert!(
+        !from_yaml[1].vless().unwrap().udp_enabled(),
+        "an explicit `udp: false` must still restrict the node"
+    );
 }

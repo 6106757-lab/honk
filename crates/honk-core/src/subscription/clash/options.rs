@@ -226,9 +226,13 @@ pub(in crate::subscription) fn parse_vless_external_options(
         return Err("VLESS multiplex and udp-over-tcp cannot both be enabled");
     }
 
-    let wrapper_enabled = h2_multiplex.is_some() || xray_multiplex.is_some() || uot_enabled;
-    let udp_enabled =
-        udp != Some(false) && (udp == Some(true) || packet_encoding.is_some() || wrapper_enabled);
+    // A Clash/mihomo proxy normally omits `udp` entirely. honk's own VLESS
+    // share links are UDP-capable by default (VlessConfig::default has no
+    // `network` restriction), so requiring an explicit declaration here made
+    // subscription-imported VLESS nodes lose UDP while the very same endpoint
+    // written as a local node worked. Only an explicit `udp: false` restricts
+    // the node; wrappers and packet encodings merely choose the UDP carrier.
+    let udp_enabled = udp != Some(false);
     let multiplex = xray_multiplex
         .or(h2_multiplex)
         .unwrap_or(VlessMultiplex::Off);
