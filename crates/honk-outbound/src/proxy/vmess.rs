@@ -11,14 +11,16 @@ use sha2::Sha256;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
 use super::addr::{self, SocksAddr};
 use super::{
-    AsyncReadWrite, ProbeableOutbound, ProxyStream, TcpOutbound, WarmRequirement, WarmableOutbound,
+    AsyncReadWrite, FramePoison, PacketOutbound, PacketRejection, PacketTransport,
+    ProbeableOutbound, ProxyStream, TcpOutbound, WarmRequirement, WarmableOutbound,
 };
 
 /// VMess protocol version byte.
@@ -31,6 +33,10 @@ const REQUEST_OPTION: u8 = 0x01 | 0x04;
 const SECURITY_AES128_GCM: u8 = 0x03;
 /// Request command: TCP.
 const CMD_TCP: u8 = 0x01;
+/// Request command: UDP (`protocol.RequestCommandUDP` in Xray-core). The
+/// header still names one destination: each AEAD body chunk is one datagram
+/// for that destination, and each response chunk is one datagram back.
+const CMD_UDP: u8 = 0x02;
 /// Suffix for cmd_key derivation (`vmess.Account.ID.CmdKey`).
 const CMD_KEY_SUFFIX: &[u8] = b"c48619fe-8f02-49e0-b9e9-edf763e17e21";
 /// Seed of the chained KDF (`aead/kdf.go` KDFSaltConstVMessAEADKDF).
@@ -144,6 +150,7 @@ fn fnv1a32(data: &[u8]) -> u32 {
 pub struct VmessHandler;
 
 /// Per-connection session material (`encoding.NewClientSession`).
+#[derive(Clone)]
 struct Session {
     req_key: [u8; 16],
     req_iv: [u8; 16],
@@ -307,6 +314,7 @@ impl VmessHandler {
         padding: &[u8],
         target: SocketAddr,
         target_domain: Option<&str>,
+        command: u8,
     ) -> anyhow::Result<Vec<u8>> {
         debug_assert_eq!(padding_len as usize, padding.len());
         let addr = SocksAddr::new(target, target_domain)?;
@@ -318,7 +326,7 @@ impl VmessHandler {
         plain.push(REQUEST_OPTION);
         plain.push((padding_len << 4) | SECURITY_AES128_GCM);
         plain.push(0);
-        plain.push(CMD_TCP);
+        plain.push(command);
         plain.extend_from_slice(&target.port().to_be_bytes());
         // V2Ray writes port first, then ATYP + address
         // (protocol.AddressSerializer with PortThenAddress).
@@ -414,14 +422,14 @@ impl VmessHandler {
         )
     }
 
-    /// Build the request header and return a proxy stream backed by a
-    /// duplex pipe + background relay task.
-    fn perform_handshake(
+    /// Build the AEAD request header for one connection. The session is
+    /// returned as well: its body keys encrypt both TCP and UDP chunks.
+    fn request_header(
         uuid_bytes: &[u8],
-        stream: Box<dyn AsyncReadWrite>,
         target: SocketAddr,
         target_domain: Option<&str>,
-    ) -> anyhow::Result<ProxyStream> {
+        command: u8,
+    ) -> anyhow::Result<(Vec<u8>, Session)> {
         let cmd_key = Self::derive_cmd_key(uuid_bytes);
         let session = Session::new();
 
@@ -437,9 +445,28 @@ impl VmessHandler {
         let mut padding = vec![0u8; padding_len as usize];
         rng.fill_bytes(&mut padding);
 
-        let plain =
-            Self::build_header_plain(&session, padding_len, &padding, target, target_domain)?;
+        let plain = Self::build_header_plain(
+            &session,
+            padding_len,
+            &padding,
+            target,
+            target_domain,
+            command,
+        )?;
         let header_wire = Self::seal_request_header(&cmd_key, &auth_id, &conn_nonce, &plain);
+        Ok((header_wire, session))
+    }
+
+    /// Build the request header and return a proxy stream backed by a
+    /// duplex pipe + background relay task.
+    fn perform_handshake(
+        uuid_bytes: &[u8],
+        stream: Box<dyn AsyncReadWrite>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+    ) -> anyhow::Result<ProxyStream> {
+        let (header_wire, session) =
+            Self::request_header(uuid_bytes, target, target_domain, CMD_TCP)?;
 
         let (client_half, server_half) = tokio::io::duplex(65536);
         let failure = RelayFailure::default();
@@ -461,6 +488,99 @@ impl VmessHandler {
             target_addr: target,
             target_domain: target_domain.map(|s| s.to_string()),
         })
+    }
+
+    /// Open one command-UDP association. Xray's inbound dispatches the whole
+    /// connection to the single destination named in the request header, so
+    /// this is a connected transport: one stream per UDP target, with one AEAD
+    /// chunk per datagram in each direction.
+    async fn dial_udp_stream(
+        node: &Node,
+        runtime: Option<&Arc<crate::runtime::NodeRuntime>>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        Self::require_udp(node)?;
+        let uuid = uuid(node)?;
+        let stream = match runtime {
+            Some(runtime) => {
+                let detour = runtime.detour();
+                super::transport::wrap_transport_runtime(
+                    runtime,
+                    None,
+                    connect_timeout,
+                    detour.as_deref(),
+                )
+                .await?
+            }
+            None => super::transport::wrap_transport(node, None, connect_timeout, None).await?,
+        };
+        Self::open_udp_stream(uuid.as_bytes(), stream, target, target_domain).await
+    }
+
+    /// UDP counterpart of [`TcpOutbound::dial_runtime_detoured`]: the
+    /// command-UDP stream *is* the path the datagrams ride, so open it over
+    /// the detour the caller named rather than the node's own.
+    async fn dial_udp_stream_detoured(
+        node: &Node,
+        runtime: &Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        Self::require_udp(node)?;
+        let uuid = uuid(node)?;
+        let stream =
+            super::transport::wrap_transport_runtime(runtime, None, connect_timeout, Some(detour))
+                .await?;
+        Self::open_udp_stream(uuid.as_bytes(), stream, target, target_domain).await
+    }
+
+    fn require_udp(node: &Node) -> anyhow::Result<()> {
+        if !crate::descriptor::network_allows_udp(node) {
+            anyhow::bail!(
+                "VMess UDP: node network {:?} does not include \"udp\"",
+                node.network()
+            );
+        }
+        Ok(())
+    }
+
+    async fn open_udp_stream(
+        uuid_bytes: &[u8],
+        mut stream: Box<dyn AsyncReadWrite>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        let (header_wire, session) =
+            Self::request_header(uuid_bytes, target, target_domain, CMD_UDP)?;
+        super::transport::write_request(&mut stream, &header_wire).await?;
+        Ok(Self::new_udp_transport(stream, session, target)?)
+    }
+
+    fn new_udp_transport(
+        stream: Box<dyn AsyncReadWrite>,
+        session: Session,
+        target: SocketAddr,
+    ) -> anyhow::Result<Arc<VmessUdpTransport>> {
+        let (reader, writer) = tokio::io::split(stream);
+        Ok(Arc::new(VmessUdpTransport {
+            writer: tokio::sync::Mutex::new(VmessUdpWriter {
+                stream: writer,
+                body: BodyChunks::new(&session.req_key, &session.req_iv)?,
+            }),
+            poison: FramePoison::default(),
+            reader: tokio::sync::Mutex::new(VmessUdpReader {
+                stream: reader,
+                // Xray writes the response header with the first reply. Read
+                // it lazily so a dial can send before any reply exists.
+                response_header: Some(session),
+                body: None,
+            }),
+            target,
+        }))
     }
 }
 
@@ -531,6 +651,55 @@ impl TcpOutbound for VmessHandler {
             super::transport::wrap_transport_runtime(&runtime, None, connect_timeout, Some(detour))
                 .await?;
         Self::perform_handshake(uuid.as_bytes(), stream, target, target_domain)
+    }
+}
+
+#[async_trait]
+impl PacketOutbound for VmessHandler {
+    async fn dial_udp_transport(
+        &self,
+        node: &Node,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        Self::dial_udp_stream(node, None, target, target_domain, connect_timeout).await
+    }
+
+    async fn dial_udp_transport_runtime(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        Self::dial_udp_stream(
+            &runtime.node,
+            Some(&runtime),
+            target,
+            target_domain,
+            connect_timeout,
+        )
+        .await
+    }
+
+    async fn dial_udp_transport_runtime_detoured(
+        &self,
+        runtime: Arc<crate::runtime::NodeRuntime>,
+        target: SocketAddr,
+        target_domain: Option<&str>,
+        connect_timeout: std::time::Duration,
+        detour: &Arc<crate::proxy::detour::DetourPath>,
+    ) -> anyhow::Result<Arc<dyn PacketTransport>> {
+        Self::dial_udp_stream_detoured(
+            &runtime.node,
+            &runtime,
+            target,
+            target_domain,
+            connect_timeout,
+            detour,
+        )
+        .await
     }
 }
 
@@ -783,6 +952,136 @@ async fn read_response_header<R: AsyncReadExt + Unpin>(
     }
     .await
     .map_err(|error| crate::proxy::NodeFailure(error.context("VMess response header")).into())
+}
+
+/// One command-UDP association. The request header names `target`, and each
+/// AEAD chunk in either direction is exactly one datagram for/from it:
+/// Xray's inbound dispatches `RequestCommandUDP` to
+/// `net.UDPDestination(header.Address, header.Port)` and copies whole
+/// MultiBuffers, so nothing on the wire carries a per-packet address or a
+/// full-cone reply source. One stream per UDP target is therefore the correct
+/// shape, not a shared multi-target source.
+struct VmessUdpWriter {
+    stream: WriteHalf<Box<dyn AsyncReadWrite>>,
+    body: BodyChunks,
+}
+
+struct VmessUdpReader {
+    stream: ReadHalf<Box<dyn AsyncReadWrite>>,
+    /// `Some` until the lazily written response header has been consumed.
+    response_header: Option<Session>,
+    body: Option<BodyChunks>,
+}
+
+struct VmessUdpTransport {
+    writer: tokio::sync::Mutex<VmessUdpWriter>,
+    /// A cancelled chunk write leaves a partial frame on a reliable stream.
+    poison: FramePoison,
+    reader: tokio::sync::Mutex<VmessUdpReader>,
+    target: SocketAddr,
+}
+
+impl std::fmt::Debug for VmessUdpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VmessUdpTransport")
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VmessUdpTransport {
+    async fn send(&self, data: &[u8], admitted: Option<&AtomicBool>) -> std::io::Result<()> {
+        // A zero-length chunk is the protocol's end-of-stream marker, so an
+        // empty datagram cannot be represented and must be refused locally
+        // rather than silently closing the association.
+        if data.is_empty() || data.len() > CHUNK_MAX_LEN {
+            return Err(PacketRejection::InvalidSize.into());
+        }
+        let mut writer = self.writer.lock().await;
+        let frame = writer.body.seal_chunk(data);
+        let write = self.poison.begin(admitted)?;
+        writer.stream.write_all(&frame).await?;
+        writer.stream.flush().await?;
+        write.complete();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PacketTransport for VmessUdpTransport {
+    fn relay_addr(&self) -> SocketAddr {
+        self.target
+    }
+
+    async fn send_packet(&self, data: &[u8]) -> std::io::Result<()> {
+        self.send(data, None).await
+    }
+
+    async fn send_packet_confirmed(&self, data: &[u8]) -> std::io::Result<()> {
+        self.send(data, None).await
+    }
+
+    async fn recv_packet(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        let mut reader = self.reader.lock().await;
+        let VmessUdpReader {
+            stream,
+            response_header,
+            body,
+        } = &mut *reader;
+        if let Some(session) = response_header.take() {
+            read_response_header(stream, &session)
+                .await
+                .map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("VMess UDP response header: {error:#}"),
+                    )
+                })?;
+            *body = Some(
+                BodyChunks::new(&session.resp_key, &session.resp_iv)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?,
+            );
+        }
+        let body = body.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "VMess UDP response body is missing",
+            )
+        })?;
+        loop {
+            let mut len_buf = [0u8; 2];
+            stream.read_exact(&mut len_buf).await?;
+            let chunk_len = body.decode_len(len_buf) as usize;
+            if chunk_len == GCM_TAG_LEN {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "VMess UDP association closed",
+                ));
+            }
+            if !(chunk_len > GCM_TAG_LEN && chunk_len <= CHUNK_MAX_LEN + GCM_TAG_LEN) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid VMess UDP chunk size {chunk_len}"),
+                ));
+            }
+            if chunk_len - GCM_TAG_LEN > buf.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "VMess UDP datagram exceeds buffer",
+                ));
+            }
+            let mut ct = vec![0u8; chunk_len];
+            stream.read_exact(&mut ct).await?;
+            let n = body.open_chunk(&mut ct).map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+            })?;
+            if n == 0 {
+                continue;
+            }
+            buf[..n].copy_from_slice(&ct[..n]);
+            return Ok((n, self.target));
+        }
+    }
 }
 
 #[cfg(test)]

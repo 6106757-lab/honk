@@ -835,6 +835,9 @@ fn parse_uri_subscription(
         match result {
             Ok(mut node) => {
                 node.subscription_id = subscription_id;
+                // Provenance is part of the node ID (see Node::derive_id), so
+                // stamping it after the share-link parse needs a re-derive.
+                node.id = node.derive_id();
                 let mut outcome = IndexedOutcome::node(ordinal, "entries", node);
                 outcome.line = Some(ordinal);
                 emit(outcome);

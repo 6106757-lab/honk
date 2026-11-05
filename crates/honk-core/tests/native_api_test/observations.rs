@@ -267,6 +267,13 @@ async fn native_catalog_masks_listener_secrets_without_changing_membership_or_cu
     let mut nodes: Vec<_> = (1080..1083)
         .map(|port| Node::from_share_link(&format!("socks5://127.0.0.1:{port}")).unwrap())
         .collect();
+    for node in &mut nodes {
+        node.subscription_id = Some(subscription.id);
+        // Provenance participates in the derived ID; keep the fixture canonical.
+        node.id = node.derive_id();
+    }
+    // The catalogue pages by canonical ID, so the display names follow that
+    // order. Names are not part of the identity, so they can be set afterwards.
     nodes.sort_unstable_by_key(|node| node.id);
     for (index, node) in nodes.iter_mut().enumerate() {
         node.name = if index == 2 {
@@ -274,7 +281,6 @@ async fn native_catalog_masks_listener_secrets_without_changing_membership_or_cu
         } else {
             format!("node-{index}-{display}")
         };
-        node.subscription_id = Some(subscription.id);
     }
     let parent_name = format!("parent-{display}");
     let child_name = format!("child-{display}");

@@ -57,17 +57,20 @@ impl ControlPlane {
         mut diagnostics: Vec<honk_config::diagnostic::DetailedDiagnostic>,
         drain: &DrainTracker,
     ) -> Result<ReloadOutcome, honk_config::error::DetailedConfigError> {
+        // Stamp provenance before validation: the node ID derives from it, so
+        // assigning it afterwards would leave a non-canonical ID behind.
+        for node in &mut nodes {
+            if node.subscription_id.is_none() {
+                node.subscription_id = Some(subscription_id);
+                node.id = node.derive_id();
+            }
+        }
         honk_config::node::validate_node_collection(&nodes)?;
         if let Some(index) = nodes.iter().position(|node| {
             node.subscription_id
                 .is_some_and(|provider| provider != subscription_id)
         }) {
             return Err(subscription_provenance_error(index));
-        }
-        for node in &mut nodes {
-            if node.subscription_id.is_none() {
-                node.subscription_id = Some(subscription_id);
-            }
         }
         let config_guard = self.config.read().await;
         let current = Arc::clone(&config_guard);

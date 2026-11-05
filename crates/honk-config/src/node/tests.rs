@@ -104,6 +104,31 @@ fn test_protocol_identity_goldens() {
 }
 
 #[test]
+fn test_identity_separates_static_and_subscription_copies() {
+    // The same endpoint written by hand in config.dae and imported from a
+    // subscription are two distinct outbounds. Without this split they share
+    // one content-derived ID and the whole subscription refresh is rejected
+    // with `duplicate-node-id`.
+    let static_node = Node::from_share_link("socks5://user:pass@1.2.3.4:1080#edge").unwrap();
+    let static_id = static_node.derive_id();
+    assert_eq!(static_node.id, static_id, "static IDs stay unchanged");
+
+    let mut from_a = static_node.clone();
+    from_a.subscription_id = Some(uuid::Uuid::new_v4());
+    from_a.id = from_a.derive_id();
+    assert_ne!(from_a.id, static_id, "a subscription copy needs its own ID");
+
+    // Provenance is a fixed namespace, not the provider UUID: two providers
+    // serving the same endpoint still share one identity, preserving the
+    // existing first-publisher-wins rule for cross-provider duplicates.
+    let mut from_b = static_node.clone();
+    from_b.subscription_id = Some(uuid::Uuid::new_v4());
+    assert_eq!(from_b.derive_id(), from_a.id);
+
+    validate_node_collection(&[static_node, from_a]).expect("both copies can coexist");
+}
+
+#[test]
 fn test_identity_credential_split() {
     for p in ["socks5", "ss", "tuic", "juicity"] {
         let base =

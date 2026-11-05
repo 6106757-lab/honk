@@ -1011,7 +1011,9 @@ group {
         assert_eq!(config.subscriptions.len(), 2);
         assert_eq!(config.nodes.len(), 2);
         config.nodes[0].subscription_id = Some(config.subscriptions[0].id);
+        config.nodes[0].id = config.nodes[0].derive_id();
         config.nodes[1].subscription_id = Some(config.subscriptions[1].id);
+        config.nodes[1].id = config.nodes[1].derive_id();
         crate::parser::resolve_group_filters(
             &mut config.groups,
             &config.nodes,

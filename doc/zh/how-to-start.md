@@ -490,13 +490,13 @@ cargo run --release -p honk-core -- \
 ## 当前能力和限制
 
 - 出站支持 Direct、Block、SOCKS5、Shadowsocks/2022、Trojan、AnyTLS、Hysteria2、TUIC、Juicity、VMess 和 VLESS。
-- UDP 支持 Direct、SOCKS5、Shadowsocks、Trojan、AnyTLS、Hysteria2、TUIC、Juicity，以及独立数据包权限已开启的 VLESS。VLESS 的回退编码与多路复用承载连接是另外两个独立选择；VMess 仍仅支持 TCP。见 [VLESS 节点参考](reference/nodes.md#vless-udp-and-multiplexing)。
+- UDP 支持 Direct、SOCKS5、Shadowsocks、Trojan、VMess、AnyTLS、Hysteria2、TUIC、Juicity，以及独立数据包权限已开启的 VLESS。VLESS 的回退编码与多路复用承载连接是另外两个独立选择。VMess 使用连接式 command-UDP（每个目标一条关联），不是共享的全锥形源。见[节点参考](reference/nodes.md#协议)。
 - 组支持 Selector、URLTest、LoadBalance、Fallback 和 Score。
 - DNS 上游支持 UDP、TCP、DoT、DoH、DoH3 和 DoQ，也可经 node/group 出站。
 - `direct` 和 `block` 是内建节点，不要在配置中重复声明。
 - `nfqueue_enable` 默认开启，固定使用队列 320，并独占 `inet honk_nfqueue` / `udp_decision`。同一网络命名空间中的防火墙管理器不能改动这些对象。
 - mock 或未启用 Cargo `ebpf` 特性的构建不会提供透明代理。普通 `cargo build --release` 不包含真实数据路径；必须使用 `--features ebpf`。
-- 当前没有 VMess UDP、无 root 数据路径、Dockerfile 或 docker-compose 配置，也不支持非 Linux 系统。
+- 当前没有 VMess 全锥形／共享源 UDP（Xray 的 mux.cool + XUDP cone 模式）、无 root 数据路径、Dockerfile 或 docker-compose 配置，也不支持非 Linux 系统。
 
 ## 常见问题
 

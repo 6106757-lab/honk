@@ -215,7 +215,7 @@ VMess JSON 使用 `net: "ws"` 时，缺失或为空的 `host` 会让 WebSocket �
 | --- | --- | --- | --- | --- |
 | `ss` | `shadowsocks` | 是 | 是 | AEAD 与 Shadowsocks 2022 |
 | `trojan` | — | 是 | 是* | TLS；TCP/WS/gRPC/XHTTP 传输 |
-| `vmess` | — | 是 | 否 | AEAD；TCP/WS/gRPC/XHTTP 与 REALITY；handler 需要 `rprx` |
+| `vmess` | — | 是 | 是* | AEAD；TCP/WS/gRPC/XHTTP 与 REALITY；command-UDP 为连接式，每个目标一条关联；handler 需要 `rprx` |
 | `vless` | — | 是 | 可配置* | 原生 UDP、UoT v2、H2MUX、XUDP、Mux.Cool、Encryption、REALITY 与 Vision；handler 需要 `rprx` |
 | `socks5` | — | 是 | 是 | CONNECT 与 UDP ASSOCIATE |
 | `hysteria2` | — | 是 | 是 | QUIC/H3、salamander、brutal/BBR 与端口跳跃 |
@@ -225,7 +225,7 @@ VMess JSON 使用 `net: "ws"` 时，缺失或为空的 `host` 会让 WebSocket �
 | `direct` | — | 是 | 是 | 保留的内置直连出站；没有分享链接协议方案 |
 | `block` | — | 否 | 否 | 保留的内置拒绝出站；没有分享链接协议方案 |
 
-`network` 可独立于流传输方式关闭 Trojan、AnyTLS 和 VLESS 的数据包拨号。VMess UDP 尚未实现。
+`network` 可独立于流传输方式关闭 Trojan、VMess、AnyTLS 和 VLESS 的数据包拨号。VMess UDP 使用协议的 `RequestCommandUDP`（命令字节 `0x02`）：AEAD 请求头指定唯一目的地，每个 body chunk 承载一个数据报，因此一条关联只服务一个目标。它是连接式 UDP，不是共享的全锥形源。
 
 | 协议 | UDP 行为 |
 | --- | --- |
@@ -240,7 +240,7 @@ SOCKS5 UDP ASSOCIATE 为每个客户端源保持一条控制 TCP 连接和一个
 - Trojan、AnyTLS；
 - VLESS XUDP/Mux.Cool、UoT v2、H2MUX。
 
-VLESS 原生 UDP 是例外，其流只指定一个目标。这包括显式 `native`，以及未启用 Vision 时 UDP/53 和 UDP/443 上的 `auto`。
+VLESS 原生 UDP 与 VMess command-UDP 是例外：它们的流只指定一个目标，回复不能携带任意对端，因此不是全锥形。VLESS 对应显式 `native`，以及未启用 Vision 时 UDP/53 和 UDP/443 上的 `auto`；VMess 则完全没有共享的多目标载体。
 
 来自此前未联系过的对端的回复，会保留该对端的源地址。这实现了 RFC 5780 全锥形的客户端部分。服务端还须为每条关联使用一个未连接套接字，并转发任意对端的回复。honk 无法绕过服务端过滤；`direct` 流量遵循宿主机自身的 NAT。限制如下：
 
@@ -253,7 +253,7 @@ VLESS 原生 UDP 是例外，其流只指定一个目标。这包括显式 `nati
 - 53 端口的流不在数据路径中发布客户端回复 framing，因此对 53 端口流的主动回复依赖宿主机转发。
 - 所有客户端源共用一个进程级外来回复套接字池，每个对端地址使用一个套接字。上限按端点容量计算，每个端点对应七个套接字。达到上限后，新外来对端会淘汰最久未使用的套接字。清理任务关闭超过一个 NAT 超时时间未使用的套接字。
 - 一个源最近关闭的 64 个目的地的回复会被丢弃，不作为外来回复投递。这包括连接关闭和不可用节点清理。重新绑定会将目的地移出列表；第 65 次关闭会移除最早的记录。空闲超时和传输错误不会加入记录，因此只要源仍存在，这些对端仍可发送外来回复。仍绑定的流不受影响。
-- VMess 没有 UDP 后端。
+- VMess command-UDP 每个目的地保留一条关联。它拒绝超过 16,366 字节的数据报（单个 AEAD chunk），也不会报告外来回复源地址。
 
 对于支持 `network` 的协议，扁平结构化输入接受逗号分隔的 `tcp`/`udp`，忽略各项首尾空白和 ASCII 大小写。`tcp` 关闭 UDP；`udp` 与 `tcp,udp` 都允许 UDP。空文本或纯空白规范化为未指定，保留协议的默认能力。`quic` 等未知值，或非空列表中的空项，会使节点被拒绝。该字段只控制 UDP 准入；`udp` 不会额外禁止 TCP。
 
@@ -311,7 +311,7 @@ node {
 
 VMess 接受 v2rayN Base64 JSON（`net`、`host`、`path`、`sni`），也接受 Shadowrocket 的 `vmess://base64(auto:UUID@host:port)?...` 地址部分形式。后者映射 `tls`、`peer`/`sni`、`obfs=websocket|grpc`、`obfsParam`、`path` 和 `remark`；接受 standard / URL-safe Base64，有无填充均可。编码地址部分的 VMess 要求 AEAD 认证及 `auto`/`aes-128-gcm`；不支持的加密方式和 REALITY 参数会被拒绝，不会静默替换。
 
-VMess JSON 的 `net` 和 Shadowrocket 传输参数只选择流传输方式，不再写入数据包网络能力字段。未指定数据包限制时，对有 UDP 后端的协议保留原有默认 UDP 能力（VMess 没有 UDP 后端）；已有的有效空传输字段也保留原始写法。非 XHTTP 传输保留对无关导出字段 `mode`、`extra` 的旧有忽略行为；这些字段不会选择 XHTTP。显式冲突的传输声明仍会拒绝节点。
+VMess JSON 的 `net` 和 Shadowrocket 传输参数只选择流传输方式，不再写入数据包网络能力字段。未指定数据包限制时，对有 UDP 后端的协议保留默认 UDP 能力（包含 VMess command-UDP）；已有的有效空传输字段也保留原始写法。非 XHTTP 传输保留对无关导出字段 `mode`、`extra` 的旧有忽略行为；这些字段不会选择 XHTTP。显式冲突的传输声明仍会拒绝节点。
 
 VLESS 支持 TCP+REALITY+Vision、TCP+REALITY、TCP+WS、TCP+WS+TLS、TCP+gRPC 与下述 H2 XHTTP 配置方案。未加密 Vision 的 direct-copy 要求使用 TLS 1.3 或 REALITY 的裸 TCP，不能使用 WS/gRPC/XHTTP；加密 Vision 遵循下文的组合规则。
 

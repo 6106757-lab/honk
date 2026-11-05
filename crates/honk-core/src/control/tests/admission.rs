@@ -112,7 +112,7 @@ async fn c20_public_merge_rejects_two_ids_for_one_endpoint() {
 }
 
 #[tokio::test]
-async fn c20_public_merge_rejects_nil_duplicate_and_cross_source_ids() {
+async fn c20_public_merge_rejects_nil_and_within_batch_duplicate_ids() {
     let subscription_id = uuid::Uuid::new_v4();
     let (config, canonical) = provider_config(subscription_id);
 
@@ -127,22 +127,45 @@ async fn c20_public_merge_rejects_nil_duplicate_and_cross_source_ids() {
         "same-name duplicate",
     )
     .await;
+}
 
+#[tokio::test]
+async fn c20_public_merge_keeps_a_static_node_and_its_subscription_copy() {
+    // A hand-written node and the identical endpoint published by a provider
+    // are two outbounds: provenance splits Node::derive_id, so the refresh is
+    // admitted and both copies remain instead of `duplicate-node-id`.
+    let subscription_id = uuid::Uuid::new_v4();
     let static_node = canonical_socks5("static", "192.0.2.12", 1080, None);
-    let provider = canonical_socks5("provider", "192.0.2.13", 1080, Some(subscription_id));
-    let mut cross_source = static_node.clone();
-    cross_source.name = "provider-replacement".into();
-    cross_source.subscription_id = Some(subscription_id);
-    let mut cross_config =
-        config_with_provider_node(provider, Some(config.subscriptions[0].clone()), Vec::new());
-    cross_config.nodes.insert(0, static_node);
-    assert_public_merge_rejected(
-        cross_config,
-        subscription_id,
-        vec![cross_source],
-        "cross-source duplicate",
-    )
-    .await;
+    let mut provider_copy = static_node.clone();
+    provider_copy.name = "provider-copy".into();
+    provider_copy.subscription_id = Some(subscription_id);
+    provider_copy.id = provider_copy.derive_id();
+    assert_ne!(provider_copy.id, static_node.id);
+
+    let mut config = Config::default();
+    config.global.nfqueue_enable = false;
+    config.ensure_builtin_nodes();
+    config.nodes.push(static_node.clone());
+    config.subscriptions.push(Subscription {
+        id: subscription_id,
+        name: "provider".into(),
+        url: "https://example.test/feed".into(),
+        ..Default::default()
+    });
+    let cp = control_plane(config);
+
+    cp.merge_subscription_nodes(subscription_id, vec![provider_copy.clone()], Vec::new())
+        .await;
+
+    let after = cp.config_handle().read().await.clone();
+    assert!(
+        after.nodes.iter().any(|node| node.id == static_node.id),
+        "the hand-written copy must survive"
+    );
+    assert!(
+        after.nodes.iter().any(|node| node.id == provider_copy.id),
+        "the subscription copy must be admitted"
+    );
 }
 
 #[tokio::test]

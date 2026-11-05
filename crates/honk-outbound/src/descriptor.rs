@@ -118,7 +118,9 @@ static DESCRIPTORS: &[ProtocolDescriptor] = &[
     },
     ProtocolDescriptor {
         protocol: NodeProtocol::VMess,
-        supports_udp: never,
+        // Command-UDP is implemented; like Trojan, an explicit `network:
+        // "tcp"` still restricts the node to TCP.
+        supports_udp: network_allows_udp,
         pool_ready_streams: never,
         pool_bare_tcp: stream_pool_bare_tcp,
         supports_warm: stream_supports_warm,
@@ -336,6 +338,7 @@ mod tests {
             );
             match protocol {
                 NodeProtocol::Trojan => node.trojan_mut().unwrap().network = Some("tcp".into()),
+                NodeProtocol::VMess => node.vmess_mut().unwrap().network = Some("tcp".into()),
                 NodeProtocol::VLess => node.vless_mut().unwrap().network = Some("tcp".into()),
                 _ => {}
             }
@@ -355,6 +358,19 @@ mod tests {
         assert!(!trojan(&base));
         base.trojan_mut().unwrap().network = Some("tcp, udp".to_string());
         assert!(trojan(&base));
+
+        // Command-UDP is available for VMess by default and follows the same
+        // explicit `network` restriction as Trojan.
+        let vmess = descriptor(NodeProtocol::VMess).supports_udp;
+        let mut vmess_node = Node {
+            outbound: honk_config::node::OutboundConfig::Vmess(Default::default()),
+            ..Default::default()
+        };
+        assert!(vmess(&vmess_node), "no network restriction allows UDP");
+        vmess_node.vmess_mut().unwrap().network = Some("tcp".into());
+        assert!(!vmess(&vmess_node));
+        vmess_node.vmess_mut().unwrap().network = Some("tcp, udp".into());
+        assert!(vmess(&vmess_node));
 
         let anytls = descriptor(NodeProtocol::AnyTLS).supports_udp;
         let ws_only = Node {
