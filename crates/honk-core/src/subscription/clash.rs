@@ -227,6 +227,9 @@ fn validate_source(mapping: &Mapping) -> Result<ProxySource, &'static str> {
         protocol,
         NodeProtocol::SS
             | NodeProtocol::Trojan
+            // This fork implements VMess command-UDP, so `udp: true` is a
+            // real capability claim rather than an unsupported one.
+            | NodeProtocol::VMess
             | NodeProtocol::VLess
             | NodeProtocol::Socks5
             | NodeProtocol::Hysteria2
