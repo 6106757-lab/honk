@@ -64,6 +64,7 @@ struct RoutingMaps {
 }
 
 struct Target {
+    name: &'static str,
     fd: ProgramFd,
     function_id: u32,
     btf: Btf,
@@ -344,7 +345,8 @@ fn attach_extension(program: &OwnedFd, target: &Target) -> anyhow::Result<OwnedF
     attr.link_create.attach_type = 0;
     bpf_fd(bpf_cmd::BPF_LINK_CREATE, &mut attr).map_err(|error| {
         anyhow::anyhow!(
-            "BPF_LINK_CREATE EXT target btf {}: {error}",
+            "BPF_LINK_CREATE EXT target '{}' btf {}: {error}",
+            target.name,
             target.function_id
         )
     })
@@ -516,6 +518,7 @@ impl RealEbpfBackend {
             let btf = Btf::parse(&bytes, Default::default())?;
             let function_id = btf.id_by_type_name_kind(slot_name, BtfKind::Func)?;
             result.push(Target {
+                name,
                 fd,
                 function_id,
                 btf,
