@@ -203,6 +203,35 @@ fn publish(
     let mut backend =
         RealEbpfBackend::load_routing_test_fixture(&object(), fixture_param()).unwrap();
     backend.publish_routing_plan(&plan, &[]).unwrap();
+    // On 6.6 the routing extension is published into the two WAN egress tail
+    // programs, so `routing_targets()` no longer loads the `wan_egress_l2`
+    // classifier. These tests still drive that TC entry point with
+    // BPF_PROG_TEST_RUN, so load it explicitly. Production loads every TC
+    // variant through `InterfaceBindings::preload()`; the routing fixture only
+    // populates the jump table, which is already enough for the tail call to
+    // reach the published policy.
+    load_classifier(&mut backend, "wan_egress_l2");
+    // A test run is only meaningful while the whole jump path is live. An
+    // empty slot makes `wan_tail_call` fall through to the native path with
+    // TC_ACT_UNSPEC instead of failing loudly, so assert the exact set rather
+    // than accepting a silently unverified verdict.
+    for name in [
+        "wan_egress_l2",
+        "wan_egress_tcp_tail",
+        "wan_egress_udp_tail",
+    ] {
+        let program: &SchedClassifier = backend
+            .bpf()
+            .unwrap()
+            .program(name)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert!(
+            program.fd().is_ok(),
+            "6.6 WAN egress test path needs loaded program {name}"
+        );
+    }
     let listeners = TproxyListeners::new();
     listeners.publish(&mut backend).unwrap();
     backend.set_datapath_ready(true).unwrap();
