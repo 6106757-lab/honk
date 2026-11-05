@@ -275,6 +275,8 @@ async fn native_catalog_masks_listener_secrets_without_changing_membership_or_cu
             format!("node-{index}-{display}")
         };
         node.subscription_id = Some(subscription.id);
+        // Provenance participates in the derived ID; keep the fixture canonical.
+        node.id = node.derive_id();
     }
     let parent_name = format!("parent-{display}");
     let child_name = format!("child-{display}");

@@ -55,6 +55,8 @@ pub(crate) fn rebase_subscription_nodes(
         if let Some(mut nodes) = candidate_subscription_nodes.remove(&candidate_id) {
             for node in &mut nodes {
                 node.subscription_id = Some(subscription.id);
+                // Provenance participates in the derived ID; keep it canonical.
+                node.id = node.derive_id();
             }
             static_nodes.extend(nodes);
         }

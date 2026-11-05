@@ -362,13 +362,27 @@ impl Node {
         // through a different detour is a different node, and both can be
         // configured at once. Only nodes that name one pay for a new identity,
         // so every node dialling the direct path keeps the id it has always had.
-        match self.detour_name() {
+        let path_id = match self.detour_name() {
             Some(detour) => {
                 let material = serde_json::to_vec(&("detour", detour))
                     .expect("detour names are JSON serializable");
                 uuid::Uuid::new_v5(&shaped, &material)
             }
             None => shaped,
+        };
+        // Provenance is part of the identity too. A node written by hand in
+        // config.dae and the identical endpoint imported from a subscription
+        // are two distinct outbounds: without this child UUID they collide on
+        // one ID, and the whole subscription refresh is rejected with
+        // `duplicate-node-id`. The marker is deliberately *not* keyed by the
+        // provider ID, so two subscriptions serving the same endpoint still
+        // share an identity and keep the existing first-publisher-wins rule.
+        // Static nodes keep exactly the ID they always had, so existing group
+        // memberships and saved selections survive unchanged.
+        if self.subscription_id.is_some() {
+            uuid::Uuid::new_v5(&path_id, b"subscription")
+        } else {
+            path_id
         }
     }
 }

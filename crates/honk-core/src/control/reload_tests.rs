@@ -378,6 +378,9 @@ fn udp_connectivity_requires_a_live_udp_capable_leaf() {
     for outbound in [
         OutboundConfig::Vmess(VmessConfig {
             uuid: Some("11111111-1111-4111-8111-111111111111".into()),
+            // VMess supports command-UDP; restrict it explicitly for this
+            // TCP-only connectivity case.
+            network: Some("tcp".into()),
             ..Default::default()
         }),
         OutboundConfig::Vless(VlessConfig {
@@ -4157,7 +4160,11 @@ async fn ready_pool_reload_rejection_preserves_stream() {
 }
 
 #[tokio::test]
-async fn subscription_refresh_duplicate_static_node_reports_one_safe_rejection() {
+async fn subscription_refresh_keeps_static_and_provider_copies_of_same_node() {
+    // A node written by hand in config.dae and the identical endpoint coming
+    // from a subscription are two distinct outbounds: Node::derive_id now
+    // includes provenance. Both must survive the refresh, which previously
+    // failed the whole provider with `duplicate-node-id`.
     let subscription = honk_config::subscription::Subscription {
         name: "private-provider".into(),
         url: "http://127.0.0.1:9".into(),
@@ -4165,13 +4172,19 @@ async fn subscription_refresh_duplicate_static_node_reports_one_safe_rejection()
     };
     let body = include_str!("../../tests/fixtures/c20-direct-provider.txt");
     let nodes = crate::subscription::parse_subscription_content(&subscription, body).unwrap();
+    let provider_node = nodes[0].clone();
     let mut current = Config::default();
     current.global.nfqueue_enable = false;
     current.ensure_builtin_nodes();
-    let mut static_node = nodes[0].clone();
+    let mut static_node = provider_node.clone();
     static_node.name = "static".into();
     static_node.subscription_id = None;
-    current.nodes.push(static_node);
+    static_node.id = static_node.derive_id();
+    assert_ne!(
+        static_node.id, provider_node.id,
+        "static and subscription copies must be distinct outbounds"
+    );
+    current.nodes.push(static_node.clone());
     current.subscriptions.push(subscription.clone());
     let mut cp = control_plane(current.clone());
     let mut authorizations =
@@ -4190,15 +4203,23 @@ async fn subscription_refresh_duplicate_static_node_reports_one_safe_rejection()
         &mut authorizations,
     ))
     .await;
-    assert_eq!(cp.config_handle().read().await.as_ref(), &current);
-    assert_eq!(log.matches("duplicate-node-id").count(), 1, "{log}");
+    assert!(!log.contains("duplicate-node-id"), "{log}");
     let reply = reply.await.unwrap();
-    assert!(matches!(reply.outcome, ReloadOutcome::Rejected));
-    assert_eq!(reply.rejection, Some("duplicate-node-id"));
     assert!(
-        !log.contains("127.0.0.1") && !log.contains("private-provider"),
-        "{log}"
+        reply.outcome.accepted(),
+        "the provider must not be rejected"
     );
+    assert_eq!(reply.rejection, None);
+    let after = cp.config_handle().read().await.clone();
+    assert!(
+        after.nodes.iter().any(|node| node.id == static_node.id),
+        "the static copy must survive"
+    );
+    assert!(
+        after.nodes.iter().any(|node| node.id == provider_node.id),
+        "the subscription copy must be admitted"
+    );
+    assert!(!log.contains("127.0.0.1"), "{log}");
 }
 
 #[tokio::test]
