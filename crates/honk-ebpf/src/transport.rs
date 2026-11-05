@@ -139,9 +139,18 @@ pub struct ParsedPacket {
     pub is_fragmented: u8,
     pub routing_input: honk_ebpf_common::RoutingInput,
     pub route_witness: honk_ebpf_common::KernelRouteWitness,
+    /// Routing generation of the decision computed at the TC entry. Carried
+    /// across the WAN egress tail call so the tail can stamp it on the handoff
+    /// without recomputing the policy (the tail is a tail-call target and
+    /// cannot host the freplace slot on Linux 7.2+, CVE-2024-47794).
+    pub routing_generation: u64,
     pub trace_id: u32,
     pub frag_id: u32,
     pub incarnation: u64,
+    /// Non-zero when the TC entry already evaluated the routing policy and
+    /// stored the decision in `route_witness.output.decision`. The tail reads
+    /// it instead of calling the slot itself.
+    pub routing_computed: u8,
 }
 
 /// Malformed packet: invalid header, bad length, too many extension headers.

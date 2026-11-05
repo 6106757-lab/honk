@@ -203,11 +203,11 @@ fn publish(
     let mut backend =
         RealEbpfBackend::load_routing_test_fixture(&object(), fixture_param()).unwrap();
     backend.publish_routing_plan(&plan, &[]).unwrap();
-    // On 6.6 the routing extension is published into the two WAN egress tail
-    // programs, so `routing_targets()` no longer loads the `wan_egress_l2`
-    // classifier. These tests still drive that TC entry point with
-    // BPF_PROG_TEST_RUN, so load it explicitly. Production loads every TC
-    // variant through `InterfaceBindings::preload()`; the routing fixture only
+    // The WAN egress routing slot is published into the `wan_egress_l2/l3` TC
+    // entry classifiers (they are not tail-call targets, so freplace works on
+    // every supported kernel including 7.2). These tests still drive that TC
+    // entry point with BPF_PROG_TEST_RUN, so load it explicitly. Production loads
+    // every TC variant through `InterfaceBindings::preload()`; the fixture only
     // populates the jump table, which is already enough for the tail call to
     // reach the published policy.
     load_classifier(&mut backend, "wan_egress_l2");

@@ -18,17 +18,19 @@ use std::os::fd::{FromRawFd, OwnedFd};
 ///
 /// Programs that carry the routing extension slot and receive the freplace link.
 ///
-/// `wan_egress_routing_carrier` hosts the WAN egress slot: `wan_egress_{tcp,udp}_tail`
-/// are `WAN_EGRESS_TAIL` jump-table members, and Linux 7.2+ refuses an EXT link
-/// against a tail-call target (EBUSY), so the tails cannot be freplace targets
-/// themselves. The carrier is never attached or tail-called, and the tails keep
-/// invoking the slot through their own (shared, object-global) call path, so the
-/// published policy still applies to WAN egress traffic. The LAN ingress
-/// classifiers are not jump-table members and take the link directly.
-const ROUTING_TARGETS: [&str; 3] = [
+/// The WAN egress routing slot is hosted on the `wan_egress_l2/l3` TC entry
+/// classifiers rather than the `wan_egress_{tcp,udp}_tail` jump-table members:
+/// Linux 7.2+ refuses an EXT link against a tail-call target (EBUSY,
+/// CVE-2024-47794), so the tails cannot be freplace targets themselves. The
+/// entry classifiers are attached straight to the hook (never tail-called), so
+/// their slot call can be replaced on every supported kernel. The entry computes
+/// the decision and carries it to the tail through `PKT_SCRATCH_KEY`. The LAN
+/// ingress classifiers are likewise attached directly and take the link itself.
+const ROUTING_TARGETS: [&str; 4] = [
     "lan_ingress_l2",
     "lan_ingress_l3",
-    "wan_egress_routing_carrier",
+    "wan_egress_l2",
+    "wan_egress_l3",
 ];
 const FACT_MAP_CAPACITY: u32 = 2_048_000;
 const BPF_F_NO_PREALLOC: u32 = 1;

@@ -266,31 +266,14 @@ fn do_tproxy_wan_egress_tcp(
             None
         };
 
-        let pname = pid_pname_opt.map(|pid_pname| &pid_pname.pname);
-        crate::route::build_input(
-            &mut pkt.routing_input,
-            tuples,
-            route_mac,
-            L4ProtoType::Tcp as u8,
-            ip_version,
-            true,
-        );
-        let flags = crate::maps::datapath_flags();
-        let (mut decision, generation) = match crate::route::route(
-            &mut pkt.routing_input,
-            pname,
-            flags,
-            &mut pkt.route_witness.output,
-        ) {
-            Ok(result) => result,
-            Err(_) => return Err(TC_ACT_SHOT),
-        };
-        routing_generation = generation;
-
-        decision.apply_mode_flags(flags, tuples.five.dst_port);
+        // The routing decision was evaluated at the TC entry (wan_egress_l2/l3),
+        // which is the only freplace-able program on this path under Linux 7.2+
+        // (CVE-2024-47794). Read it from scratch instead of calling the slot.
+        let decision = pkt.route_witness.output.decision;
         outbound = decision.handoff_outbound();
         mark = decision.mark;
         must = decision.must != 0;
+        routing_generation = pkt.routing_generation;
         let must_val = must as u8;
 
         let dscp = tuples.dscp;
@@ -302,16 +285,7 @@ fn do_tproxy_wan_egress_tcp(
             };
 
         let pname_bytes: Option<&[u8; TASK_COMM_LEN]> = handoff_pname;
-        let ambiguous = pkt.route_witness.output.flags & honk_ebpf_common::ROUTE_TRACE_ENABLED != 0
-            && (crate::maps::CONN_STATE_MAP.get_ptr(&tuples.five).is_some()
-                || ROUTING_HANDOFF_MAP.get_ptr(&tuples.five).is_some());
-        trace_id = if outbound == OUTBOUND_BLOCK
-            || (outbound == OUTBOUND_DIRECT && mark == 0 && (!dns || must))
-        {
-            0
-        } else {
-            crate::route::capture(&mut pkt.route_witness, &tuples.five, 0, ambiguous)
-        };
+        trace_id = pkt.trace_id;
 
         let tcp_conn = mark_tcp_seen(
             &tuples.five,
@@ -673,38 +647,15 @@ fn do_tproxy_wan_egress_udp(
     } else {
         None
     };
-    let pname = pid_pname_opt.map(|pid_pname| &pid_pname.pname);
-    crate::route::build_input(
-        &mut pkt.routing_input,
-        tuples,
-        route_mac,
-        L4ProtoType::Udp as u8,
-        ip_version,
-        true,
-    );
-    let flags = crate::maps::datapath_flags();
-    let (mut decision, generation) = match crate::route::route(
-        &mut pkt.routing_input,
-        pname,
-        flags,
-        &mut pkt.route_witness.output,
-    ) {
-        Ok(result) => result,
-        Err(_) => return Err(TC_ACT_SHOT),
-    };
-    let routing_generation = generation;
-
-    decision.apply_mode_flags(flags, tuples.five.dst_port);
+    // The routing decision was evaluated at the TC entry (wan_egress_l2/l3), the
+    // only freplace-able program on this path under Linux 7.2+ (CVE-2024-47794).
+    // Read it from scratch instead of calling the slot.
+    let decision = pkt.route_witness.output.decision;
     outbound = decision.handoff_outbound();
     mark = decision.mark;
     must = decision.must != 0;
-    let trace_id = if outbound == OUTBOUND_BLOCK
-        || (outbound == OUTBOUND_DIRECT && mark == 0 && (!dns || must))
-    {
-        0
-    } else {
-        crate::route::capture(&mut pkt.route_witness, &tuples.five, decision_token, false)
-    };
+    let routing_generation = pkt.routing_generation;
+    let trace_id = pkt.trace_id;
 
     if !is_short_lived_udp_traffic(&tuples.five) {
         let must_u8 = must as u8;
@@ -761,6 +712,81 @@ fn do_tproxy_wan_egress_udp(
         decision.direct_mark_index,
         pkt.incarnation,
     )
+}
+
+/// Compute the WAN egress routing decision at the TC entry classifier.
+///
+/// `wan_egress_l2/l3` is attached straight to the hook and is *not* a
+/// tail-call target, so its `honk_route_slot0/1` call can be freplaced on
+/// Linux 7.2+ (CVE-2024-47794 refuses an EXT link against a tail-call target,
+/// which `wan_egress_{tcp,udp}_tail` are). The decision is written into
+/// `PKT_SCRATCH_KEY` so the tail can apply it without recomputing the policy.
+///
+/// Only the cases the tail would have routed are evaluated here: a fresh TCP
+/// SYN (pure wire check) and a UDP miss. Established/Cached flows keep using
+/// the conntrack cache, which the tail refreshes exactly as before.
+#[inline(never)]
+fn route_wan_egress_at_entry(
+    ctx: &TcContext,
+    link_h_len: u32,
+    pkt: &mut crate::transport::ParsedPacket,
+    l4proto: u8,
+) -> bool {
+    let dns = pkt.tuples.five.dst_port == 53;
+    let proto = ctx.skb.protocol() as u16;
+    let ip_version = if proto == ETH_P_IP.to_be() {
+        IpVersionType::V4 as u8
+    } else {
+        IpVersionType::V6 as u8
+    };
+    let pid_pname_opt = socket_identity::lookup(ctx);
+    let route_mac = if link_h_len == ETH_HLEN {
+        Some(&pkt.ethh.src_addr)
+    } else {
+        None
+    };
+    let pname = pid_pname_opt.map(|pid_pname| &pid_pname.pname);
+    crate::route::build_input(
+        &mut pkt.routing_input,
+        &pkt.tuples,
+        route_mac,
+        l4proto,
+        ip_version,
+        true,
+    );
+    let flags = crate::maps::datapath_flags();
+    let (mut decision, generation) = match crate::route::route(
+        &mut pkt.routing_input,
+        pname,
+        flags,
+        &mut pkt.route_witness.output,
+    ) {
+        Ok(result) => result,
+        Err(_) => {
+            pkt.routing_computed = 0;
+            return false;
+        }
+    };
+    decision.apply_mode_flags(flags, pkt.tuples.five.dst_port);
+    let outbound = decision.handoff_outbound();
+    let mark = decision.mark;
+    let must = decision.must != 0;
+    let ambiguous = pkt.route_witness.output.flags & honk_ebpf_common::ROUTE_TRACE_ENABLED != 0
+        && (crate::maps::CONN_STATE_MAP.get_ptr(&pkt.tuples.five).is_some()
+            || ROUTING_HANDOFF_MAP.get_ptr(&pkt.tuples.five).is_some());
+    // Mirror the tail's capture gating: BLOCK and unmarked DIRECT flows are not
+    // traced, so the carried `trace_id` already reflects the final value.
+    let do_capture = !(outbound == OUTBOUND_BLOCK
+        || (outbound == OUTBOUND_DIRECT && mark == 0 && (!dns || must)));
+    pkt.trace_id = if do_capture {
+        crate::route::capture(&mut pkt.route_witness, &pkt.tuples.five, 0, ambiguous)
+    } else {
+        0
+    };
+    pkt.route_witness.output.decision = decision;
+    pkt.routing_generation = generation;
+    pkt.routing_computed = 1;
+    true
 }
 
 /// WAN egress entry point: parse the packet first so the verifier accepts
@@ -838,6 +864,26 @@ fn do_tproxy_wan_egress(ctx: &TcContext, link_h_len: u32) -> Verdict {
     // TCP fence/expiry refusal happens inside conntrack and its post-miss check.
     if pkt.l4proto != IPPROTO_TCP && crate::contrack::tuple_unavailable(&pkt.tuples.five) {
         return Err(TC_ACT_SHOT);
+    }
+
+    // Evaluate the routing policy at the entry, which is the only freplace-able
+    // program on this path under Linux 7.2+ (the tails are tail-call targets and
+    // CVE-2024-47794 blocks an EXT link against them). The tail reuses the
+    // decision carried in PKT_SCRATCH_KEY instead of calling the slot itself.
+    if pkt.l4proto == IPPROTO_TCP && is_new_tcp_connection(&pkt.tcph) {
+        if !route_wan_egress_at_entry(ctx, link_h_len, pkt, L4ProtoType::Tcp as u8) {
+            return Err(TC_ACT_SHOT);
+        }
+    } else if pkt.l4proto == IPPROTO_UDP
+        && (is_short_lived_udp_traffic(&pkt.tuples.five)
+            || crate::contrack::udp::lookup_udp_seen(&pkt.tuples.five).is_none())
+    {
+        // Route whenever the tail's miss branch would: a miss, or a short-lived
+        // HIT (the tail's fast path only short-circuits `!short_lived && HIT`,
+        // so a short-lived HIT still needs a fresh decision here).
+        if !route_wan_egress_at_entry(ctx, link_h_len, pkt, L4ProtoType::Udp as u8) {
+            return Err(TC_ACT_SHOT);
+        }
     }
 
     // The L4 handlers are separate programs behind a jump table. On 6.6 the
@@ -964,19 +1010,4 @@ fn do_wan_egress_udp_tail(ctx: &TcContext) -> Verdict {
     do_tproxy_wan_egress_udp(ctx, link_h_len, unsafe { &mut *pkt })
 }
 
-/// Freplace host for the WAN egress routing slot.
-///
-/// `wan_egress_{tcp,udp}_tail` are `WAN_EGRESS_TAIL` jump-table members, so
-/// Linux 7.2+ refuses an EXT link against them (EBUSY). This program is never
-/// attached to a hook and never tail-called, so it can carry `honk_route_slot0`
-/// / `honk_route_slot1` as freplace targets while the tails keep invoking the
-/// slot through their own call path. The body only exists to pull the slot
-/// functions into this program's BTF; it is never executed.
-#[unsafe(no_mangle)]
-#[unsafe(link_section = "classifier")]
-pub fn wan_egress_routing_carrier(_ctx: *mut __sk_buff) -> i32 {
-    let _ = unsafe { crate::route::honk_route_slot0(core::ptr::null(), core::ptr::null_mut()) };
-    let _ = unsafe { crate::route::honk_route_slot1(core::ptr::null(), core::ptr::null_mut()) };
-    0
-}
 
