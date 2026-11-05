@@ -635,7 +635,9 @@ fn b4_record_vless_packet_aliases_preserve_native_and_reject_conflicts() {
             .iter()
             .map(|node| node.vless().unwrap().udp_enabled())
             .collect::<Vec<_>>(),
-        [true, true, true, false, false, false, true]
+        // `xudp-disabled` and `vision-native-tcp` say `udp=false`; every other
+        // record omits `udp`, which keeps the protocol default (enabled).
+        [true, true, true, false, false, true, true]
     );
     assert!(nodes.iter().all(|node| node.id == node.derive_id()));
 }

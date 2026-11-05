@@ -215,7 +215,7 @@ async fn refresh_replays_before_busy_and_success_waits_for_real_runtime_publicat
 }
 
 #[tokio::test]
-async fn failed_fetch_and_failed_merge_preserve_previously_accepted_nodes() {
+async fn failed_fetch_preserves_previously_accepted_nodes() {
     let mut origin = Origin::new().await;
     let subscription = origin.subscription();
     let mut config = Config::default();
@@ -235,21 +235,6 @@ async fn failed_fetch_and_failed_merge_preserve_previously_accepted_nodes() {
         .await;
     assert_eq!(after_fetch["status"], "stale");
     assert_eq!(after_fetch["node_count"], 1);
-    let accepted: Value = fixture
-        .refresh(subscription.id, "bad-merge")
-        .await
-        .json()
-        .await
-        .unwrap();
-    respond(origin.next().await, NEW).await;
-    fixture.publish().await;
-    let operation = fixture.terminal(&accepted).await;
-    assert_eq!(operation["status"], "failed");
-    assert_eq!(operation["error"]["code"], "publication_rejected");
-    assert_eq!(
-        operation["error"]["details"]["diagnostic_code"],
-        "duplicate-node-id"
-    );
     assert!(
         fixture
             .state
@@ -260,15 +245,50 @@ async fn failed_fetch_and_failed_merge_preserve_previously_accepted_nodes() {
             .iter()
             .any(|node| node.name == "old" && node.subscription_id == Some(subscription.id))
     );
+    fixture.stop().await;
+    origin.stop().await;
+}
+
+#[tokio::test]
+async fn matching_endpoint_merge_keeps_the_static_node_and_adds_the_provider_copy() {
+    // The provider publishes exactly the endpoint already written by hand.
+    // Provenance splits the derived ID, so the publication is admitted and
+    // both outbounds remain instead of the provider being rejected.
+    let mut origin = Origin::new().await;
+    let subscription = origin.subscription();
+    let mut config = Config::default();
+    config.subscriptions.push(subscription.clone());
+    let static_node = Node::from_share_link(NEW).unwrap();
+    config.nodes.push(static_node.clone());
+    let mut fixture = Fixture::start(config, None, Some(OLD), &mut origin).await;
+    let accepted: Value = fixture
+        .refresh(subscription.id, "matching-merge")
+        .await
+        .json()
+        .await
+        .unwrap();
+    respond(origin.next().await, NEW).await;
+    fixture.publish().await;
+    let operation = fixture.terminal(&accepted).await;
+    assert_eq!(operation["status"], "succeeded");
+    assert_eq!(operation["result"]["node_count"], 1);
+    let nodes = fixture.state.config.read().await.nodes.clone();
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node.id == static_node.id && node.subscription_id.is_none()),
+        "the hand-written copy must survive"
+    );
+    assert!(
+        nodes.iter().any(|node| node.name == "new"
+            && node.subscription_id == Some(subscription.id)
+            && node.id != static_node.id),
+        "the provider copy must be admitted as its own outbound"
+    );
     let provider = fixture
         .get(&format!("/api/v1/providers/{}", subscription.id))
         .await;
-    assert_eq!(provider["updated_at"], after_fetch["updated_at"]);
-    assert_eq!(provider["last_error"]["code"], "publication_rejected");
-    assert_eq!(
-        provider["last_error"]["details"],
-        json!({"diagnostic_code": "duplicate-node-id"})
-    );
+    assert_eq!(provider["node_count"], 1);
     fixture.stop().await;
     origin.stop().await;
 }
