@@ -16,18 +16,19 @@ use std::os::fd::{FromRawFd, OwnedFd};
 /// Programs that carry the `honk_route_slotN` subprogram and therefore accept
 /// the generated routing extension.
 ///
-/// A freplace link is only accepted when the target program's own func_info
-/// holds the attach btf id; `BPF_LINK_CREATE` returns EINVAL otherwise. The WAN
-/// egress classifier hands a parsed packet to `wan_egress_{tcp,udp}_tail`
-/// through `WAN_EGRESS_TAIL`, so the routing call site now lives in the tail
-/// programs and `wan_egress_l2` / `wan_egress_l3` no longer carry the slot at
-/// all. Listing them made the initial policy publication fail with
-/// `BPF_LINK_CREATE EXT ... EINVAL` right after a successful load.
-const ROUTING_TARGETS: [&str; 4] = [
+/// Programs that carry the routing extension slot and receive the freplace link.
+///
+/// `wan_egress_routing_carrier` hosts the WAN egress slot: `wan_egress_{tcp,udp}_tail`
+/// are `WAN_EGRESS_TAIL` jump-table members, and Linux 7.2+ refuses an EXT link
+/// against a tail-call target (EBUSY), so the tails cannot be freplace targets
+/// themselves. The carrier is never attached or tail-called, and the tails keep
+/// invoking the slot through their own (shared, object-global) call path, so the
+/// published policy still applies to WAN egress traffic. The LAN ingress
+/// classifiers are not jump-table members and take the link directly.
+const ROUTING_TARGETS: [&str; 3] = [
     "lan_ingress_l2",
     "lan_ingress_l3",
-    "wan_egress_tcp_tail",
-    "wan_egress_udp_tail",
+    "wan_egress_routing_carrier",
 ];
 const FACT_MAP_CAPACITY: u32 = 2_048_000;
 const BPF_F_NO_PREALLOC: u32 = 1;

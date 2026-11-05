@@ -963,3 +963,20 @@ fn do_wan_egress_udp_tail(ctx: &TcContext) -> Verdict {
     };
     do_tproxy_wan_egress_udp(ctx, link_h_len, unsafe { &mut *pkt })
 }
+
+/// Freplace host for the WAN egress routing slot.
+///
+/// `wan_egress_{tcp,udp}_tail` are `WAN_EGRESS_TAIL` jump-table members, so
+/// Linux 7.2+ refuses an EXT link against them (EBUSY). This program is never
+/// attached to a hook and never tail-called, so it can carry `honk_route_slot0`
+/// / `honk_route_slot1` as freplace targets while the tails keep invoking the
+/// slot through their own call path. The body only exists to pull the slot
+/// functions into this program's BTF; it is never executed.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "classifier")]
+pub fn wan_egress_routing_carrier(_ctx: *mut __sk_buff) -> i32 {
+    let _ = unsafe { crate::route::honk_route_slot0(core::ptr::null(), core::ptr::null_mut()) };
+    let _ = unsafe { crate::route::honk_route_slot1(core::ptr::null(), core::ptr::null_mut()) };
+    0
+}
+
