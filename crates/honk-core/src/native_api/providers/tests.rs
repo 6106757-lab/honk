@@ -221,7 +221,7 @@ async fn failed_fetch_preserves_previously_accepted_nodes() {
     let mut config = Config::default();
     config.subscriptions.push(subscription.clone());
     config.nodes.push(Node::from_share_link(NEW).unwrap());
-    let mut fixture = Fixture::start(config, None, Some(OLD), &mut origin).await;
+    let fixture = Fixture::start(config, None, Some(OLD), &mut origin).await;
     let accepted: Value = fixture
         .refresh(subscription.id, "bad-body")
         .await
