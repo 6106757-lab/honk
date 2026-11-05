@@ -372,8 +372,17 @@ fn dns_fork_carries_the_detour_bindings() {
 fn udp_capability_matrix() {
     let anytls = node("x", NodeProtocol::AnyTLS);
     assert!((crate::descriptor::descriptor(anytls.protocol()).supports_udp)(&anytls));
-    let vmess = node("x", NodeProtocol::VMess);
-    assert!(!(crate::descriptor::descriptor(vmess.protocol()).supports_udp)(&vmess));
+    let mut vmess = node("x", NodeProtocol::VMess);
+    let vmess_udp = crate::descriptor::descriptor(vmess.protocol()).supports_udp;
+    assert!(
+        vmess_udp(&vmess),
+        "VMess command-UDP is available by default"
+    );
+    vmess.vmess_mut().unwrap().network = Some("tcp".into());
+    assert!(
+        !vmess_udp(&vmess),
+        "an explicit tcp-only network still gates UDP"
+    );
     let hy2 = node("x", NodeProtocol::Hysteria2);
     assert!((crate::descriptor::descriptor(hy2.protocol()).supports_udp)(&hy2));
 }

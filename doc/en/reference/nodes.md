@@ -215,7 +215,7 @@ For VMess JSON with `net: "ws"`, an omitted or empty `host` uses the endpoint ho
 | --- | --- | --- | --- | --- |
 | `ss` | `shadowsocks` | Yes | Yes | AEAD and Shadowsocks 2022 |
 | `trojan` | — | Yes | Yes* | TLS; TCP/WS/gRPC/XHTTP transport |
-| `vmess` | — | Yes | No | AEAD; TCP/WS/gRPC/XHTTP and REALITY; handler requires `rprx` |
+| `vmess` | — | Yes | Yes* | AEAD; TCP/WS/gRPC/XHTTP and REALITY; command-UDP is connected, one association per target; handler requires `rprx` |
 | `vless` | — | Yes | Configurable* | Native UDP, UoT v2, H2MUX, XUDP, Mux.Cool, Encryption, REALITY, and Vision; handler requires `rprx` |
 | `socks5` | — | Yes | Yes | CONNECT and UDP ASSOCIATE |
 | `hysteria2` | — | Yes | Yes | QUIC/H3, salamander, brutal/BBR, and port hopping |
@@ -225,7 +225,7 @@ For VMess JSON with `net: "ws"`, an omitted or empty `host` uses the endpoint ho
 | `direct` | — | Yes | Yes | Reserved built-in bypass outbound; no share-link scheme |
 | `block` | — | No | No | Reserved built-in reject outbound; no share-link scheme |
 
-`network` can disable packet dialing for Trojan, AnyTLS and VLESS independently of their stream transport. VMess UDP is not implemented.
+`network` can disable packet dialing for Trojan, VMess, AnyTLS and VLESS independently of their stream transport. VMess UDP uses the protocol's `RequestCommandUDP` (command byte `0x02`): the AEAD request header names one destination and each body chunk carries one datagram, so one association serves one target. It is connected UDP, not a shared full-cone source.
 
 | Protocol | UDP behavior |
 | --- | --- |
@@ -240,7 +240,7 @@ SOCKS5 UDP ASSOCIATE keeps one control TCP connection and one relay socket per c
 - Trojan and AnyTLS;
 - VLESS XUDP/Mux.Cool, UoT v2, and H2MUX.
 
-VLESS native UDP is the exception: its stream names one target. This applies to explicit `native` and to `auto` on UDP/53 and UDP/443 without Vision.
+VLESS native UDP and VMess command-UDP are the exceptions: their streams name one target, so replies cannot carry an arbitrary peer and they are not full-cone. For VLESS this applies to explicit `native` and to `auto` on UDP/53 and UDP/443 without Vision; VMess has no shared multi-target carrier at all.
 
 A reply from a previously uncontacted peer is delivered with that peer's source address. This implements the client side of RFC 5780 full-cone. The server must also use one unconnected socket per association and forward replies from any peer. honk cannot override server-side filtering; `direct` traffic follows the host's NAT. Limits:
 
@@ -253,7 +253,7 @@ A reply from a previously uncontacted peer is delivered with that peer's source 
 - Port-53 flows do not publish client reply framing in the datapath, so an unsolicited reply to a port-53 flow depends on host forwarding.
 - All client sources share one process-wide foreign-reply socket pool, with one socket per peer address and a cap of seven sockets per endpoint of capacity. A new foreign peer above the cap evicts the least recently used socket. The janitor closes a socket unused for one NAT timeout.
 - Replies from a source's 64 most recently closed destinations are dropped instead of delivered as foreign replies. This covers connection closure and dead-node purges. Rebinding removes a destination from the list; the 65th closure removes the oldest entry. Idle expiry and transport errors do not add entries, so those peers can still send foreign replies while the source lives. Bound flows are unaffected.
-- VMess has no UDP backend.
+- VMess command-UDP keeps one association per destination. It rejects datagrams above 16,366 bytes (one AEAD chunk) and never reports a foreign reply source.
 
 For protocols that own `network`, flat structured input accepts comma-separated `tcp`/`udp` tokens, ignoring token whitespace and ASCII case. `tcp` disables UDP; `udp` and `tcp,udp` both permit UDP. Empty or whitespace-only text becomes absent and retains the protocol's default capability. Unknown tokens such as `quic`, or empty tokens inside a nonempty list, reject the node. This controls UDP admission only: `udp` does not add a TCP rejection policy.
 
@@ -314,7 +314,7 @@ node {
 
 VMess accepts v2rayN Base64 JSON (`net`, `host`, `path`, `sni`) and Shadowrocket's `vmess://base64(auto:UUID@host:port)?...` authority form. The latter maps `tls`, `peer`/`sni`, `obfs=websocket|grpc`, `obfsParam`, `path`, and `remark`; standard/URL-safe Base64 and optional padding are accepted. Encoded-authority VMess requires AEAD authentication and `auto`/`aes-128-gcm`; unsupported ciphers and REALITY parameters are rejected, not silently replaced.
 
-VMess JSON `net` and Shadowrocket transport parameters select only the stream transport. They no longer populate packet-network capability; an omitted packet restriction retains the existing default UDP allowance for protocols with a UDP backend; VMess has none. Valid empty transport spelling is preserved where already used. On non-XHTTP transports, unrelated `mode` and `extra` export fields retain their legacy ignored behavior; they do not select XHTTP. Explicit conflicting transport claims still reject the node.
+VMess JSON `net` and Shadowrocket transport parameters select only the stream transport. They no longer populate packet-network capability; an omitted packet restriction retains the default UDP allowance for protocols with a UDP backend, VMess command-UDP included. Valid empty transport spelling is preserved where already used. On non-XHTTP transports, unrelated `mode` and `extra` export fields retain their legacy ignored behavior; they do not select XHTTP. Explicit conflicting transport claims still reject the node.
 
 VLESS supports TCP+REALITY+Vision, TCP+REALITY, TCP+WS, TCP+WS+TLS, TCP+gRPC, and the H2 XHTTP profile below. Unencrypted Vision's direct-copy path requires raw TCP with TLS 1.3 or REALITY, not WS/gRPC/XHTTP; encrypted Vision follows the composition rules below.
 

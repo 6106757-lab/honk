@@ -810,7 +810,12 @@ mod native_probe_tests {
                 .is_none()
         );
         let tcp_only = Node {
-            outbound: OutboundConfig::Vmess(Default::default()),
+            // VMess gained command-UDP, so the TCP-only leaf must state its
+            // packet restriction explicitly.
+            outbound: OutboundConfig::Vmess(honk_config::node::VmessConfig {
+                network: Some("tcp".into()),
+                ..Default::default()
+            }),
             ..nodes[0].clone()
         };
         let member = GroupMember::Node(&tcp_only);

@@ -166,8 +166,11 @@ impl ProxyRegistry {
                     .with_probeable(vless),
             );
             let vmess = Arc::new(VmessHandler::new());
+            // Command-UDP is a connected association (one stream per target),
+            // so VMess has a packet handler but no shared multi-target source.
             registry.register(
                 ProtocolEntry::new(NodeProtocol::VMess, vmess.clone())
+                    .with_packet(vmess.clone())
                     .with_warmable(vmess.clone())
                     .with_probeable(vmess),
             );

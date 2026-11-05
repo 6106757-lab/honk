@@ -1,3 +1,4 @@
+use super::PacketTransport;
 use super::*;
 use std::io;
 
@@ -70,7 +71,8 @@ fn test_request_header_plain_vector() {
     let session = fixed_session();
     let target: SocketAddr = "93.184.216.34:80".parse().unwrap();
     let plain =
-        VmessHandler::build_header_plain(&session, 3, &[0xaa, 0xbb, 0xcc], target, None).unwrap();
+        VmessHandler::build_header_plain(&session, 3, &[0xaa, 0xbb, 0xcc], target, None, CMD_TCP)
+            .unwrap();
     assert_eq!(plain, hex(HEADER_PLAIN));
 }
 
@@ -79,7 +81,8 @@ fn test_request_header_wire_vector() {
     let session = fixed_session();
     let target: SocketAddr = "93.184.216.34:80".parse().unwrap();
     let plain =
-        VmessHandler::build_header_plain(&session, 3, &[0xaa, 0xbb, 0xcc], target, None).unwrap();
+        VmessHandler::build_header_plain(&session, 3, &[0xaa, 0xbb, 0xcc], target, None, CMD_TCP)
+            .unwrap();
     let wire = VmessHandler::seal_request_header(
         &fixed_cmd_key(),
         &hex(AUTH_ID).try_into().unwrap(),
@@ -87,6 +90,80 @@ fn test_request_header_wire_vector() {
         &plain,
     );
     assert_eq!(wire, hex(HEADER_WIRE));
+}
+
+#[test]
+fn test_udp_request_header_uses_command_udp() {
+    let session = fixed_session();
+    let target: SocketAddr = "93.184.216.34:53".parse().unwrap();
+    let tcp =
+        VmessHandler::build_header_plain(&session, 3, &[0xaa, 0xbb, 0xcc], target, None, CMD_TCP)
+            .unwrap();
+    let udp =
+        VmessHandler::build_header_plain(&session, 3, &[0xaa, 0xbb, 0xcc], target, None, CMD_UDP)
+            .unwrap();
+    // version + iv + key + resp + option + padding/security + reserved
+    const COMMAND_INDEX: usize = 1 + 16 + 16 + 1 + 1 + 1 + 1;
+    assert_eq!(tcp[COMMAND_INDEX], CMD_TCP);
+    assert_eq!(udp[COMMAND_INDEX], CMD_UDP);
+    assert_eq!(tcp.len(), udp.len());
+    // The FNV-1a checksum covers the command byte, so the trailing hash
+    // must change with it rather than staying a stale TCP checksum.
+    assert_ne!(tcp, udp);
+}
+
+#[tokio::test]
+async fn vmess_command_udp_transport_roundtrips_datagrams() {
+    let session = fixed_session();
+    let target: SocketAddr = "93.184.216.34:53".parse().unwrap();
+    let (client, mut server) = tokio::io::duplex(64 * 1024);
+    let transport =
+        VmessHandler::new_udp_transport(Box::new(client), session.clone(), target).unwrap();
+
+    // One datagram is one AEAD chunk, with no per-packet address header.
+    transport.send_packet(b"dns-query").await.unwrap();
+    let mut request_body = BodyChunks::new(&session.req_key, &session.req_iv).unwrap();
+    let mut len_buf = [0u8; 2];
+    server.read_exact(&mut len_buf).await.unwrap();
+    let chunk_len = request_body.decode_len(len_buf) as usize;
+    let mut ct = vec![0u8; chunk_len];
+    server.read_exact(&mut ct).await.unwrap();
+    let n = request_body.open_chunk(&mut ct).unwrap();
+    assert_eq!(&ct[..n], b"dns-query");
+
+    // The reply arrives behind the AEAD response header; its source is the
+    // single destination the association was opened for.
+    let mut wire = hex(RESP_HEADER_WIRE);
+    wire.extend_from_slice(&hex(RCHUNK0));
+    server.write_all(&wire).await.unwrap();
+    server.flush().await.unwrap();
+
+    let mut buf = [0u8; 256];
+    let (n, peer) = transport.recv_packet(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"HTTP/1.1 200 OK");
+    assert_eq!(peer, target);
+    assert_eq!(transport.relay_addr(), target);
+    assert!(!transport.allows_full_cone_replies());
+}
+
+#[tokio::test]
+async fn vmess_command_udp_transport_rejects_invalid_datagram_sizes() {
+    let session = fixed_session();
+    let target: SocketAddr = "93.184.216.34:53".parse().unwrap();
+    let (client, _server) = tokio::io::duplex(64 * 1024);
+    let transport = VmessHandler::new_udp_transport(Box::new(client), session, target).unwrap();
+    assert_eq!(
+        transport.send_packet(&[]).await.unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        transport
+            .send_packet(&vec![0u8; CHUNK_MAX_LEN + 1])
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
 }
 
 #[test]

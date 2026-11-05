@@ -198,8 +198,11 @@ fn udp_incapable_nodes() -> [Node; 2] {
     [
         (
             "vmess",
+            // Command-UDP is now implemented; only an explicit packet
+            // restriction keeps a VMess leaf out of UDP selection.
             OutboundConfig::Vmess(VmessConfig {
                 uuid: Some(uuid.into()),
+                network: Some("tcp".into()),
                 ..Default::default()
             }),
         ),
