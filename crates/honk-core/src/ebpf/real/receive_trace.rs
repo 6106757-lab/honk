@@ -124,7 +124,12 @@ const CANDIDATE: Candidate<'static> = Candidate {
     probe: "honk_udp_receive_candidate_probe",
 };
 
-fn attach_fentry(bpf: &mut Ebpf, btf: &Btf, name: &str, target: &str) -> anyhow::Result<FEntryLink> {
+fn attach_fentry(
+    bpf: &mut Ebpf,
+    btf: &Btf,
+    name: &str,
+    target: &str,
+) -> anyhow::Result<FEntryLink> {
     let program: &mut FEntry = bpf
         .program_mut(name)
         .ok_or_else(|| anyhow::anyhow!("missing receive program {name}"))?
@@ -439,9 +444,21 @@ mod tests {
         ] {
             let (mut bpf, kernel_btf) = ReceiveTrace::load_unattached_for_test()?;
             let (ipv4, ipv6) = if broken == IPV4.target {
-                (Family { target: MISSING, ..IPV4 }, IPV6)
+                (
+                    Family {
+                        target: MISSING,
+                        ..IPV4
+                    },
+                    IPV6,
+                )
             } else {
-                (IPV4, Family { target: MISSING, ..IPV6 })
+                (
+                    IPV4,
+                    Family {
+                        target: MISSING,
+                        ..IPV6
+                    },
+                )
             };
             let trace = ReceiveTrace::attach_with(&mut bpf, &kernel_btf, &ipv4, &ipv6, &CANDIDATE)
                 .expect("one family must survive a sibling hook failure");
