@@ -428,6 +428,38 @@ impl Router {
         &action.outbound
     }
 
+    /// Resolve the outbound group a domain's *content* traffic would take,
+    /// using only the domain name against the static domain/geosite rules.
+    ///
+    /// This is the inverse of [`Self::route`]: it answers "which group would
+    /// this domain's traffic use?" without needing an IP. Used by DNS
+    /// follow-policy so a resolver query egresses through the same group the
+    /// domain's data would use — closing geographic split between DNS egress
+    /// and content egress. Rules that also require IP/port/process predicates
+    /// naturally miss (those inputs are absent), so only pure domain/geosite
+    /// rules participate, which is exactly what follow-policy wants.
+    ///
+    /// Returns the first-matching rule's outbound, or the fallback outbound
+    /// (e.g. a `Final`/`direct` group) when nothing matches — there is no
+    /// separate miss path because traffic routing itself always resolves to a
+    /// group.
+    pub fn route_domain(&self, domain: &str) -> &str {
+        use std::net::Ipv4Addr;
+        let conn = ConnectionInfo {
+            domain: Some(domain.to_ascii_lowercase()),
+            dst_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            dst_port: 0,
+            src_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            src_port: 0,
+            protocol: "",
+            process_name: None,
+            mac: None,
+            dscp: None,
+        };
+        let (action, _matched) = self.route_action(&conn);
+        &action.outbound
+    }
+
     /// First matching rule's action, else the configured fallback action.
     pub fn route_action<'a>(
         &'a self,

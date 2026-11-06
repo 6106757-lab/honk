@@ -11,6 +11,7 @@ use super::entries::{UdpFamily, UpstreamEntry};
 use super::routing::DnsDialRoute;
 use crate::dns::ecs::EcsQuery;
 use crate::dns::forwarder::DnsUpstreamPool;
+use crate::dns::query::QueryContext;
 use crate::dns::transport::{IdlePressureRelease, UdpPool, UdpPoolCapacity};
 
 struct UdpRetirementDrain<'a>(&'a UpstreamPool);
@@ -466,6 +467,9 @@ impl UpstreamPool {
         raw_query: &[u8],
     ) -> anyhow::Result<Vec<u8>> {
         let mut original_business = None;
+        let qname = QueryContext::parse(raw_query)
+            .ok()
+            .and_then(|ctx| ctx.qname().and_then(|name| name.to_domain_name()));
         let current = { entry.udp.lock().current_address() };
         let has_traffic_router =
             self.traffic_router_snapshot.read().is_some() || self.traffic_router.read().is_some();
@@ -479,15 +483,25 @@ impl UpstreamPool {
                 witness.selected_ip(target.ip());
             }
             Some(
-                self.resolve_dial_route_for_address(entry, target, original_business.as_ref())
-                    .await?,
+                self.resolve_dial_route_for_address(
+                    entry,
+                    target,
+                    original_business.as_ref(),
+                    qname.as_deref(),
+                )
+                .await?,
             )
         } else {
             None
         };
         let failed = if let Some(address) = current {
             let route = self
-                .resolve_dial_route_for_address(entry, address, original_business.as_ref())
+                .resolve_dial_route_for_address(
+                    entry,
+                    address,
+                    original_business.as_ref(),
+                    qname.as_deref(),
+                )
                 .await?;
             if route.node.is_some() {
                 match self
@@ -547,8 +561,13 @@ impl UpstreamPool {
             let route = match initial_route {
                 Some(route) if route.target == first => route,
                 _ => {
-                    self.resolve_dial_route_for_address(entry, first, original_business.as_ref())
-                        .await?
+                    self.resolve_dial_route_for_address(
+                        entry,
+                        first,
+                        original_business.as_ref(),
+                        qname.as_deref(),
+                    )
+                    .await?
                 }
             };
             if route.node.is_some() {
@@ -599,7 +618,12 @@ impl UpstreamPool {
             witness.selected_ip(retry.ip());
         }
         let route = self
-            .resolve_dial_route_for_address(entry, retry, original_business.as_ref())
+            .resolve_dial_route_for_address(
+                entry,
+                retry,
+                original_business.as_ref(),
+                qname.as_deref(),
+            )
             .await?;
         if route.node.is_some() {
             return self
@@ -653,9 +677,17 @@ impl UpstreamPool {
         let mut last_error = None;
         let mut first_error = None;
         let mut original_business = None;
+        let qname = QueryContext::parse(raw_query)
+            .ok()
+            .and_then(|ctx| ctx.qname().and_then(|name| name.to_domain_name()));
         for target in targets {
             let route = self
-                .resolve_dial_route_for_address(entry, target, original_business.as_ref())
+                .resolve_dial_route_for_address(
+                    entry,
+                    target,
+                    original_business.as_ref(),
+                    qname.as_deref(),
+                )
                 .await?;
             let _admission = self.admit_query().await?;
             let business = admit_score_attempt(route.feedback.as_ref(), &mut original_business)?;
