@@ -139,6 +139,8 @@ async fn native_bulk_oversize_counts_unowned_mapped_sources_before_any_close() -
                 network: "tcp".into(),
                 process: None,
                 process_path: None,
+                activity: None,
+                domain_source: None,
             });
         }
         let base = format!("{}/connections", fixture.api);

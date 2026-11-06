@@ -129,6 +129,9 @@ impl UdpEndpointPool {
         }
         let tracked = make_entry();
         let id = tracked.id.clone();
+        if let Some(activity) = tracked.activity.as_ref() {
+            endpoint.set_activity(Arc::clone(activity));
+        }
         endpoint.set_tracker(id.clone());
         tracker.register_owned(
             tracked,

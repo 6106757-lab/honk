@@ -765,7 +765,7 @@ fn update_input(
     );
 }
 
-fn tcp_domain_source(sniff: &crate::sniffing::SniffResult) -> Option<DomainSource> {
+pub(super) fn tcp_domain_source(sniff: &crate::sniffing::SniffResult) -> Option<DomainSource> {
     match &sniff.traffic_type {
         crate::sniffing::TrafficType::Tls => Some(DomainSource::TlsSni),
         crate::sniffing::TrafficType::Http => Some(DomainSource::HttpHost),

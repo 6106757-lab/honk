@@ -89,6 +89,8 @@ fn tracked_entry(id: &str) -> ConnectionEntry {
         network: "tcp".to_string(),
         process: None,
         process_path: None,
+        activity: None,
+        domain_source: None,
     }
 }
 

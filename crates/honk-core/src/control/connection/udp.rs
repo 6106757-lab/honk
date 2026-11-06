@@ -846,6 +846,12 @@ impl ControlPlaneHandle {
                         network: "udp".to_string(),
                         process: handoff.as_ref().and_then(|ho| ho.process_name()),
                         process_path: None,
+                        activity: Some(std::sync::Arc::new(
+                            crate::connection_tracker::ConnectionActivity::new(),
+                        )),
+                        domain_source: quic_domain
+                            .as_ref()
+                            .map(|_| crate::observe::vocab::DomainSource::QuicSni),
                     }
                 },
             )

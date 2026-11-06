@@ -298,20 +298,45 @@ impl FlowStore {
         })
     }
 
+    /// Single-record convenience for tests; the API uses the batch form.
+    #[allow(dead_code)]
     pub(crate) fn connection_evidence(&self, flow_id: &str) -> Option<ConnectionEvidence> {
+        let ids = [flow_id.to_owned()].into_iter().collect();
+        self.connection_evidence_map(&ids).remove(flow_id)
+    }
+
+    /// Batch lookup for the connection list. A P2P fan-out can produce
+    /// hundreds of rows; looking each one up separately would run a full
+    /// prune — and possibly emit eviction gaps — once per row. One lock and
+    /// one prune serve the whole page instead.
+    #[cfg(feature = "native-api")]
+    pub(crate) fn connection_evidence_map(
+        &self,
+        ids: &std::collections::HashSet<String>,
+    ) -> std::collections::HashMap<String, ConnectionEvidence> {
         let mut store = self.inner.lock();
         self.prune(&mut store, Instant::now());
-        let record = store.records.iter().find(|record| record.id() == flow_id)?;
-        let summary = &record.summary;
-        Some(ConnectionEvidence {
-            chain: summary.chain.clone(),
-            chain_source: summary.chain_source,
-            rule_id: summary.rule_id.clone(),
-            rule_expression: summary.rule_expression.clone(),
-            rule_source: summary.rule_source,
-            domain_source: summary.domain_source,
-            started_at: summary.started_at.clone(),
-        })
+        let mut found = std::collections::HashMap::with_capacity(ids.len());
+        for record in &store.records {
+            let id = &record.summary.id;
+            if !ids.contains(id) {
+                continue;
+            }
+            let summary = &record.summary;
+            found.insert(
+                id.clone(),
+                ConnectionEvidence {
+                    chain: summary.chain.clone(),
+                    chain_source: summary.chain_source,
+                    rule_id: summary.rule_id.clone(),
+                    rule_expression: summary.rule_expression.clone(),
+                    rule_source: summary.rule_source,
+                    domain_source: summary.domain_source,
+                    started_at: summary.started_at.clone(),
+                },
+            );
+        }
+        found
     }
 
     /// Expiry stays with the sampler tick; the connection path only pays for

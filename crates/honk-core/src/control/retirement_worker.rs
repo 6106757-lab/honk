@@ -230,6 +230,16 @@ pub(in crate::control) fn spawn_retirement_worker(
     port: Arc<RetirementPort>,
 ) -> RetirementWorker {
     const REMOVAL_QUEUE_CAPACITY: usize = 1024;
+    // Retire quiet UDP observation entries on a fixed cadence, independently
+    // of API polling and of the retirement job's success path. This never
+    // touches sockets or NAT mappings, only the tracker's observation rows.
+    let prune_tracker = Arc::clone(&tracker);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            prune_tracker.prune_stale_udp();
+        }
+    });
     let (remove_tx, remove_rx) = mpsc::channel(REMOVAL_QUEUE_CAPACITY);
     let (tcp_tx, tcp_rx) = mpsc::channel(REMOVAL_QUEUE_CAPACITY);
     udp_pool.set_remove_sink(remove_tx);
@@ -447,6 +457,8 @@ mod tests {
             network: "tcp".to_string(),
             process: None,
             process_path: None,
+            activity: None,
+            domain_source: None,
         });
         let locked = backend.read().await;
         let (fatal_tx, mut fatal_rx) = mpsc::unbounded_channel();

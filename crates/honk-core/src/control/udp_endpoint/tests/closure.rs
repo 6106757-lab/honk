@@ -31,6 +31,8 @@ pub(in crate::control::udp_endpoint) fn tracked_entry(
         network: "udp".into(),
         process: None,
         process_path: None,
+        activity: None,
+        domain_source: None,
     }
 }
 

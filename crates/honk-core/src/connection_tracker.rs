@@ -5,11 +5,71 @@
 
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::watch;
+
+/// How long a UDP mapping may stay silent before its *observation* entry is
+/// retired. These are deliberately shorter (unreplied) / equal (assured) to
+/// the datapath's own NAT and reply-idle windows: pruning here never closes a
+/// socket or drops a NAT mapping, it only stops reporting a mapping that has
+/// already gone quiet. A mapping that keeps sending or receiving is touched on
+/// every packet and therefore never reaches any of these thresholds.
+const UNREPLIED_UDP_IDLE: Duration = Duration::from_secs(10);
+const DNS_UDP_IDLE: Duration = Duration::from_secs(5);
+const ASSURED_UDP_IDLE: Duration = Duration::from_secs(120);
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Liveness shared between a UDP endpoint and its tracker entry. The endpoint
+/// touches it on every packet; the tracker reads it to self-heal entries whose
+/// retirement job never reached `tracker.remove()`.
+pub struct ConnectionActivity {
+    last_active_ms: AtomicU64,
+    replied: AtomicBool,
+}
+
+impl ConnectionActivity {
+    pub fn new() -> Self {
+        Self {
+            last_active_ms: AtomicU64::new(now_ms()),
+            replied: AtomicBool::new(false),
+        }
+    }
+
+    /// A packet went out or came back for this mapping.
+    pub fn touch(&self) {
+        self.last_active_ms.store(now_ms(), Ordering::Relaxed);
+    }
+
+    /// A reply was delivered to the client, so this is an established
+    /// two-way mapping rather than a one-shot probe.
+    pub fn mark_replied(&self) {
+        self.replied.store(true, Ordering::Relaxed);
+        self.touch();
+    }
+
+    pub fn replied(&self) -> bool {
+        self.replied.load(Ordering::Relaxed)
+    }
+
+    pub fn idle(&self) -> Duration {
+        Duration::from_millis(now_ms().saturating_sub(self.last_active_ms.load(Ordering::Relaxed)))
+    }
+}
+
+impl Default for ConnectionActivity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CloseOutcome {
@@ -217,7 +277,14 @@ pub struct ConnectionEntry {
     pub upload: Arc<AtomicU64>,
     pub download: Arc<AtomicU64>,
     pub start_time: Instant,
+    /// Verified domain observed for this connection (SNI / HTTP Host / QUIC
+    /// SNI / DNS mapping). This is *not* the dial target: direct and block
+    /// always dial by IP, but the domain used to route the connection is
+    /// still valuable observation data and must not be discarded.
     pub domain: Option<String>,
+    /// Where that domain came from, so the API can report it even when the
+    /// bounded flow store has already evicted the connection's evidence.
+    pub(crate) domain_source: Option<crate::observe::vocab::DomainSource>,
     pub network: String,
     /// Originating process name for locally-generated flows (cgroup cookie
     /// attribution); None for LAN-forwarded traffic.
@@ -225,6 +292,10 @@ pub struct ConnectionEntry {
     /// /proc/<pid>/exe resolved at registration; None when the pid is
     /// unknown or the process already exited.
     pub process_path: Option<String>,
+    /// UDP liveness shared with the endpoint. None for TCP and for entries
+    /// created by paths that do not own a UDP endpoint; those are never
+    /// pruned by age, so a long-lived download can never be dropped here.
+    pub activity: Option<Arc<ConnectionActivity>>,
 }
 
 impl ConnectionEntry {
@@ -516,6 +587,49 @@ impl ConnectionTracker {
         self.entries.remove(id);
     }
 
+    /// Retire observation entries for UDP mappings that have gone quiet.
+    ///
+    /// One-shot/unreplied probes and short-lived DNS exchanges are dropped
+    /// quickly; established two-way mappings keep the full idle allowance.
+    /// Entries without shared activity (TCP, legacy paths) are untouched, so
+    /// a long-lived download can never be dropped by age here. This only
+    /// removes the observation record — the endpoint pool, sockets and NAT
+    /// mappings own the datapath and are unaffected.
+    ///
+    /// It also self-heals entries whose retirement job failed: without this,
+    /// `remove()` is only reached from `retirement_worker::settle()` on its
+    /// success path, and a failed batch leaves an entry behind forever.
+    pub fn prune_stale_udp(&self) -> usize {
+        let mut stale = Vec::new();
+        for item in &self.entries {
+            let entry = &item.value().entry;
+            if entry.network != "udp" {
+                continue;
+            }
+            let Some(activity) = entry.activity.as_ref() else {
+                continue;
+            };
+            let dns = [&entry.source, &entry.destination]
+                .into_iter()
+                .any(|address| address.rsplit_once(':').is_some_and(|(_, port)| port == "53"));
+            let allowance = if dns {
+                DNS_UDP_IDLE
+            } else if activity.replied() {
+                ASSURED_UDP_IDLE
+            } else {
+                UNREPLIED_UDP_IDLE
+            };
+            if activity.idle() >= allowance {
+                stale.push(item.key().clone());
+            }
+        }
+        let removed = stale.len();
+        for id in stale {
+            self.entries.remove(&id);
+        }
+        removed
+    }
+
     /// Return a point-in-time snapshot of all active connections.
     pub fn snapshot(&self) -> Vec<ConnectionSnapshot> {
         self.entries
@@ -585,6 +699,8 @@ mod tests {
                 network: "tcp".into(),
                 process: None,
                 process_path: None,
+                activity: None,
+                domain_source: None,
             }
         }
         let tracker = Arc::new(ConnectionTracker::new());
@@ -616,5 +732,114 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["new"]
         );
+    }
+
+    #[cfg(feature = "native-api")]
+    mod udp_pruning {
+        use super::super::*;
+
+        fn udp_entry(
+            id: &str,
+            destination: &str,
+            activity: Option<Arc<ConnectionActivity>>,
+        ) -> ConnectionEntry {
+            ConnectionEntry {
+                id: id.into(),
+                source: "172.20.1.128:40000".into(),
+                destination: destination.into(),
+                proxy: "direct".into(),
+                routed_outbound: Some("direct".into()),
+                native_flow_id: None,
+                rule: "dip(geoip: cn)".into(),
+                rule_payload: String::new(),
+                chains: Vec::new(),
+                upload: Arc::new(AtomicU64::new(0)),
+                download: Arc::new(AtomicU64::new(0)),
+                start_time: Instant::now(),
+                domain: None,
+                network: "udp".into(),
+                process: None,
+                process_path: None,
+                activity,
+                domain_source: None,
+            }
+        }
+
+        fn age(activity: &ConnectionActivity, idle: Duration) {
+            activity.last_active_ms.store(
+                now_ms().saturating_sub(idle.as_millis() as u64),
+                Ordering::Relaxed,
+            );
+        }
+
+        fn ids(tracker: &ConnectionTracker) -> Vec<String> {
+            let mut values: Vec<_> = tracker.snapshot().iter().map(|e| e.id.clone()).collect();
+            values.sort();
+            values
+        }
+
+        #[test]
+        fn an_unreplied_one_shot_probe_is_released_quickly() {
+            let tracker = ConnectionTracker::new();
+            let activity = Arc::new(ConnectionActivity::new());
+            age(&activity, Duration::from_secs(11));
+            tracker.register(udp_entry("probe", "111.9.213.179:9735", Some(activity)));
+            assert_eq!(tracker.prune_stale_udp(), 1);
+            assert!(ids(&tracker).is_empty());
+        }
+
+        #[test]
+        fn an_answered_mapping_keeps_the_full_idle_window() {
+            let tracker = ConnectionTracker::new();
+            let activity = Arc::new(ConnectionActivity::new());
+            activity.mark_replied();
+            tracker.register(udp_entry("quic", "49.7.48.51:9681", Some(Arc::clone(&activity))));
+            age(&activity, Duration::from_secs(30));
+            assert_eq!(tracker.prune_stale_udp(), 0);
+            age(&activity, Duration::from_secs(121));
+            assert_eq!(tracker.prune_stale_udp(), 1);
+        }
+
+        #[test]
+        fn a_dns_exchange_uses_its_own_short_window() {
+            let tracker = ConnectionTracker::new();
+            let activity = Arc::new(ConnectionActivity::new());
+            activity.mark_replied();
+            age(&activity, Duration::from_secs(6));
+            tracker.register(udp_entry("dns", "172.20.1.1:53", Some(activity)));
+            assert_eq!(tracker.prune_stale_udp(), 1);
+        }
+
+        #[test]
+        fn tcp_and_udp_without_a_clock_are_never_dropped_by_age() {
+            let tracker = ConnectionTracker::new();
+            let mut tcp = udp_entry("tcp", "49.7.48.51:443", None);
+            tcp.network = "tcp".into();
+            tracker.register(tcp);
+            let stale = Arc::new(ConnectionActivity::new());
+            age(&stale, Duration::from_secs(600));
+            let mut legacy = udp_entry("legacy", "49.7.48.51:9999", None);
+            legacy.network = "udp".into();
+            tracker.register(legacy);
+            assert_eq!(tracker.prune_stale_udp(), 0);
+            assert_eq!(ids(&tracker), ["legacy", "tcp"]);
+        }
+
+        #[test]
+        fn a_mapping_that_keeps_exchanging_packets_is_never_pruned() {
+            let tracker = ConnectionTracker::new();
+            let activity = Arc::new(ConnectionActivity::new());
+            tracker.register(udp_entry(
+                "live",
+                "49.7.48.51:9681",
+                Some(Arc::clone(&activity)),
+            ));
+            for _ in 0..5 {
+                age(&activity, Duration::from_secs(9));
+                activity.touch();
+                assert_eq!(tracker.prune_stale_udp(), 0);
+            }
+            assert_eq!(ids(&tracker), ["live"]);
+        }
     }
 }

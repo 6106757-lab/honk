@@ -9,6 +9,7 @@
 
 #[cfg(test)]
 use self::driver::TRANSPORT_SEND_TIMEOUT;
+use crate::connection_tracker::ConnectionActivity;
 use crate::ebpf::UdpFlowOwner;
 use crate::stats::{ActiveConnectionGuard, OutboundTracker, StatsManager};
 use bytes::Bytes;
@@ -20,6 +21,7 @@ use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -191,6 +193,9 @@ pub struct UdpEndpoint {
     #[cfg(test)]
     source_reply_hook: Mutex<Option<Arc<source::ReplyAdmissionHook>>>,
     tracker_id: Mutex<Option<String>>,
+    /// Shared with the tracker entry; touched on every packet so the API can
+    /// tell a live mapping from a stale one without a second clock.
+    activity: OnceLock<Arc<ConnectionActivity>>,
     pub(in crate::control) native: observation::EndpointObservation,
     retirement: EndpointIoGuard,
 }
@@ -292,6 +297,7 @@ impl UdpEndpoint {
             #[cfg(test)]
             source_reply_hook: Mutex::new(None),
             tracker_id: Mutex::new(None),
+            activity: OnceLock::new(),
             score_reporter,
             health_family,
             native: Default::default(),
@@ -324,6 +330,13 @@ impl UdpEndpoint {
         *self.tracker_id.lock() = Some(conn_id);
     }
 
+    /// Share the entry's liveness clock with this endpoint. Called once, at
+    /// tracker registration; a missing clock simply means the entry is not
+    /// eligible for age-based pruning.
+    pub fn set_activity(&self, activity: Arc<ConnectionActivity>) {
+        let _ = self.activity.set(activity);
+    }
+
     /// Counter clones for the tracker entry.
     pub fn byte_counters(&self) -> (Arc<AtomicU64>, Arc<AtomicU64>) {
         (self.upload.clone(), self.download.clone())
@@ -332,11 +345,17 @@ impl UdpEndpoint {
     /// Count client→proxy bytes (lock-free).
     pub fn tracker_upload(&self, n: u64) {
         self.upload.fetch_add(n, Ordering::Relaxed);
+        if let Some(activity) = self.activity.get() {
+            activity.touch();
+        }
     }
 
     /// Count proxy→client bytes (lock-free).
     pub fn tracker_download(&self, n: u64) {
         self.download.fetch_add(n, Ordering::Relaxed);
+        if let Some(activity) = self.activity.get() {
+            activity.touch();
+        }
     }
 
     fn score_reply(&self, bytes: u64) {
@@ -382,6 +401,9 @@ impl UdpEndpoint {
     }
 
     pub fn mark_reply(&self) {
+        if let Some(activity) = self.activity.get() {
+            activity.mark_replied();
+        }
         let first = !self.has_reply.swap(true, Ordering::Relaxed);
         if first && let Some(flow) = self.native.flow() {
             flow.transition(

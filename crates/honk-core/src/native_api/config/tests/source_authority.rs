@@ -601,6 +601,8 @@ async fn connection_projection_masks_listener_values_without_losing_flow_referen
         network: "tcp".into(),
         process: Some("/usr/bin/user@host".into()),
         process_path: None,
+        activity: None,
+        domain_source: None,
     });
     let value = fixture.get("/api/v1/connections?detail=full").await;
     let row = &value["tcp"][0];

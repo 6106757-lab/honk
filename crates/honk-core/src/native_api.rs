@@ -37,7 +37,7 @@ pub use server::NativeServer;
 pub(crate) use startup::NativeRuntime;
 pub use types::{ApiError, ErrorCode};
 
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -512,11 +512,19 @@ impl Ord for Candidate {
     }
 }
 
-fn connection(state: &NativeState, entry: &ConnectionEntry, full: bool) -> Connection {
-    let evidence = entry
+fn connection(
+    entry: &ConnectionEntry,
+    full: bool,
+    evidence: &HashMap<String, crate::observe::flows::ConnectionEvidence>,
+) -> Connection {
+    // The flow store is a bounded ring (MAX_RECORDS). A burst of P2P flows can
+    // evict a still-live connection's evidence, which used to blank out every
+    // evidence-derived column. The tracker entry carries its own routing and
+    // liveness data, so fall back to that when the flow record is gone.
+    let found = entry
         .native_flow_id
         .as_deref()
-        .and_then(|id| state.observation.core.flows.connection_evidence(id));
+        .and_then(|id| evidence.get(id));
     Connection {
         id: entry.id.clone(),
         flow_id: entry.native_flow_id.clone(),
@@ -526,25 +534,35 @@ fn connection(state: &NativeState, entry: &ConnectionEntry, full: bool) -> Conne
         dst: full.then(|| entry.destination.clone()),
         domain: full.then(|| entry.domain.clone()),
         outbound: entry.routed_outbound.clone(),
-        chain: evidence
-            .as_ref()
+        chain: found
             .map(|value| value.chain.clone())
-            .unwrap_or_default(),
-        chain_source: evidence
-            .as_ref()
-            .map_or("unknown", |value| value.chain_source),
-        rule_id: evidence.as_ref().and_then(|value| value.rule_id.clone()),
-        rule_expression: evidence
-            .as_ref()
-            .and_then(|value| value.rule_expression.clone()),
-        rule_source: evidence
-            .as_ref()
-            .map_or(crate::observe::vocab::RuleSource::Unknown, |value| {
-                value.rule_source
-            }),
+            .unwrap_or_else(|| entry.chains.clone()),
+        chain_source: found.map_or_else(
+            || {
+                if entry.chains.is_empty() {
+                    "unknown"
+                } else {
+                    "reconstructed"
+                }
+            },
+            |value| value.chain_source,
+        ),
+        rule_id: found.and_then(|value| value.rule_id.clone()),
+        rule_expression: found
+            .and_then(|value| value.rule_expression.clone())
+            .or_else(|| (!entry.rule.is_empty()).then(|| entry.rule.clone())),
+        rule_source: found.map_or(crate::observe::vocab::RuleSource::Unknown, |value| {
+            value.rule_source
+        }),
         ingress: None,
-        domain_source: evidence.as_ref().and_then(|value| value.domain_source),
-        started_at: evidence.map(|value| value.started_at),
+        domain_source: found
+            .and_then(|value| value.domain_source)
+            .or(entry.domain_source),
+        started_at: found.map(|value| value.started_at.clone()).or_else(|| {
+            SystemTime::now()
+                .checked_sub(entry.start_time.elapsed())
+                .map(timestamp)
+        }),
         observed_by: "userspace",
         upload_bytes: Some(entry.upload.load(Ordering::Relaxed).to_string()),
         download_bytes: Some(entry.download.load(Ordering::Relaxed).to_string()),
@@ -569,6 +587,23 @@ fn connections(state: &NativeState, uri: &Uri, id: &RequestId) -> Result<Respons
     let mut total_tcp = 0;
     let mut total_udp = 0;
     let mut selected: BinaryHeap<Candidate> = BinaryHeap::with_capacity(limit);
+    // Self-heal observation entries for UDP mappings that have gone quiet.
+    // This only drops tracker records; endpoints, sockets and NAT mappings
+    // keep running and are still driven by the datapath's own timeouts.
+    state.tracker.prune_stale_udp();
+    // Resolve every row's evidence in one pass. Looking them up one by one
+    // used to prune the whole flow store once per connection.
+    let mut flow_ids = HashSet::new();
+    state.tracker.visit(|entry| {
+        if let Some(id) = entry.native_flow_id.as_deref() {
+            flow_ids.insert(id.to_owned());
+        }
+    });
+    let evidence = state
+        .observation
+        .core
+        .flows
+        .connection_evidence_map(&flow_ids);
     state.tracker.visit(|entry| {
         let tcp = match entry.network.as_str() {
             "tcp" => true,
@@ -604,7 +639,7 @@ fn connections(state: &NativeState, uri: &Uri, id: &RequestId) -> Result<Respons
         selected.push(Candidate {
             observed: entry.start_time,
             tcp,
-            value: connection(state, entry, full),
+            value: connection(entry, full, &evidence),
         });
     });
     let truncated = total_tcp + total_udp > selected.len() as u64;
@@ -977,5 +1012,40 @@ mod tests {
             let parsed = chrono::DateTime::parse_from_rfc3339(observed).unwrap();
             assert_eq!(observed, timestamp(parsed.into()));
         }
+    }
+
+    #[test]
+    fn a_direct_connection_keeps_its_verified_domain_without_flow_evidence() {
+        use crate::connection_tracker::ConnectionEntry;
+        use crate::observe::vocab::DomainSource;
+        use std::sync::atomic::AtomicU64;
+
+        let entry = ConnectionEntry {
+            id: "c1".into(),
+            source: "172.20.1.128:50000".into(),
+            destination: "49.7.48.51:443".into(),
+            proxy: "direct".into(),
+            routed_outbound: Some("direct".into()),
+            native_flow_id: None,
+            rule: "domain(geosite: cn)".into(),
+            rule_payload: "example.cn".into(),
+            chains: Vec::new(),
+            upload: Arc::new(AtomicU64::new(0)),
+            download: Arc::new(AtomicU64::new(0)),
+            start_time: Instant::now(),
+            domain: Some("example.cn".into()),
+            domain_source: Some(DomainSource::TlsSni),
+            network: "tcp".into(),
+            process: Some("curl".into()),
+            process_path: None,
+            activity: None,
+        };
+        // No flow evidence at all (the bounded flow store has evicted it).
+        let value = connection(&entry, true, &HashMap::new());
+        assert_eq!(value.domain, Some(Some("example.cn".to_string())));
+        assert!(matches!(value.domain_source, Some(DomainSource::TlsSni)));
+        assert_eq!(value.outbound.as_deref(), Some("direct"));
+        assert_eq!(value.rule_expression.as_deref(), Some("domain(geosite: cn)"));
+        assert!(value.started_at.is_some());
     }
 }
