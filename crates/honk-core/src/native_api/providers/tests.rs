@@ -622,7 +622,7 @@ fn provider_debug_omits_full_url() {
         ),
         ..Default::default()
     };
-    let row = Provider::observed(&subscription, ProviderLoad::default(), 0);
+    let row = Provider::observed(&subscription, ProviderLoad::default(), 0, |_| None);
     assert_eq!(row.url_redacted.as_deref(), Some(subscription.url.as_str()));
     assert!(!format!("{row:?}").contains("url-sentinel"));
 }
