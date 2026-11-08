@@ -1031,7 +1031,7 @@ impl Config {
             })
         };
         let check_outbound = |target: &str, index: Option<usize>| {
-            if matches!(target, Self::BUILTIN_DIRECT_NODE | Self::BUILTIN_BLOCK_NODE)
+            if matches!(target, Self::BUILTIN_DIRECT_NODE | Self::BUILTIN_BLOCK_NODE) || target.eq_ignore_ascii_case("follow")
                 || self.groups.iter().any(|group| group.name == target)
             {
                 return Ok(());
@@ -1299,7 +1299,7 @@ impl Config {
             .map(|group| group.name.as_str())
             .collect();
         let target_exists = |target: &str| {
-            matches!(target, Self::BUILTIN_DIRECT_NODE | Self::BUILTIN_BLOCK_NODE)
+            matches!(target, Self::BUILTIN_DIRECT_NODE | Self::BUILTIN_BLOCK_NODE) || target.eq_ignore_ascii_case("follow")
                 || self.nodes.iter().any(|node| node.name == target)
                 || group_names.contains(target)
         };

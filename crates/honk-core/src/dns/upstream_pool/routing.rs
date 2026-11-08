@@ -181,7 +181,7 @@ impl UpstreamPool {
         entry: &UpstreamEntry,
     ) -> anyhow::Result<DnsDialRoute> {
         let target = self.resolve_upstream_addr(entry).await?;
-        self.resolve_dial_route_for_address(entry, target, None)
+        self.resolve_dial_route_for_address(entry, target, None, None)
             .await
     }
 
@@ -190,35 +190,55 @@ impl UpstreamPool {
         entry: &UpstreamEntry,
         target: SocketAddr,
         original: Option<&ScoreContinuation>,
+        qname: Option<&str>,
     ) -> anyhow::Result<DnsDialRoute> {
         if let Some(tag) = entry.outbound.as_deref() {
             if tag.eq_ignore_ascii_case("block") {
                 crate::observe::flows::dns::decision("rejected", Some("policy_block"));
                 anyhow::bail!("DNS upstream outbound 'block' rejected the dial");
             }
-            let selected = self.resolve_outbound_for_target(tag, entry, target, original);
-            if selected.node.is_none() && !tag.eq_ignore_ascii_case("direct") {
-                crate::observe::flows::dns::decision("rejected", Some("no_available_outbound"));
-                anyhow::bail!("DNS upstream outbound '{tag}' has no available node");
+            if tag.eq_ignore_ascii_case("follow") {
+                // Follow-policy: route the DNS query through the same group the
+                // domain's *content* traffic would use, so DNS egress and content
+                // egress stay geographically aligned (e.g. TikTok content via
+                // Taiwan => DNS also via Taiwan). The traffic router resolves the
+                // group from the static domain/geosite rules alone.
+                if let Some(domain) = qname {
+                    let group = self.group_for_domain(domain).await;
+                    if group.eq_ignore_ascii_case("block") {
+                        crate::observe::flows::dns::decision("rejected", Some("policy_block"));
+                        anyhow::bail!(
+                            "DNS follow-policy resolved domain '{}' to the block group; rejecting query",
+                            domain
+                        );
+                    }
+                    if !group.is_empty() {
+                        return self
+                            .dial_through_outbound(
+                                &group,
+                                entry,
+                                target,
+                                original,
+                                crate::observe::vocab::RoutingSource::Evaluation,
+                                None,
+                            )
+                            .await;
+                    }
+                }
+                // No domain available or no matching group: fall through to the
+                // resolver-IP routing path (equivalent to an upstream without a tag).
+            } else {
+                return self
+                    .dial_through_outbound(
+                        tag,
+                        entry,
+                        target,
+                        original,
+                        crate::observe::vocab::RoutingSource::Forced,
+                        None,
+                    )
+                    .await;
             }
-            debug!(
-                "DNS dial leaf (forced -> {}): {:?}",
-                tag,
-                selected.node.as_ref().map(|node| node.name.as_str())
-            );
-            return Ok(DnsDialRoute {
-                observation: crate::observe::flows::dns::outbound_evidence(
-                    tag,
-                    crate::observe::vocab::RoutingSource::Forced,
-                    None,
-                    selected.node.as_ref(),
-                    target,
-                    selected.path,
-                ),
-                target,
-                node: selected.node,
-                feedback: selected.feedback,
-            });
         }
 
         let host_is_ip = entry.endpoint.host.parse::<IpAddr>().is_ok();
@@ -270,15 +290,62 @@ impl UpstreamPool {
             protocol,
             outbound_name
         );
-        if outbound_name.eq_ignore_ascii_case("block") {
+        self.dial_through_outbound(
+            &outbound_name,
+            entry,
+            target,
+            original,
+            crate::observe::vocab::RoutingSource::Evaluation,
+            evaluation_id,
+        )
+        .await
+    }
+
+    /// Resolve the traffic-routing group that the *content* traffic for
+    /// `domain` would take, using only the static domain/geosite rules (no
+    /// IP/DNS hints). Returns an empty string when the router is unavailable
+    /// or no rule matches. Used by the follow-policy path so DNS egress
+    /// follows the same group as the domain's data traffic. Global mode is
+    /// handled naturally: the traffic router already resolves every domain to
+    /// the global group, so `route_domain` returns it here without any extra
+    /// configuration.
+    async fn group_for_domain(&self, domain: &str) -> String {
+        if let Some(router) = self.traffic_router_snapshot.read().as_ref() {
+            return router.route_domain(domain).to_owned();
+        }
+        let router_cell = self.traffic_router.read().clone();
+        let Some(router) = router_cell else {
+            return String::new();
+        };
+        let router = router.read().await;
+        router.route_domain(domain).to_owned()
+    }
+
+    /// Dial `entry`'s upstream through `outbound` (a group name or `direct`).
+    ///
+    /// Shared by the explicit `-> tag` path, the follow-policy path and the
+    /// resolver-IP routing path. `source` records whether the outbound was
+    /// user-forced or derived from a routing evaluation; `evaluation_id` is the
+    /// route trace id (only present for the resolver-IP evaluation path).
+    #[allow(clippy::too_many_arguments)]
+    async fn dial_through_outbound(
+        &self,
+        outbound: &str,
+        entry: &UpstreamEntry,
+        target: SocketAddr,
+        original: Option<&ScoreContinuation>,
+        source: crate::observe::vocab::RoutingSource,
+        evaluation_id: Option<String>,
+    ) -> anyhow::Result<DnsDialRoute> {
+        if outbound.eq_ignore_ascii_case("block") {
             crate::observe::flows::dns::decision("rejected", Some("policy_block"));
             anyhow::bail!("DNS dial route selected block");
         }
-        if outbound_name.eq_ignore_ascii_case("direct") {
+        if outbound.eq_ignore_ascii_case("direct") {
             return Ok(DnsDialRoute {
                 observation: crate::observe::flows::dns::outbound_evidence(
-                    &outbound_name,
-                    crate::observe::vocab::RoutingSource::Evaluation,
+                    outbound,
+                    source,
                     evaluation_id,
                     None,
                     target,
@@ -289,22 +356,22 @@ impl UpstreamPool {
                 feedback: None,
             });
         }
-        let selected = self.resolve_outbound_for_target(&outbound_name, entry, target, original);
+        let selected = self.resolve_outbound_for_target(outbound, entry, target, original);
         if selected.node.is_none() {
             crate::observe::flows::dns::decision("rejected", Some("no_available_outbound"));
             anyhow::bail!(
-                "DNS dial route selected outbound '{outbound_name}' but no leaf node is available"
+                "DNS dial route selected outbound '{outbound}' but no leaf node is available"
             );
         }
         debug!(
             "DNS dial leaf (routed via {}): {:?}",
-            outbound_name,
+            outbound,
             selected.node.as_ref().map(|node| node.name.as_str())
         );
         Ok(DnsDialRoute {
             observation: crate::observe::flows::dns::outbound_evidence(
-                &outbound_name,
-                crate::observe::vocab::RoutingSource::Evaluation,
+                outbound,
+                source,
                 evaluation_id,
                 selected.node.as_ref(),
                 target,

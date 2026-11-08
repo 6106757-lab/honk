@@ -713,7 +713,12 @@ impl ControlPlaneHandle {
                                 upload: conn_upload.clone(),
                                 download: conn_download.clone(),
                                 start_time: std::time::Instant::now(),
-                                domain: target_domain.clone(),
+                                // `target_domain` is the dial target and is
+                                // always None for direct/block (they dial by
+                                // IP). Keep the *observed* domain instead: it
+                                // was already verified and used to match the
+                                // routing rule, so direct rows get a domain too.
+                                domain: domain.clone(),
                                 network: "tcp".to_string(),
                                 process: handoff.as_ref().and_then(|ho| ho.process_name()),
                                 process_path: None,

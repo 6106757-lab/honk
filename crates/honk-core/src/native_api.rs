@@ -37,7 +37,7 @@ pub use server::NativeServer;
 pub(crate) use startup::NativeRuntime;
 pub use types::{ApiError, ErrorCode};
 
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -512,11 +512,15 @@ impl Ord for Candidate {
     }
 }
 
-fn connection(state: &NativeState, entry: &ConnectionEntry, full: bool) -> Connection {
-    let evidence = entry
+fn connection(
+    entry: &ConnectionEntry,
+    full: bool,
+    evidence: &HashMap<String, crate::observe::flows::ConnectionEvidence>,
+) -> Connection {
+    let found = entry
         .native_flow_id
         .as_deref()
-        .and_then(|id| state.observation.core.flows.connection_evidence(id));
+        .and_then(|id| evidence.get(id));
     Connection {
         id: entry.id.clone(),
         flow_id: entry.native_flow_id.clone(),
@@ -526,25 +530,21 @@ fn connection(state: &NativeState, entry: &ConnectionEntry, full: bool) -> Conne
         dst: full.then(|| entry.destination.clone()),
         domain: full.then(|| entry.domain.clone()),
         outbound: entry.routed_outbound.clone(),
-        chain: evidence
-            .as_ref()
+        chain: found
             .map(|value| value.chain.clone())
             .unwrap_or_default(),
-        chain_source: evidence
-            .as_ref()
+        chain_source: found
             .map_or("unknown", |value| value.chain_source),
-        rule_id: evidence.as_ref().and_then(|value| value.rule_id.clone()),
-        rule_expression: evidence
-            .as_ref()
+        rule_id: found.and_then(|value| value.rule_id.clone()),
+        rule_expression: found
             .and_then(|value| value.rule_expression.clone()),
-        rule_source: evidence
-            .as_ref()
+        rule_source: found
             .map_or(crate::observe::vocab::RuleSource::Unknown, |value| {
                 value.rule_source
             }),
         ingress: None,
-        domain_source: evidence.as_ref().and_then(|value| value.domain_source),
-        started_at: evidence.map(|value| value.started_at),
+        domain_source: found.and_then(|value| value.domain_source),
+        started_at: found.map(|value| value.started_at.clone()),
         observed_by: "userspace",
         upload_bytes: Some(entry.upload.load(Ordering::Relaxed).to_string()),
         download_bytes: Some(entry.download.load(Ordering::Relaxed).to_string()),
@@ -569,6 +569,19 @@ fn connections(state: &NativeState, uri: &Uri, id: &RequestId) -> Result<Respons
     let mut total_tcp = 0;
     let mut total_udp = 0;
     let mut selected: BinaryHeap<Candidate> = BinaryHeap::with_capacity(limit);
+    // Resolve every row's evidence in one pass: one lock and one flow-store
+    // prune for the whole page instead of one full prune per connection.
+    let mut flow_ids = HashSet::new();
+    state.tracker.visit(|entry| {
+        if let Some(id) = entry.native_flow_id.as_deref() {
+            flow_ids.insert(id.to_owned());
+        }
+    });
+    let evidence = state
+        .observation
+        .core
+        .flows
+        .connection_evidence_map(&flow_ids);
     state.tracker.visit(|entry| {
         let tcp = match entry.network.as_str() {
             "tcp" => true,
@@ -604,7 +617,7 @@ fn connections(state: &NativeState, uri: &Uri, id: &RequestId) -> Result<Respons
         selected.push(Candidate {
             observed: entry.start_time,
             tcp,
-            value: connection(state, entry, full),
+            value: connection(entry, full, &evidence),
         });
     });
     let truncated = total_tcp + total_udp > selected.len() as u64;
