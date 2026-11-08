@@ -1,0 +1,5 @@
+# musl cross-link: let zig supply the CRT (rcrt1.o) instead of Rust's
+# self-contained one, otherwise _start_c is defined twice (zig crt1.o +
+# rustlib self-contained rcrt1.o) and lld fails.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "link-self-contained=no"]

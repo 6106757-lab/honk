@@ -205,6 +205,13 @@ impl UpstreamPool {
                 // group from the static domain/geosite rules alone.
                 if let Some(domain) = qname {
                     let group = self.group_for_domain(domain).await;
+                    if group.eq_ignore_ascii_case("block") {
+                        crate::observe::flows::dns::decision("rejected", Some("policy_block"));
+                        anyhow::bail!(
+                            "DNS follow-policy resolved domain '{}' to the block group; rejecting query",
+                            domain
+                        );
+                    }
                     if !group.is_empty() {
                         return self
                             .dial_through_outbound(
