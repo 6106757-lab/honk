@@ -163,6 +163,7 @@ fn ordinary_stats_print_all_canonical_keys_and_zero_missing_counters() {
             "tcp_publisher_claim_failure: 16\n",
             "new_flow_rate_limited: 17\n",
             "udp_reverse_learning_suspended: 18\n",
+            "fragment_verdict_insert_failure: 19\n",
         )
     );
 }

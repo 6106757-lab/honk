@@ -226,8 +226,10 @@ pub static AUX_OCCUPANCY: PerCpuArray<u64, 2> = PerCpuArray::new();
 
 /// Conn UDP/TCP, redirect/handoff insertion, socket identity capture, TCP child proof
 /// storage and non-collision SYN claim failures.
+/// Per-CPU counters: the packet path increments without an atomic RMW on a
+/// shared cacheline. Userspace (`get_bpf_stats`) and honk-tool sum the values.
 #[btf_map]
-pub static BPF_STATS_MAP: Array<u64, { BpfStatsKey::COUNT as usize }> = Array::new();
+pub static BPF_STATS_MAP: PerCpuArray<u64, { BpfStatsKey::COUNT as usize }> = PerCpuArray::new();
 
 #[inline(always)]
 pub fn increment_bpf_stat(key: BpfStatsKey) {

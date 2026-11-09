@@ -214,7 +214,13 @@ pub(crate) enum LinkPairKind {
 }
 
 fn netkit_unavailable(error: &io::Error) -> bool {
-    error.raw_os_error() == Some(libc::EOPNOTSUPP)
+    // Kernels (and future 6.12+/7.x releases) report an unsupported link kind
+    // in more than one way. Widen the capability errno set so a kernel without
+    // CONFIG_NETKIT still falls back to veth instead of aborting startup.
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EOPNOTSUPP) | Some(libc::EINVAL) | Some(libc::ENOSYS)
+    )
 }
 
 /// One synchronous NETLINK_ROUTE connection.

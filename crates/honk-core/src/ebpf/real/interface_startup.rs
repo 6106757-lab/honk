@@ -63,6 +63,24 @@ pub(crate) async fn start_interfaces(
         .map(|(binding, error)| BindFailure::new(binding, error))
         .collect();
     state.settle(&plan, &owned, &failures, degradations);
+    if !failures.is_empty() {
+        let interfaces: Vec<&str> = failures
+            .iter()
+            .map(|failure| failure.interface.as_str())
+            .collect();
+        tracing::error!(
+            count = failures.len(),
+            interfaces = ?interfaces,
+            "interface TCX binding failed; traffic on these interfaces bypasses the proxy"
+        );
+        if require_all_interfaces() {
+            anyhow::bail!(
+                "{} configured interface binding(s) failed ({}); HONK_REQUIRE_ALL_INTERFACES refuses to publish a backend with unattached interfaces",
+                failures.len(),
+                interfaces.join(", ")
+            );
+        }
+    }
     Ok((
         backend,
         InterfaceHandoff {
@@ -70,6 +88,19 @@ pub(crate) async fn start_interfaces(
             state,
         },
     ))
+}
+
+/// Opt-in fail-closed startup. A link that cannot be attached leaves that
+/// interface outside the proxy, so warn-and-continue is a security decision,
+/// not a graceful degradation. Off by default to preserve current behavior;
+/// set `HONK_REQUIRE_ALL_INTERFACES=1` (also true/yes/on) to abort startup.
+fn require_all_interfaces() -> bool {
+    std::env::var_os("HONK_REQUIRE_ALL_INTERFACES").is_some_and(|value| {
+        matches!(
+            value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 /// Startup writes run on the startup task (the only place besides the watcher's

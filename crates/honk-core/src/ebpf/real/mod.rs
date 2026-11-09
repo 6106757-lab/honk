@@ -21,23 +21,74 @@ use super::{
     probe::BatchCapability, validate_udp_decision_transition,
 };
 
-/// Parse the running kernel version from /proc/version.
-/// Returns `(major, minor, patch)` on success; `patch` defaults to 0
-/// if the version string only carries two components.
+/// Parse the running kernel release into `(major, minor, patch)`.
+///
+/// `/proc/sys/kernel/osrelease` carries exactly the release string (e.g.
+/// `6.12.114-0612114-generic`), unlike `/proc/version` whose third token is an
+/// implementation detail. Only the leading decimal groups are parsed, so
+/// suffixes such as `-generic`, `+`, `-rcN` or vendor builds never turn a
+/// perfectly capable 6.12+/7.x kernel into an unparsable release.
 fn kernel_version() -> Option<(u32, u32, u32)> {
-    let version = std::fs::read_to_string("/proc/version").ok()?;
-    let ver_str = version.split_whitespace().nth(2)?;
-    let parts: Vec<&str> = ver_str.split('.').collect();
-    if parts.len() >= 2 {
-        let major = parts[0].parse::<u32>().ok()?;
-        let minor = parts[1].parse::<u32>().ok()?;
-        let patch = parts
-            .get(2)
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-        Some((major, minor, patch))
-    } else {
-        None
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .or_else(|_| {
+            std::fs::read_to_string("/proc/version").map(|version| {
+                version
+                    .split_whitespace()
+                    .nth(2)
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+        })
+        .ok()?;
+    parse_kernel_release(release.trim())
+}
+
+/// Extract the first three decimal groups from a kernel release string.
+#[inline(always)]
+fn parse_kernel_release(release: &str) -> Option<(u32, u32, u32)> {
+    let mut groups = [0u32; 3];
+    let mut found = 0usize;
+    let mut current = 0u32;
+    let mut in_digits = false;
+    for byte in release.bytes() {
+        if byte.is_ascii_digit() {
+            current = current
+                .checked_mul(10)?
+                .checked_add(u32::from(byte - b'0'))?;
+            in_digits = true;
+        } else if in_digits {
+            if found < 3 {
+                groups[found] = current;
+            }
+            found += 1;
+            current = 0;
+            in_digits = false;
+            if found >= 3 {
+                break;
+            }
+        }
+    }
+    if in_digits && found < 3 {
+        groups[found] = current;
+        found += 1;
+    }
+    // A bare major number is not a kernel release; "X.Y" implies patch 0.
+    (found >= 2).then_some((groups[0], groups[1], groups[2]))
+}
+
+#[cfg(test)]
+mod kernel_version_tests {
+    use super::parse_kernel_release;
+
+    #[test]
+    fn parses_vendor_suffixed_and_future_releases() {
+        assert_eq!(parse_kernel_release("6.12.114-0612114-generic"), Some((6, 12, 114)));
+        assert_eq!(parse_kernel_release("6.12.0-rc3+"), Some((6, 12, 0)));
+        assert_eq!(parse_kernel_release("7.0.0"), Some((7, 0, 0)));
+        assert_eq!(parse_kernel_release("7.1"), Some((7, 1, 0)));
+        assert_eq!(parse_kernel_release("6.12.114.1-custom"), Some((6, 12, 114)));
+        assert_eq!(parse_kernel_release("6"), None);
+        assert_eq!(parse_kernel_release("garbage"), None);
     }
 }
 
@@ -94,6 +145,8 @@ pub struct RealEbpfBackend {
     receive_trace_available: bool,
     #[cfg(feature = "native-api")]
     receive_trace_attempted: bool,
+    #[cfg(feature = "native-api")]
+    receive_trace_retry_at: Option<std::time::Instant>,
     udp_staging_quiesce_incomplete: bool,
     aux_deletes: AuxDeleteTally,
 }
@@ -280,7 +333,10 @@ impl RealEbpfBackend {
         &self,
         name: &str,
         key: &K,
-    ) -> anyhow::Result<Option<V>> {
+    ) -> anyhow::Result<Option<V>>
+    where
+        FlowMapValue<V>: Pod,
+    {
         match self
             .hash_map::<K, FlowMapValue<V>>(name)?
             .get(key, aya_obj::generated::BPF_F_LOCK as u64)
@@ -296,11 +352,14 @@ impl RealEbpfBackend {
         name: &str,
         key: &K,
         value: &V,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+    where
+        FlowMapValue<V>: Pod,
+    {
         self.hash_map_mut::<K, FlowMapValue<V>>(name)?
             .insert(
                 key,
-                FlowMapValue::new(*value),
+                &FlowMapValue::new(*value),
                 aya_obj::generated::BPF_F_LOCK as u64,
             )
             .map_err(|error| anyhow::anyhow!("map '{name}' locked insert: {error}"))
@@ -311,7 +370,10 @@ impl RealEbpfBackend {
         name: &str,
         chunk_size: usize,
         visit: &mut ChunkVisitor<'_, K, V>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+    where
+        FlowMapValue<V>: Pod,
+    {
         self.flow_scan_from(
             name,
             chunk_size,
@@ -326,7 +388,10 @@ impl RealEbpfBackend {
         chunk_size: usize,
         cursor: &mut crate::ebpf::FlowScanCursor,
         visit: &mut ChunkVisitor<'_, K, V>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+    where
+        FlowMapValue<V>: Pod,
+    {
         let mut projected = Vec::with_capacity(syscall::BPF_BATCH_CHUNK);
         if syscall::bpf_lookup_batch_scan_cb_flags::<K, FlowMapValue<V>>(
             self.bpf()?,
@@ -572,7 +637,7 @@ impl EbpfBackend for RealEbpfBackend {
         for (current, update) in value.bitmap.iter_mut().zip(bitmap.bitmap) {
             *current |= update;
         }
-        map.insert(ip_key.data, value, 0)
+        map.insert(&ip_key.data, &value, 0)
             .map_err(|error| anyhow::anyhow!("active domain map insert: {error}"))
     }
 
@@ -581,7 +646,7 @@ impl EbpfBackend for RealEbpfBackend {
         ip_key: &LpmKey,
         bitmap: &DomainRouting,
     ) -> Result<(), super::DomainRouteWriteError> {
-        match self.active_domain_mut()?.insert(ip_key.data, *bitmap, 0) {
+        match self.active_domain_mut()?.insert(&ip_key.data, bitmap, 0) {
             Ok(()) => Ok(()),
             Err(MapError::SyscallError(error))
                 if matches!(
@@ -823,29 +888,49 @@ impl EbpfBackend for RealEbpfBackend {
 
     #[cfg(feature = "native-api")]
     fn receive_trace(&mut self) -> Option<std::sync::Arc<receive_trace::ReceiveTrace>> {
-        if !self.receive_trace_attempted {
-            // Kernel/loader offsets are fixed for this backend, and a partially loaded Aya
-            // program cannot be loaded again on listener reload. Restart retries attachment.
-            self.receive_trace_attempted = true;
-            if !self.receive_trace_available {
+        if let Some(trace) = &self.receive_trace {
+            return Some(trace.clone());
+        }
+        let now = std::time::Instant::now();
+        // Only symbol-resolution failures are safe to retry: they happen before
+        // any program is loaded. A partially loaded Aya program cannot be
+        // loaded again, so every other failure stays terminal for this process.
+        if self.receive_trace_attempted {
+            match self.receive_trace_retry_at {
+                Some(at) if now >= at => {}
+                _ => return None,
+            }
+        }
+        self.receive_trace_attempted = true;
+        self.receive_trace_retry_at = None;
+        if !self.receive_trace_available {
+            warn!(
+                ipv4_unavailable = true,
+                ipv6_unavailable = true,
+                "kernel UDP trace unavailable: checked BTF offsets missing"
+            );
+            return None;
+        }
+        let result = btf::load_kernel().and_then(|(_, kernel_btf)| {
+            receive_trace::ReceiveTrace::attach(self.bpf_mut()?, &kernel_btf)
+        });
+        match result {
+            Ok(trace) => self.receive_trace = Some(trace),
+            Err(error) => {
+                let retryable = error
+                    .downcast_ref::<receive_trace::TargetsUnavailable>()
+                    .is_some();
+                if retryable {
+                    self.receive_trace_retry_at =
+                        Some(now + std::time::Duration::from_secs(60));
+                }
                 warn!(
+                    error = %format_args!("{error:#}"),
+                    retryable,
                     ipv4_unavailable = true,
                     ipv6_unavailable = true,
-                    "kernel UDP trace unavailable: checked BTF offsets missing"
+                    "kernel UDP trace attach unavailable"
                 );
-            } else {
-                let result = btf::load_kernel().and_then(|(_, kernel_btf)| {
-                    receive_trace::ReceiveTrace::attach(self.bpf_mut()?, &kernel_btf)
-                });
-                match result {
-                    Ok(trace) => self.receive_trace = Some(trace),
-                    Err(error) => warn!(
-                        error = %format_args!("{error:#}"),
-                        ipv4_unavailable = true,
-                        ipv6_unavailable = true,
-                        "kernel UDP trace attach unavailable"
-                    ),
-                }
             }
         }
         self.receive_trace.clone()
@@ -927,7 +1012,19 @@ impl EbpfBackend for RealEbpfBackend {
     }
 
     fn get_bpf_stats(&self, k: u32) -> anyhow::Result<Option<u64>> {
-        self.array_get("BPF_STATS_MAP", k)
+        // BPF_STATS_MAP is per-CPU, so the kernel path needs no atomic RMW on
+        // a shared cacheline. Userspace sums the per-CPU values on read.
+        let map = self
+            .bpf()?
+            .map("BPF_STATS_MAP")
+            .ok_or_else(|| anyhow::anyhow!("map 'BPF_STATS_MAP' not found"))?;
+        let array = AyaPerCpuArray::<_, u64>::try_from(map)
+            .map_err(|error| anyhow::anyhow!("map 'BPF_STATS_MAP': {error}"))?;
+        match array.get(&k, 0) {
+            Ok(values) => Ok(Some(values.iter().sum())),
+            Err(MapError::KeyNotFound) => Ok(None),
+            Err(error) => Err(anyhow::anyhow!("map 'BPF_STATS_MAP' get[{k}]: {error}")),
+        }
     }
 
     fn detach_hooks(&mut self) -> anyhow::Result<()> {

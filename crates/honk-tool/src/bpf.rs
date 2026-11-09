@@ -659,9 +659,19 @@ fn show(args: ShowArgs) -> anyhow::Result<()> {
 fn print_ordinary_stats(pin_root: &Path) -> anyhow::Result<()> {
     let fd = unsafe { OwnedFd::from_raw_fd(open(pin_root, "BPF_STATS_MAP")?) };
     let info = map_info(fd.as_raw_fd(), "BPF_STATS_MAP")?;
+    // BPF_STATS_MAP is per-CPU: sum the per-CPU counters for each key instead
+    // of reading a single shared (and racy) scalar.
+    let ncpu = possible_cpus(Path::new("/sys/devices/system/cpu"))?;
+    let mut buf = vec![0u8; percpu_buffer_len(ncpu, 8)?];
     print_ordinary_stats_with(
         info,
-        |key| read_value(fd.as_raw_fd(), key),
+        |key| {
+            let index = u32::from_ne_bytes(
+                key.try_into()
+                    .map_err(|_| io::Error::other("invalid BPF stats key"))?,
+            );
+            read_percpu_sum(fd.as_raw_fd(), &mut buf, index).map(Some)
+        },
         io::stdout().lock(),
     )
 }

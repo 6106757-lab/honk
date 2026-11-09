@@ -24,7 +24,9 @@ pub(super) fn load_kernel() -> anyhow::Result<(Vec<u8>, aya::Btf)> {
             .or_else(|_| std::fs::read(VMLINUX_BTF_FALLBACK_PATH))
             .with_context(|| {
                 format!(
-                    "reading kernel BTF from {VMLINUX_BTF_PATH} or {VMLINUX_BTF_FALLBACK_PATH}; set {VMLINUX_BTF_ENV}"
+                    "kernel BTF is unavailable: neither {VMLINUX_BTF_PATH} nor {VMLINUX_BTF_FALLBACK_PATH} could be read. \
+                     honk's eBPF object needs BTF for CO-RE relocation; enable CONFIG_DEBUG_INFO_BTF in the running kernel \
+                     (or install its matching vmlinux BTF package), or set {VMLINUX_BTF_ENV} to a raw .BTF blob matching `uname -r`."
                 )
             })?
     };

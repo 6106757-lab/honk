@@ -29,15 +29,22 @@ impl RealEbpfBackend {
         dae0: &crate::daens::Dae0Setup,
         local_ip: u32,
     ) -> anyhow::Result<Self> {
-        let version =
-            kernel_version().ok_or_else(|| anyhow::anyhow!("cannot determine kernel version"))?;
-        anyhow::ensure!(
-            version >= (6, 12, 0),
-            "compiled routing requires Linux 6.12 or newer (running {}.{}.{})",
-            version.0,
-            version.1,
-            version.2
-        );
+        // 6.12 is a floor, not a ceiling: 6.13+/7.x must keep working. The
+        // version gate is advisory only. If the release string cannot be
+        // parsed we still attempt the load, and the real capability checks
+        // (BTF, TCX, cgroup, verifier) decide whether this kernel can run.
+        match kernel_version() {
+            Some(version) => anyhow::ensure!(
+                version >= (6, 12, 0),
+                "compiled routing requires Linux 6.12 or newer (running {}.{}.{})",
+                version.0,
+                version.1,
+                version.2
+            ),
+            None => warn!(
+                "kernel release could not be parsed; continuing with runtime capability checks"
+            ),
+        }
         layout::validate_object(obj)?;
         let (kernel_data, kernel_btf) = btf::load_kernel()?;
         let process_name_offsets = process_name::detect(&kernel_data);
@@ -83,6 +90,17 @@ impl RealEbpfBackend {
             }
         };
 
+        // Explicit escape hatch for a future kernel where bpf_redirect_peer is
+        // present but its applicability changed. Long-term this should be a
+        // runtime capability probe; the flag gives operators a safe downgrade
+        // path today without recompiling.
+        let use_redirect_peer = if std::env::var_os("HONK_DISABLE_REDIRECT_PEER").is_some() {
+            warn!("HONK_DISABLE_REDIRECT_PEER set: bpf_redirect_peer disabled");
+            0u8
+        } else {
+            use_redirect_peer
+        };
+
         let dae_param = DaeParam {
             tproxy_port: tproxy_port.to_be() as u32,
             dae0_ifindex,
@@ -112,10 +130,14 @@ impl RealEbpfBackend {
 
         // A stale pin must never hide a generation-owned map. Persistent
         // allocators are opened separately because generation reuse is forbidden.
-        let _ = std::fs::remove_file(pin_root.join("LISTEN_SOCKET_MAP"));
+        if let Err(error) = std::fs::remove_file(pin_root.join("LISTEN_SOCKET_MAP"))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(%error, "stale LISTEN_SOCKET_MAP pin could not be removed");
+        }
         let mut loader = EbpfLoader::new();
         loader
-            .btf(Some(&kernel_btf))
+            .btf(&kernel_btf)
             .override_global("PARAM", &dae_param, true)
             .override_global("WAN_IFINDEX", &wan_ifindex, true)
             .override_global("DAE0PEER_IFINDEX", &dae0peer_ifindex, true)
@@ -371,6 +393,8 @@ impl RealEbpfBackend {
             receive_trace_available: receive_trace_offsets.is_some(),
             #[cfg(feature = "native-api")]
             receive_trace_attempted: false,
+            #[cfg(feature = "native-api")]
+            receive_trace_retry_at: None,
             udp_staging_quiesce_incomplete: false,
             aux_deletes: Default::default(),
         })
@@ -392,8 +416,10 @@ impl RealEbpfBackend {
             Err(aya::programs::ProgramError::AlreadyLoaded) => {}
             Err(e) => return Err(anyhow::anyhow!("load '{}': {}", prog, e)),
         }
+        let name = std::ffi::CString::new(iface)
+            .map_err(|e| anyhow::anyhow!("interface name '{}': {}", iface, e))?;
         let id = p
-            .attach(iface, dir)
+            .attach(name.as_c_str(), dir)
             .map_err(|e| anyhow::anyhow!("attach '{}': {} (raw={:?})", prog, e, e))?;
         debug!(
             "attached '{}' to {} ({:?}) link_id={:?}",

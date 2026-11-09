@@ -3,12 +3,14 @@
 
 use crate::{
     action::{TC_ACT_REDIRECT, TC_ACT_SHOT},
-    maps::{FRAG_VERDICT, PKT_SCRATCH_KEY},
+    maps::{FRAG_VERDICT, PKT_SCRATCH_KEY, increment_bpf_stat},
     transport::{IPPROTO_UDP, ParsedPacket},
 };
 use aya_ebpf::helpers::bpf_ktime_get_ns;
 use core::mem;
-use honk_ebpf_common::conn::{FRAGMENT_VERDICT_TTL_NS, FragmentKey, FragmentVerdict};
+use honk_ebpf_common::conn::{
+    BpfStatsKey, FRAGMENT_VERDICT_TTL_NS, FragmentKey, FragmentVerdict,
+};
 
 #[inline(always)]
 fn key(pkt: &ParsedPacket) -> FragmentKey {
@@ -31,7 +33,7 @@ fn key(pkt: &ParsedPacket) -> FragmentKey {
 // which already sits near the 512-byte BPF stack limit.
 #[inline(never)]
 pub fn condemned(pkt: &ParsedPacket) -> bool {
-    FRAG_VERDICT.get_ptr(key(pkt)).is_some_and(|recorded| {
+    FRAG_VERDICT.get_ptr(&key(pkt)).is_some_and(|recorded| {
         let age = unsafe { bpf_ktime_get_ns() }.wrapping_sub(unsafe { (*recorded).ktime_ns });
         age <= FRAGMENT_VERDICT_TTL_NS
     })
@@ -50,7 +52,7 @@ pub fn record(verdict: i32) -> i32 {
         return verdict;
     }
     if verdict != TC_ACT_SHOT as i32 && verdict != TC_ACT_REDIRECT as i32 {
-        let _ = FRAG_VERDICT.remove(key(pkt));
+        let _ = FRAG_VERDICT.remove(&key(pkt));
         return verdict;
     }
     if pkt.tuples.five.l4proto == IPPROTO_UDP
@@ -63,6 +65,14 @@ pub fn record(verdict: i32) -> i32 {
         padding: 0,
         ktime_ns: unsafe { bpf_ktime_get_ns() },
     };
-    let _ = FRAG_VERDICT.insert(key(pkt), value, 0);
+    if FRAG_VERDICT.insert(&key(pkt), &value, 0).is_err() {
+        increment_bpf_stat(BpfStatsKey::FragmentVerdictInsertFailure);
+        // Without a recorded verdict later fragments take the original path.
+        // Dropping the head instead of redirecting it avoids a datagram whose
+        // head is proxied while its tail leaves unproxied.
+        if verdict == TC_ACT_REDIRECT as i32 {
+            return TC_ACT_SHOT as i32;
+        }
+    }
     verdict
 }

@@ -107,6 +107,9 @@ impl BpfJanitor {
                 BpfStatsKey::NewFlowRateLimited => {
                     "BPF janitor: a LAN source exceeded its per-CPU new-flow limit; excess flow attempts were dropped"
                 }
+                BpfStatsKey::FragmentVerdictInsertFailure => {
+                    "BPF janitor: fragment verdict inserts failed; affected first fragments were dropped instead of half-redirected"
+                }
             };
             let failures = stats[key as usize];
             if failures > latches.last_failures[key as usize] {

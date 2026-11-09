@@ -5,10 +5,9 @@
 //! a [`BindingCommit`] without any lock held: it creates links by interface
 //! index, updates a link in place when the program changes, and proves a
 //! retained link is still on the namespace-local chain with `BPF_PROG_QUERY`
-//! (a link FD alone survives its device being deleted or moved). Aya cannot do
-//! this: `SchedClassifier::attach` resolves the name itself and
-//! `attach_to_link` consumes the old link on failure. Every `unsafe` syscall of
-//! the module is here.
+//! (a link FD alone survives its device being deleted or moved). Aya's
+//! `attach_to_link` neither checks the expected old program nor preserves the
+//! old link on failure. Every `unsafe` syscall of the module is here.
 
 use std::collections::HashMap;
 use std::ffi::c_long;
@@ -21,7 +20,7 @@ use anyhow::Context as _;
 use aya::Ebpf;
 use aya::programs::{ProgramError, SchedClassifier};
 use aya_obj::generated::{
-    BPF_F_AFTER, BPF_F_REPLACE, bpf_attach_type, bpf_attr, bpf_cmd, bpf_link_info,
+    BPF_F_AFTER, BPF_F_REPLACE, bpf_attach_type, bpf_attr, bpf_cmd, bpf_link_info, bpf_link_type,
 };
 
 use super::syscall::bpf_syscall;
@@ -477,6 +476,18 @@ pub(super) fn link_info(link: RawFd) -> io::Result<LinkInfo> {
     attr.info.info_len = size_of::<bpf_link_info>() as u32;
     attr.info.info = (&mut info as *mut bpf_link_info) as u64;
     unsafe { bpf_syscall(bpf_cmd::BPF_OBJ_GET_INFO_BY_FD as c_long, &mut attr) }.map_err(errno)?;
+    // The trailing union is only valid for mprog links. A future kernel may
+    // return a different link type here; reading `tcx` then yields garbage
+    // ifindex/attach_type instead of an error.
+    let link_type = info.type_;
+    if link_type != bpf_link_type::BPF_LINK_TYPE_TCX as u32
+        && link_type != bpf_link_type::BPF_LINK_TYPE_NETKIT as u32
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("link fd {link} has type {link_type}, expected TCX or netkit"),
+        ));
+    }
     let tcx = unsafe { info.__bindgen_anon_1.tcx };
     Ok(LinkInfo {
         id: info.id,
@@ -513,7 +524,9 @@ pub(super) fn query_chain(ifindex: u32, direction: Direction) -> io::Result<Chai
             Err(code) => return Err(errno(code)),
         }
     }
-    unreachable!("the second attempt returns")
+    // Every in-loop branch returns, but keep a fallible tail: a future loop
+    // change must report an I/O error instead of panicking in the control plane.
+    Err(io::Error::other("TCX chain query did not converge"))
 }
 
 impl super::RealEbpfBackend {
