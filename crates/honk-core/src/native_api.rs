@@ -517,10 +517,6 @@ fn connection(
     full: bool,
     evidence: &HashMap<String, crate::observe::flows::ConnectionEvidence>,
 ) -> Connection {
-    // The flow store is a bounded ring (MAX_RECORDS). A burst of P2P flows can
-    // evict a still-live connection's evidence, which used to blank out every
-    // evidence-derived column. The tracker entry carries its own routing and
-    // liveness data, so fall back to that when the flow record is gone.
     let found = entry
         .native_flow_id
         .as_deref()
@@ -536,33 +532,19 @@ fn connection(
         outbound: entry.routed_outbound.clone(),
         chain: found
             .map(|value| value.chain.clone())
-            .unwrap_or_else(|| entry.chains.clone()),
-        chain_source: found.map_or_else(
-            || {
-                if entry.chains.is_empty() {
-                    "unknown"
-                } else {
-                    "reconstructed"
-                }
-            },
-            |value| value.chain_source,
-        ),
+            .unwrap_or_default(),
+        chain_source: found
+            .map_or("unknown", |value| value.chain_source),
         rule_id: found.and_then(|value| value.rule_id.clone()),
         rule_expression: found
-            .and_then(|value| value.rule_expression.clone())
-            .or_else(|| (!entry.rule.is_empty()).then(|| entry.rule.clone())),
-        rule_source: found.map_or(crate::observe::vocab::RuleSource::Unknown, |value| {
-            value.rule_source
-        }),
+            .and_then(|value| value.rule_expression.clone()),
+        rule_source: found
+            .map_or(crate::observe::vocab::RuleSource::Unknown, |value| {
+                value.rule_source
+            }),
         ingress: None,
-        domain_source: found
-            .and_then(|value| value.domain_source)
-            .or(entry.domain_source),
-        started_at: found.map(|value| value.started_at.clone()).or_else(|| {
-            SystemTime::now()
-                .checked_sub(entry.start_time.elapsed())
-                .map(timestamp)
-        }),
+        domain_source: found.and_then(|value| value.domain_source),
+        started_at: found.map(|value| value.started_at.clone()),
         observed_by: "userspace",
         upload_bytes: Some(entry.upload.load(Ordering::Relaxed).to_string()),
         download_bytes: Some(entry.download.load(Ordering::Relaxed).to_string()),
