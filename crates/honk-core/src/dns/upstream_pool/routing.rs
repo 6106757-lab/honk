@@ -212,7 +212,15 @@ impl UpstreamPool {
                             domain
                         );
                     }
-                    if !group.is_empty() {
+                    // A domain resolved to the built-in `direct` action means its
+                    // content traffic goes out without a proxy. We must NOT treat
+                    // "direct" as a proxy-group name and dial `target` straight to
+                    // the resolver IP (that would bypass the traffic router and
+                    // break foreign resolvers like 8.8.8.8 on restricted networks).
+                    // Instead let it fall through to the resolver-IP routing path
+                    // below, which re-evaluates `target` through the traffic router
+                    // — identical to follow being disabled for this domain.
+                    if !group.is_empty() && !group.eq_ignore_ascii_case("direct") {
                         return self
                             .dial_through_outbound(
                                 &group,
