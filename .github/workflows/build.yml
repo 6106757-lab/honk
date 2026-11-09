@@ -29,6 +29,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  HONK_VERSION_OVERRIDE: v0.1.0-beta.7
 
 jobs:
   build:
