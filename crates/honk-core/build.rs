@@ -28,6 +28,7 @@ fn git_output(args: &[&str]) -> Option<String> {
 fn emit_version() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=GITHUB_REF");
+    println!("cargo:rerun-if-env-changed=HONK_VERSION_OVERRIDE");
     if let Some(paths) = git_output(&[
         "rev-parse",
         "--git-path",
@@ -45,9 +46,14 @@ fn emit_version() {
             println!("cargo:rerun-if-changed={path}");
         }
     }
-    // A release ref disambiguates multiple tags pointing at the same commit.
-    let version = std::env::var("GITHUB_REF")
+    // HONK_VERSION_OVERRIDE pins an explicit version (e.g. v0.1.0-beta.7) so CI
+    // can publish a clean tag string even when git describe would yield a
+    // counted commit like v0.1.0-beta.6-N-g<hash>. A release ref disambiguates
+    // multiple tags pointing at the same commit.
+    let version = std::env::var("HONK_VERSION_OVERRIDE")
         .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("GITHUB_REF").ok())
         .and_then(|reference| reference.strip_prefix("refs/tags/").map(str::to_string))
         .filter(|tag| !tag.is_empty())
         .or_else(|| git_output(&["describe", "--tags", "--always", "--match", "v*"]))
