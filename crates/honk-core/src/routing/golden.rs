@@ -152,14 +152,16 @@ pub(crate) fn fixtures() -> (Router, Vec<GoldenCase>) {
             "process_name",
             json!(["curl", "abcdefghijklmnop"]),
             vec![
-                (sample(|c| c.process_name = Some("my-curl".into())), true),
+                (sample(|c| c.process_name = Some("curl".into())), true),
+                (sample(|c| c.process_name = Some("abcdefghijklmnop".into())), true),
+                (sample(|c| c.process_name = Some("my-curl".into())), false),
                 (
                     sample(|c| c.process_name = Some("abcdefghijklmno".into())),
-                    true,
+                    false,
                 ),
                 (
                     sample(|c| c.process_name = Some(format!("{}curl", "\u{fffd}".repeat(11)))),
-                    true,
+                    false,
                 ),
                 (sample(|c| c.process_name = Some("wget".into())), false),
                 (connection(), false),

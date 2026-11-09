@@ -721,26 +721,20 @@ fn emit_process_names(
             asm.jump(BPF_JNE, R4, 0, on_true)?;
             continue;
         }
-        let long = asm.label();
-        asm.jump(BPF_JGE, R4, bytes.len() as i32, long)?;
+        // Exact whole-name match: the input process name must be exactly
+        // `bytes.len()` bytes long and equal the pattern at offset 0. This
+        // mirrors dae's whole-name equality instead of scanning every offset
+        // as a substring, so `pname(natmap)` no longer matches `natmap-curl`,
+        // `xnatmap`, `mycurl`, etc. (see daeuniverse/honk#453)
+        let exact_len = asm.label();
+        asm.jump(BPF_JEQ, R4, bytes.len() as i32, exact_len)?;
         asm.ja(next_name)?;
-        asm.bind(long);
-        // Input pname is bounded to ROUTING_PROCESS_MAX_LEN bytes. Each
-        // candidate offset is checked against pname_len before reading, so
-        // missing bytes never become ordinary zeroes.
-        for offset in 0..=(ROUTING_PROCESS_MAX_LEN.saturating_sub(bytes.len())) {
-            let next = asm.label();
-            let enough = asm.label();
-            asm.jump(BPF_JGE, R4, (offset + bytes.len()) as i32, enough)?;
-            asm.ja(next)?;
-            asm.bind(enough);
-            for (byte_index, byte) in bytes.iter().enumerate() {
-                asm.ldx_b(R5, R6, INPUT_PNAME + offset as i16 + byte_index as i16)?;
-                asm.jump(BPF_JNE, R5, *byte as i32, next)?;
-            }
-            asm.ja(on_true)?;
-            asm.bind(next);
+        asm.bind(exact_len);
+        for (byte_index, byte) in bytes.iter().enumerate() {
+            asm.ldx_b(R5, R6, INPUT_PNAME + byte_index as i16)?;
+            asm.jump(BPF_JNE, R5, *byte as i32, next_name)?;
         }
+        asm.ja(on_true)?;
         asm.bind(next_name);
     }
     asm.ja(on_false)?;

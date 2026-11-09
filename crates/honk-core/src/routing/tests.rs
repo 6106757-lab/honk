@@ -442,13 +442,36 @@ fn test_process_name_route_matching() {
 
     let router = Router::new(&rules, "direct").unwrap();
 
-    assert_eq!(
-        router.route(&make_conn(Some("/usr/bin/curl"), None)),
-        "proxy"
-    );
     assert_eq!(router.route(&make_conn(Some("curl"), None)), "proxy");
+    assert_eq!(router.route(&make_conn(Some("my-curl"), None)), "direct");
     assert_eq!(router.route(&make_conn(Some("wget"), None)), "direct");
     assert_eq!(router.route(&make_conn(None, None)), "direct");
+}
+
+#[test]
+fn test_process_name_exact_match_no_substring() {
+    // `pname()` must be whole-name equality (dae-equivalent), not a substring
+    // scan. `pname(natmap)` must match only the exact name `natmap`, and must
+    // NOT match `natmap-curl`, `xnatmap`, `natmapx`, `mycurl`, or `curl`.
+    // Regression guard for daeuniverse/honk#453.
+    let rules = vec![RoutingRule {
+        name: "natmap-direct".into(),
+        condition: RoutingCondition {
+            process_name: vec!["natmap".into()],
+            ..Default::default()
+        },
+        outbound: RoutingOutbound::Simple("proxy".into()),
+        priority: 0,
+        must: false,
+        mark: 0,
+    }];
+    let router = Router::new(&rules, "direct").unwrap();
+    assert_eq!(router.route(&make_conn(Some("natmap"), None)), "proxy");
+    assert_eq!(router.route(&make_conn(Some("natmap-curl"), None)), "direct");
+    assert_eq!(router.route(&make_conn(Some("xnatmap"), None)), "direct");
+    assert_eq!(router.route(&make_conn(Some("natmapx"), None)), "direct");
+    assert_eq!(router.route(&make_conn(Some("mycurl"), None)), "direct");
+    assert_eq!(router.route(&make_conn(Some("curl"), None)), "direct");
 }
 
 #[test]

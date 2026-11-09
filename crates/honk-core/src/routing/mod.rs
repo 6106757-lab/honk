@@ -596,7 +596,11 @@ impl Router {
                 .dscp
                 .map(|dscp| bounded_any::<BOUNDED, _>(values, deadline, |value| *value == dscp)),
             CompiledPredicate::ProcessName(patterns) => input.process_name.map(|name| {
-                bounded_any::<BOUNDED, _>(patterns, deadline, |pattern| name.contains(pattern))
+                // Whole-name equality, mirroring dae's exact process-name match
+                // instead of a substring scan (daeuniverse/honk#453).
+                bounded_any::<BOUNDED, _>(patterns, deadline, |pattern| {
+                    name == pattern.as_str()
+                })
             }),
             CompiledPredicate::Mac(macs) => input.mac.map(|mac| {
                 normalize_mac_bytes(mac).is_some_and(|mac| {
