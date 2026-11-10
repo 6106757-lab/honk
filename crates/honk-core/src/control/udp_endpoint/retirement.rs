@@ -196,15 +196,29 @@ impl UdpEndpointPool {
         {
             terminal.cleaned(false);
         }
-        let acknowledged = success
-            && self.complete_removal(
-                removal.client,
-                removal.dst,
-                removal.owner,
-                removal.generation,
+        // The tombstone must be reclaimed even when the kernel retirement
+        // failed: `Retiring` is never scanned again, `retire_exact` short-
+        // circuits on it, and it does not carry the conn_id. Leaving it behind
+        // fences this tuple for the whole process lifetime. `success` only
+        // governs the terminal/close reporting and the warning below.
+        let acknowledged = self.complete_removal_with_outcome(
+            removal.client,
+            removal.dst,
+            removal.owner,
+            removal.generation,
+            success,
+        );
+        if !success {
+            tracing::warn!(
+                client = %removal.client,
+                dst = %removal.dst,
+                generation = removal.generation,
+                acknowledged,
+                "UDP retirement failed; tombstone reclaimed anyway"
             );
+        }
         if let Some(io) = io {
-            io.close.finish(acknowledged);
+            io.close.finish(acknowledged && success);
         }
     }
     pub(crate) fn set_remove_sink(&self, tx: tokio::sync::mpsc::Sender<EndpointRemoval>) {
@@ -385,6 +399,20 @@ impl UdpEndpointPool {
         owner: UdpFlowOwner,
         generation: u64,
     ) -> bool {
+        self.complete_removal_with_outcome(client, dst, owner, generation, true)
+    }
+
+    /// Reclaim the exact tombstone unconditionally, reporting `cleanup_ok` to
+    /// the native terminal and the close signal. Keeping the tombstone on a
+    /// failed retirement used to fence the tuple forever.
+    pub(crate) fn complete_removal_with_outcome(
+        &self,
+        client: SocketAddr,
+        dst: SocketAddr,
+        owner: UdpFlowOwner,
+        generation: u64,
+        cleanup_ok: bool,
+    ) -> bool {
         let key = EndpointKey::new(client, dst);
         let removed = match self.endpoints.entry(key) {
             dashmap::mapref::entry::Entry::Occupied(occupied)
@@ -400,11 +428,11 @@ impl UdpEndpointPool {
                     ..
                 } = occupied.get()
                 {
-                    terminal.cleaned(true);
+                    terminal.cleaned(cleanup_ok);
                 }
                 // A late close must observe completion before the tombstone disappears.
                 if let EndpointEntry::Retiring { io: Some(io), .. } = occupied.get() {
-                    io.close.finish(true);
+                    io.close.finish(cleanup_ok);
                 }
                 occupied.remove();
                 true

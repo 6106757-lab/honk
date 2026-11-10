@@ -4,9 +4,10 @@
 //! (accept loop, relay workers, and HTTP API handlers).
 
 use dashmap::DashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::watch;
@@ -40,6 +41,15 @@ pub(crate) struct CloseSignal(watch::Sender<ClosePhase>);
 impl CloseSignal {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self(watch::channel(ClosePhase::Active).0))
+    }
+
+    /// True once the owning transport has finished (cleanly or with a failure).
+    /// Used by the tracker sweeper to reclaim rows whose removal path failed.
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(
+            *self.0.borrow(),
+            ClosePhase::Closed | ClosePhase::Failed
+        )
     }
 
     fn claim(&self) -> bool {
@@ -114,6 +124,10 @@ pub(crate) struct ConnectionOwner {
 struct TrackedConnection {
     entry: ConnectionEntry,
     owner: Option<Arc<ConnectionOwner>>,
+    /// First tick at which the owner's CloseSignal was observed terminal.
+    /// Some(..) means the transport has ended and the row is only being kept
+    /// for a short grace period before the sweeper reclaims it.
+    terminal_since: Option<Instant>,
 }
 
 pub(crate) struct SelectedConnection {
@@ -336,8 +350,14 @@ impl ConnectionTracker {
     /// Register a new connection and return its unique ID (UUID v4).
     pub fn register(&self, entry: ConnectionEntry) -> String {
         let id = entry.id.clone();
-        self.entries
-            .insert(id.clone(), TrackedConnection { entry, owner: None });
+        self.entries.insert(
+            id.clone(),
+            TrackedConnection {
+                entry,
+                owner: None,
+                terminal_since: None,
+            },
+        );
         id
     }
 
@@ -348,6 +368,7 @@ impl ConnectionTracker {
             TrackedConnection {
                 entry,
                 owner: Some(Arc::new(owner)),
+                terminal_since: None,
             },
         );
         id
@@ -477,10 +498,17 @@ impl ConnectionTracker {
         {
             let Some(pool) = pool.upgrade() else {
                 owner.signal.finish(false);
+                // No removal will ever be produced for this close: the pool is
+                // gone, so neither settle() nor the endpoint can reclaim the
+                // row. Drop the observation immediately.
+                self.remove(&selected.id);
                 return CloseRequest::Pending(Arc::clone(&owner.signal));
             };
             if !pool.close_exact(*client, *destination, *token, *generation) {
                 owner.signal.finish(false);
+                // close_exact returned false: no EndpointRemoval is emitted,
+                // which used to leave the row in the unbounded map forever.
+                self.remove(&selected.id);
             }
         }
         CloseRequest::Pending(Arc::clone(&owner.signal))
@@ -514,6 +542,57 @@ impl ConnectionTracker {
     /// Remove a connection from the tracker.
     pub fn remove(&self, id: &str) {
         self.entries.remove(id);
+    }
+
+    /// Last-resort reclamation of observation rows whose owning transport has
+    /// already finished. Called on every janitor tick.
+    ///
+    /// A terminal [`CloseSignal`] is authoritative: the relay/driver is gone,
+    /// so a row still present here can only be a leaked observation (failed
+    /// retirement, lost owner, kernel table reclaimed without a userspace
+    /// removal). Keeping it briefly lets in-flight close requests observe the
+    /// outcome; after `grace` it is dropped unconditionally.
+    ///
+    /// Rows whose transport is still active are never touched, so legitimate
+    /// long-lived idle connections (Telegram, push, mtalk) are safe — this is
+    /// deliberately not a start_time/idle TTL.
+    pub(crate) fn sweep_terminal(&self, grace: Duration) -> usize {
+        let now = Instant::now();
+        let ids: Vec<String> = self.entries.iter().map(|row| row.key().clone()).collect();
+        let mut expired = Vec::new();
+        for id in &ids {
+            let Some(mut tracked) = self.entries.get_mut(id) else {
+                continue;
+            };
+            let terminal = tracked
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.signal.is_terminal());
+            if terminal {
+                let since = *tracked.terminal_since.get_or_insert(now);
+                if now.duration_since(since) >= grace {
+                    expired.push(id.clone());
+                }
+            } else {
+                tracked.terminal_since = None;
+            }
+        }
+        let count = expired.len();
+        for id in expired {
+            self.entries.remove(&id);
+        }
+        count
+    }
+
+    /// Snapshot of rows whose transport has finished. Taken once per API page
+    /// so the connections handler can report a real state without re-entering
+    /// the map while it is being visited.
+    pub(crate) fn terminal_ids(&self) -> HashSet<String> {
+        self.entries
+            .iter()
+            .filter(|row| row.value().terminal_since.is_some())
+            .map(|row| row.key().clone())
+            .collect()
     }
 
     /// Return a point-in-time snapshot of all active connections.

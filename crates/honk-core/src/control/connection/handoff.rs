@@ -432,6 +432,12 @@ impl TcpFlowGuard {
             return false;
         };
         let (completion, result) = tokio::sync::oneshot::channel();
+        // From this admission point the worker owns the flow and the transport
+        // is finished. Reclaim the observation row now instead of leaving an
+        // `active` row behind until the worker settles (which may be delayed
+        // by a full batch or a slow backend). The guard's Drop still runs, but
+        // untrack() is idempotent once the id has been taken.
+        self.untrack();
         permit.send(crate::control::retirement_worker::TcpRetirement {
             flow: self,
             completion,

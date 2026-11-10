@@ -20,6 +20,7 @@
 
 use super::connection::TcpFlowPins;
 use super::udp_endpoint::UdpEndpointPool;
+use crate::connection_tracker::ConnectionTracker;
 use crate::ebpf::{EbpfBackend, RETIRE_BATCH_CAPACITY};
 use health::{AuxMap, HealthLatches};
 use honk_ebpf_common::conn::{BpfStatsKey, MAX_CONN_STATE_NUM};
@@ -30,6 +31,9 @@ use tracing::{debug, error, info, warn};
 
 /// Janitor tick interval: 2 seconds.
 const JANITOR_TICK_INTERVAL_SECS: u64 = 2;
+/// How long a connection row whose transport already finished is kept so an
+/// in-flight close request can still observe the outcome before reclamation.
+const TRACKER_TERMINAL_GRACE_SECS: u64 = 30;
 /// Map health check interval: 5 seconds.
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 
@@ -137,6 +141,10 @@ pub struct BpfJanitor {
     ebpf: Arc<RwLock<Box<dyn EbpfBackend>>>,
     tcp_flow_pins: Arc<TcpFlowPins>,
     udp_pool: Option<Arc<UdpEndpointPool>>,
+    /// Userspace connection tracker. Kernel map cleanup alone cannot reclaim
+    /// observation rows, so every tick also sweeps rows whose transport has
+    /// already reached a terminal close state.
+    tracker: Option<Arc<ConnectionTracker>>,
     scan_cursors: [Arc<parking_lot::Mutex<crate::ebpf::FlowScanCursor>>; 3],
     #[cfg(test)]
     blocking_read_hook: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -154,6 +162,7 @@ impl BpfJanitor {
             ebpf,
             tcp_flow_pins,
             udp_pool: None,
+            tracker: None,
             scan_cursors: std::array::from_fn(|_| Arc::default()),
             #[cfg(test)]
             blocking_read_hook: None,
@@ -165,6 +174,12 @@ impl BpfJanitor {
     /// Retire the endpoints of UDP flows whose conn this janitor deletes.
     pub(super) fn with_udp_pool(mut self, pool: Arc<UdpEndpointPool>) -> Self {
         self.udp_pool = Some(pool);
+        self
+    }
+
+    /// Tie userspace observation rows to the janitor's cleanup cadence.
+    pub(super) fn with_connection_tracker(mut self, tracker: Arc<ConnectionTracker>) -> Self {
+        self.tracker = Some(tracker);
         self
     }
 
@@ -205,6 +220,19 @@ impl BpfJanitor {
                         continue;
                     }
                     _ = interval.tick() => {}
+                }
+
+                // Kernel conn-state and the userspace observation map are
+                // independent tables. Reclaim rows whose owning transport is
+                // already terminal (failed retirement, lost owner, kernel
+                // conn reclaimed without a userspace removal). Active rows are
+                // never touched, so idle long-lived flows survive.
+                if let Some(tracker) = &self.tracker {
+                    let reclaimed =
+                        tracker.sweep_terminal(Duration::from_secs(TRACKER_TERMINAL_GRACE_SECS));
+                    if reclaimed > 0 {
+                        debug!(reclaimed, "BPF janitor: reclaimed terminal connection rows");
+                    }
                 }
 
                 let now = tokio::time::Instant::now();

@@ -427,6 +427,7 @@ impl ControlPlane {
             epoch.janitor = Some(
                 BpfJanitor::new(self.ebpf.clone(), self.tcp_flow_pins.clone())
                     .with_udp_pool(self.udp_pool.clone())
+                    .with_connection_tracker(self.connection_tracker.clone())
                     .spawn_supervised(
                         CriticalTaskExit {
                             name: "bpf_janitor",
