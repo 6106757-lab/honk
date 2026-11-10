@@ -93,7 +93,10 @@ impl Retirement {
     ) {
         match self {
             Self::Udp(removal) => {
-                if ok && let Some(id) = removal.conn_id.as_deref() {
+                // 用户态观测行的删除与内核退役结果解耦：连接已进入退役、
+                // conn_id 已被取走，无论 ok 与否都不该继续留在活跃连接表里。
+                // ok 只决定 tombstone、CloseSignal 与告警（finish_removal）。
+                if let Some(id) = removal.conn_id.as_deref() {
                     tracker.remove(id);
                 }
                 pool.finish_removal(&removal, ok);
