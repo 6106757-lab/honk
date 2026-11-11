@@ -548,16 +548,14 @@ fn connection(
         chain: found
             .map(|value| value.chain.clone())
             .unwrap_or_else(|| entry.chains.iter().rev().cloned().collect()),
-        chain_source: found
-            .map_or("unknown", |value| value.chain_source),
+        chain_source: found.map_or("unknown", |value| value.chain_source),
         rule_id: found.and_then(|value| value.rule_id.clone()),
         rule_expression: found
             .and_then(|value| value.rule_expression.clone())
             .or_else(|| Some(fallback_rule_expression(entry))),
-        rule_source: found
-            .map_or(crate::observe::vocab::RuleSource::Unknown, |value| {
-                value.rule_source
-            }),
+        rule_source: found.map_or(crate::observe::vocab::RuleSource::Unknown, |value| {
+            value.rule_source
+        }),
         ingress: None,
         domain_source: found.and_then(|value| value.domain_source),
         started_at: found.map(|value| value.started_at.clone()).or_else(|| {
@@ -638,12 +636,7 @@ fn connections(state: &NativeState, uri: &Uri, id: &RequestId) -> Result<Respons
         selected.push(Candidate {
             observed: entry.start_time,
             tcp,
-            value: connection(
-                entry,
-                full,
-                &evidence,
-                terminal_ids.contains(&entry.id),
-            ),
+            value: connection(entry, full, &evidence, terminal_ids.contains(&entry.id)),
         });
     });
     let truncated = total_tcp + total_udp > selected.len() as u64;

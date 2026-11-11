@@ -65,7 +65,9 @@ pub(super) async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
         let header = rb.read_exact_buffered(2, deadline).await?;
         if header[0] != 0x01 {
             rb.write_all(&[0x01, 0x01]).await?;
-            return Err(ProtoError::Malformed("bad userpass sub-negotiation version"));
+            return Err(ProtoError::Malformed(
+                "bad userpass sub-negotiation version",
+            ));
         }
         let name = rb.read_exact_buffered(header[1] as usize, deadline).await?;
         let length = rb.read_exact_buffered(1, deadline).await?[0] as usize;
@@ -80,8 +82,7 @@ pub(super) async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
     }
 
     let request = rb.read_exact_buffered(4, deadline).await?;
-    let (version, command, _, address_type) =
-        (request[0], request[1], request[2], request[3]);
+    let (version, command, _, address_type) = (request[0], request[1], request[2], request[3]);
     if version != 0x05 {
         return Err(ProtoError::Malformed("bad SOCKS5 request version"));
     }
@@ -192,8 +193,8 @@ mod tests {
         let mut rb = ReadBuffer::new(server, 16 * 1024);
         client
             .write_all(&[
-                0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x03, 0x0b, b'e', b'x', b'a', b'm', b'p',
-                b'l', b'e', b'.', b'c', b'o', b'm', 0x01, 0xbb,
+                0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x03, 0x0b, b'e', b'x', b'a', b'm', b'p', b'l',
+                b'e', b'.', b'c', b'o', b'm', 0x01, 0xbb,
             ])
             .await
             .unwrap();
@@ -274,8 +275,12 @@ mod tests {
         let mut rb = ReadBuffer::new(server, 16 * 1024);
         client.write_all(&[0x05]).await.unwrap();
         assert!(matches!(
-            negotiate(&mut rb, None, Instant::now() + std::time::Duration::from_millis(50))
-                .await,
+            negotiate(
+                &mut rb,
+                None,
+                Instant::now() + std::time::Duration::from_millis(50)
+            )
+            .await,
             Err(ProtoError::Timeout)
         ));
     }

@@ -16,9 +16,9 @@ mod http;
 mod mixed;
 mod param;
 mod socks;
-mod udp;
 #[cfg(test)]
 mod tests;
+mod udp;
 
 use udp::UdpRelay;
 
@@ -45,11 +45,7 @@ enum ListenerPhase {
 /// listeners, not by each of them (the reference PR gave every listener its
 /// own quarter, so N listeners could consume N/4 of the budget).
 fn standalone_tcp_capacity(total: usize) -> usize {
-    if total == 0 {
-        1
-    } else {
-        (total / 4).max(1)
-    }
+    if total == 0 { 1 } else { (total / 4).max(1) }
 }
 
 pub(super) struct BoundInboundListener {
@@ -112,14 +108,13 @@ impl BoundInboundListener {
         let local_addr = listener.local_addr()?;
         let listener = TcpListener::from_std(listener)?;
         let (phase, phase_rx) = watch::channel(ListenerPhase::Running);
-        let relay = udp
-            .and_then(|socket| match UdpRelay::new(socket) {
-                Ok(relay) => Some(relay),
-                Err(error) => {
-                    warn!(%error, listener = %config.name, "入站 UDP relay 初始化失败");
-                    None
-                }
-            });
+        let relay = udp.and_then(|socket| match UdpRelay::new(socket) {
+            Ok(relay) => Some(relay),
+            Err(error) => {
+                warn!(%error, listener = %config.name, "入站 UDP relay 初始化失败");
+                None
+            }
+        });
         let mut supervisors = JoinSet::new();
         if let Some(relay) = relay.as_ref() {
             let dispatcher_relay = Arc::clone(relay);

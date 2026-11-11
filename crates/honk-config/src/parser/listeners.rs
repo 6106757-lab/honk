@@ -59,11 +59,9 @@ pub(super) fn parse_listeners_section(
             let name = name_text.unquote().raw().trim().to_owned();
 
             let mut fields: HashMap<&str, Text<'_, '_>> = HashMap::new();
-            for statement in read::child_statements(
-                &segment,
-                diagnostics,
-                super::cursor::BodySyntax::Statements,
-            ) {
+            for statement in
+                read::child_statements(&segment, diagnostics, super::cursor::BodySyntax::Statements)
+            {
                 let Some((key, value)) = statement.kv() else {
                     statement.notice(
                         diagnostics,
@@ -109,7 +107,12 @@ pub(super) fn parse_listeners_section(
                     .trim()
                     .parse::<std::net::IpAddr>()
                     .map_err(|_| {
-                        listener_scalar_error(value, index, "listen", "listen must be an IP address")
+                        listener_scalar_error(
+                            value,
+                            index,
+                            "listen",
+                            "listen must be an IP address",
+                        )
                     })?;
             }
             let Some(port) = fields.get("port").copied() else {
@@ -141,16 +144,14 @@ pub(super) fn parse_listeners_section(
             if let Some(value) = fields.get("auth").copied() {
                 let raw = value.raw().trim();
                 if !raw.is_empty() {
-                    listener.auth = Some(ListenerConfig::parse_auth(raw).map_err(|message| {
-                        listener_scalar_error(value, index, "auth", message)
-                    })?);
+                    listener.auth =
+                        Some(ListenerConfig::parse_auth(raw).map_err(|message| {
+                            listener_scalar_error(value, index, "auth", message)
+                        })?);
                 }
             }
             for (key, target) in [
-                (
-                    "handshake_timeout_ms",
-                    &mut listener.handshake_timeout_ms,
-                ),
+                ("handshake_timeout_ms", &mut listener.handshake_timeout_ms),
                 ("request_timeout_ms", &mut listener.request_timeout_ms),
             ] {
                 if let Some(value) = fields.get(key).copied() {
@@ -160,15 +161,14 @@ pub(super) fn parse_listeners_section(
                 }
             }
             if let Some(value) = fields.get("max_header_bytes").copied() {
-                listener.max_header_bytes =
-                    value.raw().trim().parse::<usize>().map_err(|_| {
-                        listener_scalar_error(
-                            value,
-                            index,
-                            "max_header_bytes",
-                            "max_header_bytes must be a byte count",
-                        )
-                    })?;
+                listener.max_header_bytes = value.raw().trim().parse::<usize>().map_err(|_| {
+                    listener_scalar_error(
+                        value,
+                        index,
+                        "max_header_bytes",
+                        "max_header_bytes must be a byte count",
+                    )
+                })?;
             }
 
             listeners.push(listener);

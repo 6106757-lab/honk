@@ -131,18 +131,13 @@ struct Targets {
 impl Targets {
     fn resolve(btf: &Btf) -> anyhow::Result<Self> {
         let tried = candidate_names(CANDIDATE_TARGET_ENV, &CANDIDATE_TARGETS).join(", ");
-        let candidate = resolve_target(
-            btf,
-            "candidate",
-            CANDIDATE_TARGET_ENV,
-            &CANDIDATE_TARGETS,
-        )
-        .ok_or_else(|| {
-            anyhow::Error::new(TargetsUnavailable {
-                role: "candidate",
-                tried,
-            })
-        })?;
+        let candidate = resolve_target(btf, "candidate", CANDIDATE_TARGET_ENV, &CANDIDATE_TARGETS)
+            .ok_or_else(|| {
+                anyhow::Error::new(TargetsUnavailable {
+                    role: "candidate",
+                    tried,
+                })
+            })?;
         Ok(Self {
             candidate,
             ipv4: resolve_target(btf, "ipv4", IPV4_TARGET_ENV, &IPV4_TARGETS),
@@ -221,8 +216,7 @@ impl ReceiveTrace {
             "UDP receive trace fentry targets resolved from kernel BTF"
         );
         // Both recvmsg paths consume the candidate from this shared helper.
-        let candidate =
-            attach_exit(bpf, btf, "honk_udp_receive_candidate", &targets.candidate)?;
+        let candidate = attach_exit(bpf, btf, "honk_udp_receive_candidate", &targets.candidate)?;
         let ipv4 = match &targets.ipv4 {
             Some(target) => attach_family(
                 bpf,

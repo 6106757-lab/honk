@@ -383,7 +383,9 @@ async fn shutdown_joins_fetches_and_keeps_the_accepted_load() {
             std::io::ErrorKind::UnexpectedEof
         );
     }
-    let load = state.observations.read()[&periodic.subscription.id].load.clone();
+    let load = state.observations.read()[&periodic.subscription.id]
+        .load
+        .clone();
     assert_eq!(load.updated_at, Some(accepted_at));
     assert!(load.cached);
     assert_eq!(load.error, Some("cache_load_failed"));
@@ -887,7 +889,9 @@ async fn startup_drops_provider_nodes_another_provider_published() {
         config.validate_assembled().unwrap();
         assert_eq!(node_names(&config), expected);
         for provider in [&first, &second] {
-            let load = state.observations.read()[&provider.subscription.id].load.clone();
+            let load = state.observations.read()[&provider.subscription.id]
+                .load
+                .clone();
             assert!(load.updated_at.is_some() && load.cached);
             assert_eq!((load.error, load.rejection), (None, None));
         }
@@ -962,7 +966,9 @@ async fn startup_fetch_replaces_the_providers_own_nodes() {
     server.await.unwrap();
     config.validate_assembled().unwrap();
     assert_eq!(node_names(&config), ["kept", "new"]);
-    let load = state.observations.read()[&provider.subscription.id].load.clone();
+    let load = state.observations.read()[&provider.subscription.id]
+        .load
+        .clone();
     assert!(load.updated_at.is_some());
     assert!(!load.cached);
     assert_eq!((load.error, load.rejection), (None, None));

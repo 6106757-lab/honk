@@ -19,9 +19,9 @@
 //! unregisters the session, aborts every reply task and drops every connection
 //! tracker row, so reload/teardown leaves no zombie flows.
 
+use super::super::connection::ControlPlaneHandle;
 use super::dial::resolve_inbound_node;
 use super::param::InboundTarget;
-use super::super::connection::ControlPlaneHandle;
 use crate::connection_tracker::{
     CloseAction, CloseCompletion, CloseSignal, ConnectionEntry, ConnectionOwner,
 };
@@ -71,11 +71,17 @@ fn parse_address(bytes: &[u8], start: usize) -> Option<(InboundTarget, u16, usiz
     let (target, next) = match atyp {
         0x01 => {
             let octets: [u8; 4] = bytes.get(start + 1..start + 5)?.try_into().ok()?;
-            (InboundTarget::Ip(IpAddr::V4(Ipv4Addr::from(octets))), start + 5)
+            (
+                InboundTarget::Ip(IpAddr::V4(Ipv4Addr::from(octets))),
+                start + 5,
+            )
         }
         0x04 => {
             let octets: [u8; 16] = bytes.get(start + 1..start + 17)?.try_into().ok()?;
-            (InboundTarget::Ip(IpAddr::V6(Ipv6Addr::from(octets))), start + 17)
+            (
+                InboundTarget::Ip(IpAddr::V6(Ipv6Addr::from(octets))),
+                start + 17,
+            )
         }
         0x03 => {
             let len = *bytes.get(start + 1)? as usize;
@@ -83,7 +89,10 @@ fn parse_address(bytes: &[u8], start: usize) -> Option<(InboundTarget, u16, usiz
                 return None;
             }
             let raw = bytes.get(start + 2..start + 2 + len)?;
-            let domain = std::str::from_utf8(raw).ok()?.trim_end_matches('.').to_owned();
+            let domain = std::str::from_utf8(raw)
+                .ok()?
+                .trim_end_matches('.')
+                .to_owned();
             (InboundTarget::Domain(domain), start + 2 + len)
         }
         _ => return None,
@@ -196,7 +205,10 @@ impl Drop for Registration {
         let sender = self.sender.clone();
         tokio::spawn(async move {
             let mut table = sessions.lock().await;
-            if table.get(&ip).is_some_and(|live| live.same_channel(&sender)) {
+            if table
+                .get(&ip)
+                .is_some_and(|live| live.same_channel(&sender))
+            {
                 table.remove(&ip);
             }
         });
@@ -358,8 +370,7 @@ fn parse_udp_datagram(bytes: &[u8]) -> Result<PreparedDatagram, &'static str> {
         // Fragmentation is explicitly optional in RFC 1928; drop fragments.
         return Err("不支持分片");
     }
-    let (target, port, offset) =
-        parse_address(bytes, 3).ok_or("目标地址解析失败")?;
+    let (target, port, offset) = parse_address(bytes, 3).ok_or("目标地址解析失败")?;
     if port == 0 {
         return Err("目标端口为零");
     }
@@ -470,26 +481,29 @@ async fn ensure_flow<'a>(
         },
         groups: Vec::new(),
     };
-    let tracker_id = handle.connection_tracker.register_owned(ConnectionEntry {
-        id: uuid::Uuid::new_v4().to_string(),
-        source: peer.to_string(),
-        destination: target.to_string(),
-        proxy: outbound.clone(),
-        #[cfg(feature = "native-api")]
-        routed_outbound: Some(outbound.clone()),
-        #[cfg(feature = "native-api")]
-        native_flow_id: None,
-        rule,
-        rule_payload,
-        chains,
-        upload: Arc::clone(&upload),
-        download: Arc::clone(&download),
-        start_time: std::time::Instant::now(),
-        domain: target_domain.clone(),
-        network: "udp".to_owned(),
-        process: None,
-        process_path: None,
-    }, owner);
+    let tracker_id = handle.connection_tracker.register_owned(
+        ConnectionEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            source: peer.to_string(),
+            destination: target.to_string(),
+            proxy: outbound.clone(),
+            #[cfg(feature = "native-api")]
+            routed_outbound: Some(outbound.clone()),
+            #[cfg(feature = "native-api")]
+            native_flow_id: None,
+            rule,
+            rule_payload,
+            chains,
+            upload: Arc::clone(&upload),
+            download: Arc::clone(&download),
+            start_time: std::time::Instant::now(),
+            domain: target_domain.clone(),
+            network: "udp".to_owned(),
+            process: None,
+            process_path: None,
+        },
+        owner,
+    );
 
     // One reply task per flow: it owns `recv_packet` and writes replies back
     // through the shared relay socket, addressed to the session's peer.
@@ -558,7 +572,10 @@ mod tests {
         let mut bytes = vec![0x00, 0x00, 0x00, 0x01, 8, 8, 8, 8, 0x00, 0x35];
         bytes.extend_from_slice(b"dns-query");
         let parsed = parse_udp_datagram(&bytes).unwrap();
-        assert_eq!(parsed.target, InboundTarget::Ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert_eq!(
+            parsed.target,
+            InboundTarget::Ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))
+        );
         assert_eq!(parsed.port, 53);
         assert_eq!(parsed.payload, b"dns-query");
     }
@@ -570,7 +587,10 @@ mod tests {
         bytes.extend_from_slice(&443u16.to_be_bytes());
         bytes.extend_from_slice(b"payload");
         let parsed = parse_udp_datagram(&bytes).unwrap();
-        assert_eq!(parsed.target, InboundTarget::Domain("example.com".to_owned()));
+        assert_eq!(
+            parsed.target,
+            InboundTarget::Domain("example.com".to_owned())
+        );
         assert_eq!(parsed.port, 443);
         assert_eq!(parsed.payload, b"payload");
     }
@@ -589,9 +609,16 @@ mod tests {
 
     #[test]
     fn reply_header_round_trips() {
-        let reply = wrap_reply(&InboundTarget::Ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))), 443, b"ok");
+        let reply = wrap_reply(
+            &InboundTarget::Ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
+            443,
+            b"ok",
+        );
         let parsed = parse_udp_datagram(&reply).unwrap();
-        assert_eq!(parsed.target, InboundTarget::Ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))));
+        assert_eq!(
+            parsed.target,
+            InboundTarget::Ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)))
+        );
         assert_eq!(parsed.port, 443);
         assert_eq!(parsed.payload, b"ok");
     }

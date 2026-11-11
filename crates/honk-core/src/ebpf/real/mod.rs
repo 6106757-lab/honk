@@ -82,11 +82,17 @@ mod kernel_version_tests {
 
     #[test]
     fn parses_vendor_suffixed_and_future_releases() {
-        assert_eq!(parse_kernel_release("6.12.114-0612114-generic"), Some((6, 12, 114)));
+        assert_eq!(
+            parse_kernel_release("6.12.114-0612114-generic"),
+            Some((6, 12, 114))
+        );
         assert_eq!(parse_kernel_release("6.12.0-rc3+"), Some((6, 12, 0)));
         assert_eq!(parse_kernel_release("7.0.0"), Some((7, 0, 0)));
         assert_eq!(parse_kernel_release("7.1"), Some((7, 1, 0)));
-        assert_eq!(parse_kernel_release("6.12.114.1-custom"), Some((6, 12, 114)));
+        assert_eq!(
+            parse_kernel_release("6.12.114.1-custom"),
+            Some((6, 12, 114))
+        );
         assert_eq!(parse_kernel_release("6"), None);
         assert_eq!(parse_kernel_release("garbage"), None);
     }
@@ -921,8 +927,7 @@ impl EbpfBackend for RealEbpfBackend {
                     .downcast_ref::<receive_trace::TargetsUnavailable>()
                     .is_some();
                 if retryable {
-                    self.receive_trace_retry_at =
-                        Some(now + std::time::Duration::from_secs(60));
+                    self.receive_trace_retry_at = Some(now + std::time::Duration::from_secs(60));
                 }
                 warn!(
                     error = %format_args!("{error:#}"),

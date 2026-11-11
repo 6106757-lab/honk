@@ -174,9 +174,8 @@ pub(super) async fn http_error<S: AsyncRead + AsyncWrite + Unpin>(
     status: u16,
     reason: &str,
 ) {
-    let body = format!(
-        "HTTP/1.1 {status} {reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-    );
+    let body =
+        format!("HTTP/1.1 {status} {reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
     let _ = rb.write_all(body.as_bytes()).await;
 }
 

@@ -46,10 +46,7 @@ impl CloseSignal {
     /// True once the owning transport has finished (cleanly or with a failure).
     /// Used by the tracker sweeper to reclaim rows whose removal path failed.
     pub(crate) fn is_terminal(&self) -> bool {
-        matches!(
-            *self.0.borrow(),
-            ClosePhase::Closed | ClosePhase::Failed
-        )
+        matches!(*self.0.borrow(), ClosePhase::Closed | ClosePhase::Failed)
     }
 
     /// True once a close request has claimed this row (or the owner already
@@ -680,8 +677,7 @@ mod tests {
     #[tokio::test]
     async fn inbound_connection_is_closable_by_id() {
         let tracker = ConnectionTracker::new();
-        let (id, cancel, signal) =
-            inbound_owner(&tracker, test_entry("inbound-tcp", "tcp"));
+        let (id, cancel, signal) = inbound_owner(&tracker, test_entry("inbound-tcp", "tcp"));
         let relay = tokio::spawn(async move {
             cancel.notified().await;
             signal.finish(true);

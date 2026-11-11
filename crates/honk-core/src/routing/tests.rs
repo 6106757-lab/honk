@@ -467,7 +467,10 @@ fn test_process_name_exact_match_no_substring() {
     }];
     let router = Router::new(&rules, "direct").unwrap();
     assert_eq!(router.route(&make_conn(Some("natmap"), None)), "proxy");
-    assert_eq!(router.route(&make_conn(Some("natmap-curl"), None)), "direct");
+    assert_eq!(
+        router.route(&make_conn(Some("natmap-curl"), None)),
+        "direct"
+    );
     assert_eq!(router.route(&make_conn(Some("xnatmap"), None)), "direct");
     assert_eq!(router.route(&make_conn(Some("natmapx"), None)), "direct");
     assert_eq!(router.route(&make_conn(Some("mycurl"), None)), "direct");

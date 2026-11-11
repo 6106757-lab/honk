@@ -532,15 +532,10 @@ impl Router {
         mut observe: impl FnMut(usize, Option<usize>, bool),
     ) -> Option<RouteMatch<'a>> {
         self.routes.iter().enumerate().find_map(|(index, route)| {
-            let matched = self.matches_route(
-                route,
-                conn,
-                domain_bitmap,
-                inbound,
-                |condition, matched| {
+            let matched =
+                self.matches_route(route, conn, domain_bitmap, inbound, |condition, matched| {
                     observe(index, Some(condition), matched);
-                },
-            );
+                });
             observe(index, None, matched);
             if !matched {
                 return None;
@@ -608,19 +603,14 @@ impl Router {
             .iter()
             .enumerate()
             .all(|(index, condition)| {
-                    // Production absence is a miss before negation; simulations retain unknown.
-                    let matched = self
-                        .evaluate_predicate::<false>(
-                            &condition.predicate,
-                            input,
-                            domain_bitmap,
-                            None,
-                        )
-                        .unwrap_or(false);
-                    let matched = if condition.not { !matched } else { matched };
-                    observe(index, matched);
-                    matched
-                })
+                // Production absence is a miss before negation; simulations retain unknown.
+                let matched = self
+                    .evaluate_predicate::<false>(&condition.predicate, input, domain_bitmap, None)
+                    .unwrap_or(false);
+                let matched = if condition.not { !matched } else { matched };
+                observe(index, matched);
+                matched
+            })
     }
 
     fn evaluate_predicate<const BOUNDED: bool>(
@@ -666,9 +656,7 @@ impl Router {
             CompiledPredicate::ProcessName(patterns) => input.process_name.map(|name| {
                 // Whole-name equality, mirroring dae's exact process-name match
                 // instead of a substring scan (daeuniverse/honk#453).
-                bounded_any::<BOUNDED, _>(patterns, deadline, |pattern| {
-                    name == pattern.as_str()
-                })
+                bounded_any::<BOUNDED, _>(patterns, deadline, |pattern| name == pattern.as_str())
             }),
             CompiledPredicate::Mac(macs) => input.mac.map(|mac| {
                 normalize_mac_bytes(mac).is_some_and(|mac| {

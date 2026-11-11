@@ -10,7 +10,7 @@
 //! CONNECT is a tunnel: it returns after the relay ends.
 
 use super::super::connection::ControlPlaneHandle;
-use super::dial::{InboundDialError, InboundDial};
+use super::dial::{InboundDial, InboundDialError};
 use super::http::{self, CONNECT_ESTABLISHED};
 use super::param::{self, ClientParam, InboundTarget, ProtoError, ReadBuffer};
 use super::socks::{self, SocksRequest};

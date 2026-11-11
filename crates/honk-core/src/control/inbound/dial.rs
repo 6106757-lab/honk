@@ -11,8 +11,8 @@
 //! * the config read lock is released *before* awaiting the router read lock,
 //!   avoiding the AB-BA deadlock with reload (`router.write` -> `config.write`).
 
-use super::param::{ClientParam, InboundTarget};
 use super::super::connection::ControlPlaneHandle;
+use super::param::{ClientParam, InboundTarget};
 use crate::routing::ConnectionInfo;
 use honk_config::Config;
 use honk_outbound::alive::{IpVersion, ProbeDomain};

@@ -79,23 +79,24 @@ impl Router {
             }
         }
 
-        let matched = self.route_full_with_observer(conn, bitmap, None, |rule, condition, matched| {
-            let Some(evaluated) = rules.get_mut(rule) else {
-                return;
-            };
-            let result = if matched {
-                MatchResult::Matched
-            } else {
-                MatchResult::NotMatched
-            };
-            if let Some(condition) = condition {
-                if let Some(recorded) = evaluated.conditions.get_mut(condition) {
-                    *recorded = result;
+        let matched =
+            self.route_full_with_observer(conn, bitmap, None, |rule, condition, matched| {
+                let Some(evaluated) = rules.get_mut(rule) else {
+                    return;
+                };
+                let result = if matched {
+                    MatchResult::Matched
+                } else {
+                    MatchResult::NotMatched
+                };
+                if let Some(condition) = condition {
+                    if let Some(recorded) = evaluated.conditions.get_mut(condition) {
+                        *recorded = result;
+                    }
+                } else {
+                    evaluated.result = result;
                 }
-            } else {
-                evaluated.result = result;
-            }
-        });
+            });
         if matched.is_none()
             && let Some(fallback) = rules.get_mut(self.routes.len())
         {

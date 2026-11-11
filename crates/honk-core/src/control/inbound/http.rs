@@ -118,9 +118,7 @@ pub(super) fn parse_http_head(
 ) -> Result<HttpRequest, ProtoError> {
     let text = String::from_utf8_lossy(head);
     let mut lines = text.split("\r\n");
-    let request_line = lines
-        .next()
-        .ok_or(ProtoError::Malformed("empty request"))?;
+    let request_line = lines.next().ok_or(ProtoError::Malformed("empty request"))?;
     let mut parts = request_line.split_whitespace();
     let method = parts
         .next()
@@ -283,7 +281,10 @@ mod tests {
     fn host_header_is_used_for_origin_form() {
         let head = b"GET /x HTTP/1.1\r\nHost: 1.2.3.4:8080\r\n\r\n";
         let request = parse_http_head(head, None).unwrap();
-        assert_eq!(request.target, InboundTarget::Ip("1.2.3.4".parse().unwrap()));
+        assert_eq!(
+            request.target,
+            InboundTarget::Ip("1.2.3.4".parse().unwrap())
+        );
         assert_eq!(request.port, 8080);
     }
 

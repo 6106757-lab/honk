@@ -157,10 +157,9 @@ pub fn validate_listeners(listeners: &[ListenerConfig]) -> Result<(), String> {
         {
             return Err(format!("{label}: duplicate listener name"));
         }
-        if let Some(other) = listeners[..index]
-            .iter()
-            .find(|other| other.port == listener.port && bind_conflicts(other.listen, listener.listen))
-        {
+        if let Some(other) = listeners[..index].iter().find(|other| {
+            other.port == listener.port && bind_conflicts(other.listen, listener.listen)
+        }) {
             return Err(format!(
                 "{label}: bind address {} conflicts with listener '{}' ({})",
                 listener.bind_addr(),
@@ -196,7 +195,11 @@ mod tests {
             listener("a", 12000, default_listen()),
             listener("a", 12001, default_listen()),
         ];
-        assert!(validate_listeners(&items).unwrap_err().contains("duplicate"));
+        assert!(
+            validate_listeners(&items)
+                .unwrap_err()
+                .contains("duplicate")
+        );
     }
 
     #[test]
@@ -205,7 +208,11 @@ mod tests {
             listener("a", 7890, "0.0.0.0".parse().unwrap()),
             listener("b", 7890, "127.0.0.1".parse().unwrap()),
         ];
-        assert!(validate_listeners(&items).unwrap_err().contains("conflicts"));
+        assert!(
+            validate_listeners(&items)
+                .unwrap_err()
+                .contains("conflicts")
+        );
     }
 
     #[test]
