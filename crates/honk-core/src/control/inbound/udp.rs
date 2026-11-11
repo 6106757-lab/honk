@@ -22,7 +22,9 @@
 use super::dial::resolve_inbound_node;
 use super::param::InboundTarget;
 use super::super::connection::ControlPlaneHandle;
-use crate::connection_tracker::ConnectionEntry;
+use crate::connection_tracker::{
+    CloseAction, CloseCompletion, CloseSignal, ConnectionEntry, ConnectionOwner,
+};
 use crate::routing::ConnectionInfo;
 use honk_config::ListenerConfig;
 use honk_outbound::alive::{IpVersion, ProbeDomain};
@@ -34,7 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -206,8 +208,33 @@ struct UdpFlow {
     last_active: Instant,
     upload: Arc<AtomicU64>,
     tracker_id: String,
+    /// Owning transport acknowledgement for the connections API. A close
+    /// request waits on this signal; dropping it without `finish(true)` would
+    /// report a failure even though the flow was torn down.
+    completion: CloseCompletion,
     /// Owns the reply loop; aborted when the flow is dropped.
     reply_task: JoinHandle<()>,
+}
+
+/// Remove every flow matching `predicate`, acknowledging transport teardown
+/// before dropping the tracker row. Dropping a flow aborts its reply task, so
+/// no flow can outlive its observation (or the API's close request).
+fn retire_flows(
+    flows: &mut HashMap<(InboundTarget, u16), UdpFlow>,
+    handle: &ControlPlaneHandle,
+    predicate: impl Fn(&UdpFlow) -> bool,
+) {
+    let keys: Vec<_> = flows
+        .iter()
+        .filter(|(_, flow)| predicate(flow))
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in keys {
+        if let Some(flow) = flows.remove(&key) {
+            flow.completion.0.finish(true);
+            handle.connection_tracker.remove(&flow.tracker_id);
+        }
+    }
 }
 
 impl Drop for UdpFlow {
@@ -242,6 +269,9 @@ pub(super) async fn serve_udp_associate(
     let mut control_byte = [0u8; 1];
     let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Shared by every flow in this session: claiming one tracker row wakes the
+    // session, which then retires all claimed flows in one pass.
+    let session_cancel = Arc::new(Notify::new());
     // Never let the control connection outlive the handshake deadline plus a
     // hard ceiling; a client that parks the TCP channel forever must not pin
     // transports indefinitely.
@@ -250,6 +280,9 @@ pub(super) async fn serve_udp_associate(
     loop {
         tokio::select! {
             biased;
+            _ = session_cancel.notified() => {
+                retire_flows(&mut flows, handle, |flow| flow.completion.0.is_claimed());
+            }
             read = stream.read(&mut control_byte) => {
                 // RFC 1928: any data on the control channel is ignored; only
                 // EOF (or an error) terminates the association.
@@ -261,7 +294,9 @@ pub(super) async fn serve_udp_associate(
             _ = tokio::time::sleep_until(session_deadline) => break,
             _ = sweep.tick() => {
                 let now = Instant::now();
-                flows.retain(|_, flow| now.duration_since(flow.last_active) < FLOW_IDLE_TIMEOUT);
+                retire_flows(&mut flows, handle, |flow| {
+                    now.duration_since(flow.last_active) >= FLOW_IDLE_TIMEOUT
+                });
             }
             datagram = rx.recv() => {
                 let Some((peer, bytes)) = datagram else { break; };
@@ -279,6 +314,7 @@ pub(super) async fn serve_udp_associate(
                 }
                 let entry = match ensure_flow(
                     &mut flows, key.clone(), &prepared, peer, config, handle, relay,
+                    &session_cancel,
                 ).await {
                     Ok(flow) => flow,
                     Err(error) => {
@@ -290,8 +326,10 @@ pub(super) async fn serve_udp_associate(
                 entry.upload.fetch_add(prepared.payload.len() as u64, Ordering::Relaxed);
                 if let Err(error) = entry.transport.send_packet(&prepared.payload).await {
                     tracing::debug!(%error, %peer, "入站 UDP 发送失败，移除 flow");
-                    let flow = flows.remove(&key);
-                    if let Some(flow) = flow {
+                    // Remove the single failed flow explicitly so its reply
+                    // task stops and its tracker row is acknowledged.
+                    if let Some(flow) = flows.remove(&key) {
+                        flow.completion.0.finish(true);
                         handle.connection_tracker.remove(&flow.tracker_id);
                     }
                 }
@@ -299,9 +337,7 @@ pub(super) async fn serve_udp_associate(
         }
     }
 
-    for (_, flow) in flows.drain() {
-        handle.connection_tracker.remove(&flow.tracker_id);
-    }
+    retire_flows(&mut flows, handle, |_| true);
     Ok(())
 }
 
@@ -349,6 +385,7 @@ async fn ensure_flow<'a>(
     config: &ListenerConfig,
     handle: &ControlPlaneHandle,
     relay: &Arc<UdpRelay>,
+    cancel: &Arc<Notify>,
 ) -> anyhow::Result<&'a mut UdpFlow> {
     if flows.contains_key(&key) {
         return Ok(flows.get_mut(&key).expect("checked above"));
@@ -423,7 +460,17 @@ async fn ensure_flow<'a>(
 
     let upload = Arc::new(AtomicU64::new(0));
     let download = Arc::new(AtomicU64::new(0));
-    let tracker_id = handle.connection_tracker.register(ConnectionEntry {
+    let signal = CloseSignal::new();
+    let owner = ConnectionOwner {
+        signal: Arc::clone(&signal),
+        // The session owns every flow's `recv_packet` task and cannot await
+        // one signal per flow; the notify wakes it to retire claimed rows.
+        action: CloseAction::Inbound {
+            cancel: Arc::clone(cancel),
+        },
+        groups: Vec::new(),
+    };
+    let tracker_id = handle.connection_tracker.register_owned(ConnectionEntry {
         id: uuid::Uuid::new_v4().to_string(),
         source: peer.to_string(),
         destination: target.to_string(),
@@ -442,7 +489,7 @@ async fn ensure_flow<'a>(
         network: "udp".to_owned(),
         process: None,
         process_path: None,
-    });
+    }, owner);
 
     // One reply task per flow: it owns `recv_packet` and writes replies back
     // through the shared relay socket, addressed to the session's peer.
@@ -477,6 +524,7 @@ async fn ensure_flow<'a>(
             last_active: Instant::now(),
             upload,
             tracker_id,
+            completion: CloseCompletion(signal),
             reply_task,
         },
     );

@@ -15,7 +15,9 @@ use super::http::{self, CONNECT_ESTABLISHED};
 use super::param::{self, ClientParam, InboundTarget, ProtoError, ReadBuffer};
 use super::socks::{self, SocksRequest};
 use super::udp::{self, UdpRelay};
-use crate::connection_tracker::ConnectionEntry;
+use crate::connection_tracker::{
+    CloseAction, CloseCompletion, CloseSignal, ConnectionEntry, ConnectionOwner,
+};
 use honk_config::ListenerConfig;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -26,6 +28,9 @@ use tokio::time::Instant;
 
 struct Tracked {
     id: String,
+    /// Owning transport acknowledgement. Dropping it without an explicit
+    /// `finish(true)` would make a close request report a failure.
+    completion: CloseCompletion,
     upload: Arc<AtomicU64>,
     download: Arc<AtomicU64>,
 }
@@ -34,6 +39,16 @@ impl Tracked {
     fn register(handle: &ControlPlaneHandle, param: &ClientParam, dial: &InboundDial) -> Self {
         let upload = Arc::new(AtomicU64::new(0));
         let download = Arc::new(AtomicU64::new(0));
+        let signal = CloseSignal::new();
+        let owner = ConnectionOwner {
+            signal: Arc::clone(&signal),
+            // No kernel-side teardown: the relay below awaits `cancelled()`
+            // directly, which `claim()` wakes by leaving `Active`.
+            action: CloseAction::Tcp,
+            // Inbound connections have no kernel flow, so group interrupts do
+            // not target them. They are still closable by id and in bulk.
+            groups: Vec::new(),
+        };
         let entry = ConnectionEntry {
             id: uuid::Uuid::new_v4().to_string(),
             source: param.client_addr.to_string(),
@@ -57,15 +72,24 @@ impl Tracked {
             process: None,
             process_path: None,
         };
-        let id = handle.connection_tracker.register(entry);
+        let id = handle.connection_tracker.register_owned(entry, owner);
         Self {
             id,
+            completion: CloseCompletion(signal),
             upload,
             download,
         }
     }
 
+    /// Resolves as soon as the API claims this row for closure.
+    async fn cancelled(&self) {
+        self.completion.0.cancelled().await;
+    }
+
     fn finish(self, handle: &ControlPlaneHandle) {
+        // Acknowledge before removing the row: an in-flight close request is
+        // waiting on this signal and must observe `Closed`, not `Failed`.
+        self.completion.0.finish(true);
         handle.connection_tracker.remove(&self.id);
     }
 
@@ -191,16 +215,24 @@ async fn serve_socks(
     if !pending.is_empty() {
         stream.stream.write_all(&pending).await?;
     }
-    let result = crate::relay::relay_proxy(
+    let relay = crate::relay::relay_proxy(
         rb.stream_mut(),
         stream,
         param.client_addr,
         dial.target,
         tracked.progress(),
-    )
-    .await;
+    );
+    // Dropping the relay future drops both sockets, which is exactly what a
+    // "close connection" request must do for a userspace listener.
+    let result = tokio::select! {
+        biased;
+        _ = tracked.cancelled() => None,
+        result = relay => Some(result),
+    };
     tracked.finish(handle);
-    result?;
+    if let Some(result) = result {
+        result?;
+    }
     Ok(())
 }
 
@@ -273,32 +305,48 @@ async fn serve_http(
             if !pending.is_empty() {
                 stream.stream.write_all(&pending).await?;
             }
-            let result = crate::relay::relay_proxy(
+            let relay = crate::relay::relay_proxy(
                 rb.stream_mut(),
                 stream,
                 param.client_addr,
                 dial.target,
                 tracked.progress(),
-            )
-            .await;
+            );
+            let result = tokio::select! {
+                biased;
+                _ = tracked.cancelled() => None,
+                result = relay => Some(result),
+            };
             tracked.finish(handle);
-            result?;
+            if let Some(result) = result {
+                result?;
+            }
             // A CONNECT tunnel owns the rest of the client connection.
             return Ok(());
         }
 
-        let result = http::forward_plain(
+        let forward = http::forward_plain(
             rb,
             &request,
             &mut *stream.stream,
             &tracked.upload,
             &tracked.download,
-        )
-        .await;
+        );
+        let result = tokio::select! {
+            biased;
+            _ = tracked.cancelled() => None,
+            result = forward => Some(result),
+        };
         tracked.finish(handle);
-        if let Err(error) = result {
-            tracing::debug!(%error, "HTTP request forwarding ended");
-            return Ok(());
+        match result {
+            Some(Err(error)) => {
+                tracing::debug!(%error, "HTTP request forwarding ended");
+                return Ok(());
+            }
+            // The API closed this connection; do not serve another request
+            // on the same client socket.
+            None => return Ok(()),
+            Some(Ok(())) => {}
         }
         // Upstream closed (we forced `Connection: close`). Loop for the next
         // keep-alive request with a fresh dial and a fresh rule decision.

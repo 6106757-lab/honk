@@ -79,6 +79,17 @@ routing {
 - 一个 dispatcher 独占 `recv_from`，按**客户端 IP** 分发到各控制连接对应的会话，因此 NAT 后 UDP 源端口与 TCP 源端口不同也能工作。
 - 若 UDP 端口绑定失败（例如被别的进程占用），该监听**降级为仅 TCP**，不影响现有连接；此时 `UDP ASSOCIATE` 会回 REP `0x07`。
 
+## 关闭连接
+
+从 listeners 进来的 TCP 连接和 UDP flow 都注册了可关闭的传输 owner，因此 doona 里：
+
+- **单条关闭**（`DELETE /api/v1/connections/{id}`）会真正断开该连接，返回 `204`；
+- **「全部关闭」**（`DELETE /api/v1/connections?all=true`）会把它们计入 `closed`，不会计入 `skipped`。
+
+TCP 连接在关闭请求到达时直接丢弃双向 relay（两个 socket 一起断开）；UDP flow 由会话统一收回，reply 任务被中止、连接表行被移除。
+
+注意：入站连接没有内核 flow，**不参与「切换节点组时打断该组连接」**（`snapshot_group` 按组过滤不到它们）。这是唯一仍会跳过入站连接的关闭路径，其余按 id / 按来源 / 全部关闭都生效。
+
 ## 已知限制
 
 1. 入站连接没有以太网 L2 头，因此 `mac()` / `pname()` 规则不命中；`sport()` 使用的是客户端连接的真实端口。

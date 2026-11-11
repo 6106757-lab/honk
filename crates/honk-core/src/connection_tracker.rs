@@ -52,6 +52,13 @@ impl CloseSignal {
         )
     }
 
+    /// True once a close request has claimed this row (or the owner already
+    /// finished). Userspace relays poll this to find which of their flows the
+    /// API asked to close.
+    pub(crate) fn is_claimed(&self) -> bool {
+        *self.0.borrow() != ClosePhase::Active
+    }
+
     fn claim(&self) -> bool {
         self.0.send_if_modified(|phase| {
             if *phase != ClosePhase::Active {
@@ -112,6 +119,13 @@ pub(crate) enum CloseAction {
         destination: SocketAddr,
         token: u32,
         generation: u64,
+    },
+    /// A userspace listener relay with no kernel-side action to perform. The
+    /// owning task cannot await one signal per flow, so claiming the row wakes
+    /// it through a shared `Notify`; it then retires every claimed flow and
+    /// acknowledges with `CloseSignal::finish(true)`.
+    Inbound {
+        cancel: Arc<tokio::sync::Notify>,
     },
 }
 
@@ -488,28 +502,33 @@ impl ConnectionTracker {
             return CloseRequest::Immediate(CloseOutcome::Gone);
         }
         let owner = selected.owner.expect("claimed transport owner");
-        if let CloseAction::Udp {
-            pool,
-            client,
-            destination,
-            token,
-            generation,
-        } = &owner.action
-        {
-            let Some(pool) = pool.upgrade() else {
-                owner.signal.finish(false);
-                // No removal will ever be produced for this close: the pool is
-                // gone, so neither settle() nor the endpoint can reclaim the
-                // row. Drop the observation immediately.
-                self.remove(&selected.id);
-                return CloseRequest::Pending(Arc::clone(&owner.signal));
-            };
-            if !pool.close_exact(*client, *destination, *token, *generation) {
-                owner.signal.finish(false);
-                // close_exact returned false: no EndpointRemoval is emitted,
-                // which used to leave the row in the unbounded map forever.
-                self.remove(&selected.id);
+        match &owner.action {
+            CloseAction::Udp {
+                pool,
+                client,
+                destination,
+                token,
+                generation,
+            } => {
+                let Some(pool) = pool.upgrade() else {
+                    owner.signal.finish(false);
+                    // No removal will ever be produced for this close: the pool is
+                    // gone, so neither settle() nor the endpoint can reclaim the
+                    // row. Drop the observation immediately.
+                    self.remove(&selected.id);
+                    return CloseRequest::Pending(Arc::clone(&owner.signal));
+                };
+                if !pool.close_exact(*client, *destination, *token, *generation) {
+                    owner.signal.finish(false);
+                    // close_exact returned false: no EndpointRemoval is emitted,
+                    // which used to leave the row in the unbounded map forever.
+                    self.remove(&selected.id);
+                }
             }
+            // Claiming already moved the signal out of `Active`; the relay
+            // wakes on this notification, drops its sockets and acknowledges.
+            CloseAction::Inbound { cancel } => cancel.notify_one(),
+            CloseAction::Tcp => {}
         }
         CloseRequest::Pending(Arc::clone(&owner.signal))
     }
@@ -612,7 +631,98 @@ impl Default for ConnectionTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::ConnectionTracker;
+    use super::*;
+
+    fn test_entry(id: &str, network: &str) -> ConnectionEntry {
+        ConnectionEntry {
+            id: id.into(),
+            source: "172.20.1.20:50000".into(),
+            destination: "1.1.1.1:443".into(),
+            proxy: "Final".into(),
+            #[cfg(feature = "native-api")]
+            routed_outbound: Some("Final".into()),
+            #[cfg(feature = "native-api")]
+            native_flow_id: None,
+            rule: "Fallback".into(),
+            rule_payload: String::new(),
+            chains: vec!["Final".into()],
+            upload: Arc::new(AtomicU64::new(0)),
+            download: Arc::new(AtomicU64::new(0)),
+            start_time: Instant::now(),
+            domain: None,
+            network: network.into(),
+            process: None,
+            process_path: None,
+        }
+    }
+
+    /// Stand-in for a userspace listener relay: a close request notifies it,
+    /// it drops both sockets and acknowledges transport teardown.
+    fn inbound_owner(
+        tracker: &ConnectionTracker,
+        entry: ConnectionEntry,
+    ) -> (String, Arc<tokio::sync::Notify>, Arc<CloseSignal>) {
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        let signal = CloseSignal::new();
+        let id = tracker.register_owned(
+            entry,
+            ConnectionOwner {
+                signal: Arc::clone(&signal),
+                action: CloseAction::Inbound {
+                    cancel: Arc::clone(&cancel),
+                },
+                groups: Vec::new(),
+            },
+        );
+        (id, cancel, signal)
+    }
+
+    #[tokio::test]
+    async fn inbound_connection_is_closable_by_id() {
+        let tracker = ConnectionTracker::new();
+        let (id, cancel, signal) =
+            inbound_owner(&tracker, test_entry("inbound-tcp", "tcp"));
+        let relay = tokio::spawn(async move {
+            cancel.notified().await;
+            signal.finish(true);
+        });
+        assert_eq!(tracker.close_id(&id).await, CloseOutcome::Closed);
+        relay.await.unwrap();
+        tracker.remove(&id);
+    }
+
+    #[tokio::test]
+    async fn bulk_close_counts_inbound_connections_as_closed() {
+        let tracker = ConnectionTracker::new();
+        let (tcp_id, tcp_cancel, tcp_signal) =
+            inbound_owner(&tracker, test_entry("inbound-tcp", "tcp"));
+        let (udp_id, udp_cancel, udp_signal) =
+            inbound_owner(&tracker, test_entry("inbound-udp", "udp"));
+        // A row without an owner (e.g. a legacy observation) must still be
+        // reported as skipped, not silently counted as closed.
+        tracker.register(test_entry("unowned", "tcp"));
+
+        let relays = tokio::spawn(async move {
+            let tcp = tokio::spawn(async move {
+                tcp_cancel.notified().await;
+                tcp_signal.finish(true);
+            });
+            let udp = tokio::spawn(async move {
+                udp_cancel.notified().await;
+                udp_signal.finish(true);
+            });
+            let _ = tcp.await;
+            let _ = udp.await;
+        });
+
+        let summary = tracker.close_matching(None, None, 100).await.unwrap();
+        assert_eq!(summary.closed, 2);
+        assert_eq!(summary.skipped, 1);
+        assert!(!summary.failed);
+        relays.await.unwrap();
+        tracker.remove(&tcp_id);
+        tracker.remove(&udp_id);
+    }
 
     #[test]
     fn interrupt_consumer_survives_api_shutdown() {
