@@ -79,7 +79,7 @@ impl Router {
             }
         }
 
-        let matched = self.route_full_with_observer(conn, bitmap, |rule, condition, matched| {
+        let matched = self.route_full_with_observer(conn, bitmap, None, |rule, condition, matched| {
             let Some(evaluated) = rules.get_mut(rule) else {
                 return;
             };

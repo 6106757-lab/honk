@@ -22,6 +22,7 @@ struct BoundListeners {
     udp4: Vec<Arc<UdpSocket>>,
     udp6: Vec<Arc<UdpSocket>>,
     dns: Option<dns_listener::BoundDnsListener>,
+    inbound: Vec<inbound::BoundInboundListener>,
     nfqueue_enabled: bool,
 }
 
@@ -32,6 +33,7 @@ pub(super) struct RuntimeEpoch {
     tcp: JoinSet<()>,
     maintenance: OwnedTasks,
     dns: Option<dns_listener::DnsListener>,
+    inbound: Option<inbound::InboundListenerSet>,
     janitor: Option<tokio::task::JoinHandle<()>>,
     removals: Option<retirement_worker::RetirementWorker>,
     removal_errors: mpsc::UnboundedReceiver<anyhow::Error>,
@@ -115,6 +117,7 @@ impl ControlPlane {
             .dns
             .bind_endpoint()
             .map_err(|error| anyhow::anyhow!("invalid dns.bind: {error}"))?;
+        let listener_configs = config.listeners.clone();
         drop(config);
         #[cfg(feature = "ebpf")]
         {
@@ -126,6 +129,8 @@ impl ControlPlane {
             .map(dns_listener::BoundDnsListener::bind)
             .transpose()
             .map_err(|error| anyhow::anyhow!("bind dns.bind listener: {error}"))?;
+        let bound_inbound_listeners = inbound::BoundInboundListener::bind_all(&listener_configs)
+            .map_err(|error| anyhow::anyhow!("bind inbound listener: {error}"))?;
         let tcp4_addr = SocketAddr::new("0.0.0.0".parse()?, tproxy_port);
         let tcp6_addr = SocketAddr::new("::".parse()?, tproxy_port);
         let udp4_addr = tcp4_addr;
@@ -209,6 +214,7 @@ impl ControlPlane {
             udp4: udp4_sockets,
             udp6: udp6_sockets,
             dns: bound_dns_listener,
+            inbound: bound_inbound_listeners,
             nfqueue_enabled: udp_nfqueue_enabled,
         })
     }
@@ -334,6 +340,7 @@ impl ControlPlane {
         let (stop, _) = watch::channel(false);
         let mut epoch = RuntimeEpoch {
             dns: None,
+            inbound: None,
             listeners,
             stop,
             ingress: JoinSet::new(),
@@ -356,6 +363,16 @@ impl ControlPlane {
                     self.drain_tracker.clone(),
                     self.native.clone(),
                     self.diagnostics.clone(),
+                )?);
+            }
+            if !epoch.listeners.inbound.is_empty() {
+                let bound = std::mem::take(&mut epoch.listeners.inbound);
+                epoch.inbound = Some(inbound::InboundListenerSet::spawn_all(
+                    bound,
+                    self.spawn_handle(),
+                    self.concurrency_limit.clone(),
+                    self.stats.clone(),
+                    self.drain_tracker.clone(),
                 )?);
             }
             #[cfg(all(feature = "native-api", feature = "ebpf", target_os = "linux"))]

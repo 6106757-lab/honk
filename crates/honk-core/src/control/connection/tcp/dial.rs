@@ -679,7 +679,7 @@ impl ControlPlaneHandle {
     /// handshakes, warm logical streams, and fresh dials all perform ≥1
     /// round trip through the node and report true.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn dial_pooled(
+    pub(in crate::control) async fn dial_pooled(
         registry: &ProxyRegistry,
         pool: &ConnectionPool,
         generation: &Arc<honk_outbound::runtime::OutboundRuntimeRegistry>,

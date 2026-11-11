@@ -4,6 +4,7 @@ mod bootstrap;
 mod cache;
 pub(crate) mod client;
 mod connection;
+mod inbound;
 pub mod dns_control;
 mod dns_listener;
 pub mod drain;

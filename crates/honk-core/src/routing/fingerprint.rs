@@ -74,6 +74,11 @@ fn encode_route(encoder: &mut Encoder<'_>, route: &CompiledRoute) {
     encoder.string(&route.rule_payload);
     encoder.u32(route.priority);
     encoder.list(&route.conditions, encode_condition);
+    // Inbound-only rules never reach the eBPF plan, but changing one must
+    // still invalidate the userspace routing fingerprint so reload republishes
+    // the rule set (and the UI trace sees the new expression).
+    encoder.list(&route.inbound, |encoder, name| encoder.string(name));
+    encoder.list(&route.inbound_not, |encoder, name| encoder.string(name));
     encode_action(encoder, &route.action);
 }
 
@@ -182,6 +187,8 @@ mod tests {
                 not: false,
                 predicate: condition,
             }],
+            inbound: Vec::new(),
+            inbound_not: Vec::new(),
             action: RouteAction {
                 outbound: "direct".into(),
                 must: false,

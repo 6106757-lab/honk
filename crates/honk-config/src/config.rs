@@ -20,6 +20,7 @@ use crate::ConfigDiagnostic;
 use crate::dns::DnsConfig;
 use crate::experimental::ExperimentalConfig;
 use crate::group::Group;
+use crate::listener::ListenerConfig;
 use crate::node::Node;
 use crate::routing::RoutingConfig;
 use crate::subscription::Subscription;
@@ -55,6 +56,11 @@ pub struct Config {
     pub experimental: ExperimentalConfig,
     #[serde(default)]
     pub assets: crate::assets::AssetsConfig,
+    /// Named mixed (HTTP + SOCKS5) inbound listeners. Empty by default, so
+    /// existing configurations keep a completely unchanged code path.
+    /// Outbound selection is done by `inbound(name)` routing rules.
+    #[serde(default)]
+    pub listeners: Vec<ListenerConfig>,
 }
 
 /// Global configuration matching dae `global { ... }` section.

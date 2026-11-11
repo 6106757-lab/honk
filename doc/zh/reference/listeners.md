@@ -1,0 +1,71 @@
+# 入站监听（listeners）
+
+`listeners {}` 提供普通的 TCP 入站端口，在同一个端口上同时接受 HTTP 代理与 SOCKS5。它和 eBPF 透明代理并行工作，用于「每个浏览器配置文件 / 每台设备用一个固定端口」这类场景。
+
+> 监听默认只绑定 `127.0.0.1`。要暴露到局域网必须显式写 `listen`，并且**配置了认证的监听不允许绑定通配地址**。
+
+## 基本写法
+
+```dae
+listeners {
+    shop1 {
+        type: mixed            # 目前只支持 mixed（HTTP + SOCKS5）
+        listen: 127.0.0.1      # 默认 127.0.0.1
+        port: 12000
+        auth: 'user:pass'      # 可选；SOCKS5 userpass / HTTP Basic
+    }
+    shop2 {
+        port: 12001
+    }
+}
+
+routing {
+    # 用入站名字决定出口，而不是在 listener 上写 proxy:
+    inbound(shop1) -> '🇵🇭 菲律宾-1'
+    inbound(shop2) && domain(geosite: cn) -> direct
+    inbound(shop2) -> Proxy
+    fallback: Proxy
+}
+```
+
+### 为什么出口不写在 listener 上
+
+`inbound(name)` 走的是 honk 原有的 `Router`，因此：
+
+- 规则可以和 `domain()` / `dip()` / `dport()` 等任意组合，也能用 `!inbound(...)` 反选；
+- 组选择、连接表、doona 连接页、规则证据链、reload 全部复用同一套设施；
+- DNS 解析带客户端来源上下文，`qname()` 规则与 `-> follow`（DNS 出口跟随内容出口）依然生效；
+- 不需要第二份节点配置，也不会出现「DNS 出口和内容出口地理不一致」。
+
+`inbound()` 是**用户态专用**匹配器：透明代理 / eBPF 流量没有入站身份，这类规则在内核路由计划里会被整体跳过，不会误命中。
+
+## 字段
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `type` | `mixed` | 目前只支持 `mixed` |
+| `listen` | `127.0.0.1` | IPv4 / IPv6 地址 |
+| `port` | 必填 | 1–65535 |
+| `auth` | 无 | `user:password`，SOCKS5 用 userpass 子协商，HTTP 用 `Proxy-Authorization: Basic` |
+| `handshake_timeout_ms` | `10000` | 整个协议握手的**总**截止时间 |
+| `request_timeout_ms` | `30000` | 每个 HTTP 请求头的总截止时间 |
+| `max_header_bytes` | `16384` | 请求头缓冲上限 |
+
+同名监听、`(listen, port)` 冲突（含 `0.0.0.0` 与 `127.0.0.1` 同端口）、端口为 0、认证监听绑定通配地址，都会在**绑定之前**被拒绝，不会出现半启动状态。
+
+## 协议行为
+
+- **首字节分派**：读到第一个字节判断 SOCKS5 还是 HTTP，该字节不会被消耗，目标解析器仍能看到完整请求。
+- **HTTP keep-alive**：每个请求都重新解析 `Host`、重新走路由、重新拨号上游。换域名的第二个请求不会被发到第一个请求的上游。上游被强制 `Connection: close`，客户端连接保持可复用。
+- **CONNECT**：回复 `200` 后，把预读缓冲里剩余的字节（可能是同包携带的 TLS ClientHello）先冲给上游，再进入双向转发。
+- **hop-by-hop 头**：`Proxy-Connection`、`Proxy-Authorization`、`Connection` 及其列出的头、`Keep-Alive`、`TE`、`Trailer`、`Upgrade` 会被剥离。
+- **超时**：握手与请求头各用一个总截止时间，慢速逐字节 drip 无法续命；读完请求头即解除，长连接不受影响。
+- **错误**：所有错误响应都带 `Connection: close`；SOCKS5 的拒绝会回对应的 REP 码（规则禁止 `0x02`、拨号失败 `0x05`）。
+- **SOCKS5**：支持 `CONNECT` 与 IPv4 / IPv6 / 域名地址；`UDP ASSOCIATE` 和 `BIND` 不支持。
+
+## 已知限制
+
+1. 入站连接没有以太网 L2 头，因此 `mac()` / `pname()` 规则不命中；`sport()` 使用的是客户端连接的真实端口。
+2. 组选择器沿用 `ProbeDomain::Tcp`（honk 的组选择接口不接受具体目标域名），但目标域名仍会作为 `target_domain` 传给节点，域名信息不丢。
+3. 重载配置时会随 epoch 重建重新绑定监听；`InboundListenerSet::patch` 已实现按名字增量替换，尚未挂到 reload 事件路径。
+4. 入站连接不生成 flow 证据记录，因此 doona 里「重新评估」按钮不可用；规则列由连接表在注册时快照的 `rule` / `rule_payload` 提供，证据表被清空或 TTL 淘汰也不会变成「—」。

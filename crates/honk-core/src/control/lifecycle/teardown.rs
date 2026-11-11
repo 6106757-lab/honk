@@ -31,6 +31,9 @@ impl ControlPlane {
             if let Some(listener) = epoch.dns.as_ref() {
                 listener.stop_accepting();
             }
+            if let Some(set) = epoch.inbound.as_ref() {
+                set.stop_accepting();
+            }
             while let Some(result) = epoch.ingress.join_next().await {
                 retain_error(&mut error, result.map_err(anyhow::Error::from));
             }
@@ -77,6 +80,10 @@ impl ControlPlane {
                 retain_error(&mut error, cleanup_stage(listener.abort_and_join()).await);
             }
             epoch.dns.take();
+            if let Some(set) = epoch.inbound.as_mut() {
+                retain_error(&mut error, cleanup_stage(set.abort_and_join()).await);
+            }
+            epoch.inbound.take();
         }
         let registry = self.runtime_registry.read().clone();
         registry.begin_retirement();
@@ -297,6 +304,7 @@ mod tests {
                     udp4: Vec::new(),
                     udp6: Vec::new(),
                     dns: None,
+                    inbound: Vec::new(),
                     nfqueue_enabled: false,
                 },
                 stop: watch::channel(false).0,
@@ -304,6 +312,7 @@ mod tests {
                 tcp: JoinSet::new(),
                 maintenance: OwnedTasks::default(),
                 dns: None,
+                inbound: None,
                 janitor: None,
                 removals: None,
                 removal_errors: mpsc::unbounded_channel().1,

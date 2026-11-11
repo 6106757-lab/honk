@@ -62,6 +62,13 @@ pub struct CompiledRoute {
     pub rule_payload: String,
     pub priority: u32,
     pub conditions: Vec<CompiledCondition>,
+    /// `inbound(name)` conditions. These live outside `conditions` on purpose:
+    /// the eBPF matcher cannot express an inbound identity, and lowering a
+    /// partially-stripped rule (e.g. `inbound(x) && domain(y)`) would make it
+    /// match transparent traffic in the kernel. Userspace-only rules are
+    /// evaluated by `route_action_inbound` and skipped by the kernel lowering.
+    pub inbound: Vec<String>,
+    pub inbound_not: Vec<String>,
     pub action: RouteAction,
     /// The configured conditions as dae text, bounded; rendered once here so
     /// every API projection shows the same spelling without touching matchers.
@@ -77,6 +84,11 @@ impl CompiledRoute {
         self.conditions
             .iter()
             .any(|condition| matches!(condition.predicate, CompiledPredicate::Domain(_)))
+    }
+
+    /// Userspace-only rules must be excluded from the eBPF routing plan.
+    pub fn has_inbound_conditions(&self) -> bool {
+        !self.inbound.is_empty() || !self.inbound_not.is_empty()
     }
 }
 
@@ -271,6 +283,8 @@ impl Router {
                 rule_payload,
                 priority: rule.priority,
                 conditions,
+                inbound: rule.condition.inbound.clone(),
+                inbound_not: rule.condition.not.inbound.clone(),
                 action: RouteAction {
                     outbound,
                     must: rule.must,
@@ -471,6 +485,32 @@ impl Router {
         }
     }
 
+    /// Route a connection that arrived on a named inbound listener.
+    ///
+    /// `inbound` is passed separately from `ConnectionInfo` deliberately:
+    /// 33 construction sites build `ConnectionInfo` for transparent/eBPF
+    /// flows, and none of them has an inbound identity. Keeping it out of the
+    /// struct means zero changes to the existing datapath, while the router
+    /// still sees the listener name for `inbound(name)` rules.
+    pub fn route_action_inbound<'a>(
+        &'a self,
+        conn: &ConnectionInfo,
+        inbound: &str,
+    ) -> (&'a RouteAction, Option<RouteMatch<'a>>) {
+        match self.route_full_inbound(conn, inbound) {
+            Some(hit) => (hit.action, Some(hit)),
+            None => (self.fallback(), None),
+        }
+    }
+
+    pub fn route_full_inbound<'a>(
+        &'a self,
+        conn: &ConnectionInfo,
+        inbound: &str,
+    ) -> Option<RouteMatch<'a>> {
+        self.route_full_with_observer(conn, None, Some(inbound), |_, _, _| {})
+    }
+
     pub fn route_full<'a>(&'a self, conn: &ConnectionInfo) -> Option<RouteMatch<'a>> {
         self.route_full_with_domain_bitmap(conn, None)
     }
@@ -480,20 +520,27 @@ impl Router {
         conn: &ConnectionInfo,
         domain_bitmap: Option<&DomainRouting>,
     ) -> Option<RouteMatch<'a>> {
-        self.route_full_with_observer(conn, domain_bitmap, |_, _, _| {})
+        self.route_full_with_observer(conn, domain_bitmap, None, |_, _, _| {})
     }
 
     #[inline]
-    fn route_full_with_observer<'a>(
+    pub(crate) fn route_full_with_observer<'a>(
         &'a self,
         conn: &ConnectionInfo,
         domain_bitmap: Option<&DomainRouting>,
+        inbound: Option<&str>,
         mut observe: impl FnMut(usize, Option<usize>, bool),
     ) -> Option<RouteMatch<'a>> {
         self.routes.iter().enumerate().find_map(|(index, route)| {
-            let matched = self.matches_route(route, conn, domain_bitmap, |condition, matched| {
-                observe(index, Some(condition), matched);
-            });
+            let matched = self.matches_route(
+                route,
+                conn,
+                domain_bitmap,
+                inbound,
+                |condition, matched| {
+                    observe(index, Some(condition), matched);
+                },
+            );
             observe(index, None, matched);
             if !matched {
                 return None;
@@ -521,8 +568,28 @@ impl Router {
         route: &CompiledRoute,
         conn: &ConnectionInfo,
         domain_bitmap: Option<&DomainRouting>,
+        inbound: Option<&str>,
         mut observe: impl FnMut(usize, bool),
     ) -> bool {
+        // An inbound() rule is only meaningful for userspace listener flows.
+        // With no identity, a positive inbound condition is a miss and a
+        // negated one is a hit (so `!inbound(x)` does not accidentally match
+        // every transparent connection).
+        let inbound_matched = route.inbound.is_empty()
+            || inbound.is_some_and(|name| route.inbound.iter().any(|value| value == name));
+        let inbound_not_matched = route.inbound_not.is_empty()
+            || inbound.map_or(true, |name| {
+                !route.inbound_not.iter().any(|value| value == name)
+            });
+        if !inbound_matched || !inbound_not_matched {
+            return false;
+        }
+        let has_conditions = !route.conditions.is_empty()
+            || !route.inbound.is_empty()
+            || !route.inbound_not.is_empty();
+        if !has_conditions {
+            return false;
+        }
         let input = PredicateInput {
             domain: conn.domain.as_deref(),
             dst_ip: Some(conn.dst_ip),
@@ -534,12 +601,13 @@ impl Router {
             mac: conn.mac.as_deref(),
             dscp: conn.dscp,
         };
-        !route.conditions.is_empty()
-            && route
-                .conditions
-                .iter()
-                .enumerate()
-                .all(|(index, condition)| {
+        // `all()` on an empty list is true: an `inbound()`-only rule matches
+        // as soon as its inbound condition is satisfied above.
+        route
+            .conditions
+            .iter()
+            .enumerate()
+            .all(|(index, condition)| {
                     // Production absence is a miss before negation; simulations retain unknown.
                     let matched = self
                         .evaluate_predicate::<false>(

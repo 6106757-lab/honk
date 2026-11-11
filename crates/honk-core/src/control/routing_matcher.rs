@@ -302,6 +302,13 @@ impl RoutingPushPlan {
         let has_domain = domain_predicate_count != 0;
 
         for route in router.compiled_routes() {
+            // `inbound(name)` is a userspace listener identity with no kernel
+            // representation. Lowering a rule that contains it would strip the
+            // condition and let the remaining ones match transparent traffic.
+            // These rules are evaluated only by Router::route_action_inbound.
+            if route.has_inbound_conditions() {
+                continue;
+            }
             let mut conditions = Vec::with_capacity(route.conditions.len());
             for condition in &route.conditions {
                 let predicate = match &condition.predicate {

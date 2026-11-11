@@ -1,0 +1,270 @@
+//! Mixed-port dispatcher and connection lifecycle.
+//!
+//! One byte decides the protocol (mihomo `Peek(1)`), but the byte is left in
+//! [`ReadBuffer`] so the chosen parser still sees a complete request.
+//!
+//! HTTP uses a per-request loop: every iteration re-parses the head, re-dials
+//! through the router, and re-registers the connection. A keep-alive client
+//! that switches `Host` therefore gets a fresh upstream instead of having its
+//! second request silently delivered to the first request's server.
+//! CONNECT is a tunnel: it returns after the relay ends.
+
+use super::super::connection::ControlPlaneHandle;
+use super::dial::{InboundDialError, InboundDial};
+use super::http::{self, CONNECT_ESTABLISHED};
+use super::param::{self, ClientParam, InboundTarget, ProtoError, ReadBuffer};
+use super::socks;
+use crate::connection_tracker::ConnectionEntry;
+use honk_config::ListenerConfig;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tokio::time::Instant;
+
+struct Tracked {
+    id: String,
+    upload: Arc<AtomicU64>,
+    download: Arc<AtomicU64>,
+}
+
+impl Tracked {
+    fn register(handle: &ControlPlaneHandle, param: &ClientParam, dial: &InboundDial) -> Self {
+        let upload = Arc::new(AtomicU64::new(0));
+        let download = Arc::new(AtomicU64::new(0));
+        let entry = ConnectionEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            source: param.client_addr.to_string(),
+            destination: dial.target.to_string(),
+            proxy: dial.outbound.clone(),
+            #[cfg(feature = "native-api")]
+            routed_outbound: Some(dial.outbound.clone()),
+            // Inbound connections do not create a flow-evidence record. The
+            // connections API falls back to the tracker fields captured here,
+            // so the rule column survives evidence-table resets / TTL anyway.
+            #[cfg(feature = "native-api")]
+            native_flow_id: None,
+            rule: dial.rule.clone(),
+            rule_payload: dial.rule_payload.clone(),
+            chains: dial.chains.clone(),
+            upload: Arc::clone(&upload),
+            download: Arc::clone(&download),
+            start_time: std::time::Instant::now(),
+            domain: dial.domain.clone(),
+            network: "tcp".to_owned(),
+            process: None,
+            process_path: None,
+        };
+        let id = handle.connection_tracker.register(entry);
+        Self {
+            id,
+            upload,
+            download,
+        }
+    }
+
+    fn finish(self, handle: &ControlPlaneHandle) {
+        handle.connection_tracker.remove(&self.id);
+    }
+
+    fn progress(&self) -> crate::relay::RelayProgress {
+        crate::relay::RelayProgress {
+            upload: Arc::clone(&self.upload),
+            download: Arc::clone(&self.download),
+            outbound_upload: None,
+            outbound_download: None,
+            first_response: None,
+            on_transfer: None,
+        }
+    }
+}
+
+pub(super) async fn serve_mixed_connection(
+    stream: TcpStream,
+    client_addr: SocketAddr,
+    config: &ListenerConfig,
+    handle: &ControlPlaneHandle,
+) -> anyhow::Result<()> {
+    let mut param = ClientParam {
+        listener: config.name.clone(),
+        user: None,
+        client_addr,
+        target: InboundTarget::Ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+        target_port: 0,
+    };
+    let mut rb = ReadBuffer::new(stream, config.max_header_bytes);
+    let handshake_deadline =
+        Instant::now() + std::time::Duration::from_millis(config.handshake_timeout_ms);
+
+    let first = match rb.peek_u8(handshake_deadline).await {
+        Ok(byte) => byte,
+        Err(ProtoError::Closed) => return Ok(()),
+        Err(error) => {
+            tracing::debug!(%error, %client_addr, "inbound first byte failed");
+            return Ok(());
+        }
+    };
+
+    if first == 0x05 {
+        return serve_socks(&mut rb, &mut param, config, handle, handshake_deadline).await;
+    }
+    serve_http(&mut rb, &mut param, config, handle, handshake_deadline).await
+}
+
+async fn serve_socks(
+    rb: &mut ReadBuffer<TcpStream>,
+    param: &mut ClientParam,
+    config: &ListenerConfig,
+    handle: &ControlPlaneHandle,
+    deadline: Instant,
+) -> anyhow::Result<()> {
+    let (target, port, user) = match socks::negotiate(rb, config.auth.as_ref(), deadline).await {
+        Ok(value) => value,
+        Err(ProtoError::Closed) => return Ok(()),
+        Err(error) => {
+            tracing::debug!(%error, "SOCKS5 negotiation failed");
+            let code = match error {
+                ProtoError::Auth | ProtoError::Unsupported(_) => 0x02,
+                _ => 0x01,
+            };
+            let _ = socks::write_reply(rb, code).await;
+            return Ok(());
+        }
+    };
+    socks::fill_param(param, target, port, user);
+
+    let dial = match handle.dial_for_inbound(param).await {
+        Ok(dial) => dial,
+        Err(InboundDialError::Blocked(name)) => {
+            tracing::debug!(%name, "SOCKS5 connection blocked by routing");
+            let _ = socks::write_reply(rb, 0x02).await;
+            return Ok(());
+        }
+        Err(InboundDialError::Failed(error)) => {
+            tracing::debug!(%error, "SOCKS5 dial failed");
+            let _ = socks::write_reply(rb, 0x05).await;
+            return Ok(());
+        }
+    };
+    socks::write_reply(rb, 0x00).await?;
+
+    let pending = rb.drain_buffered();
+    let tracked = Tracked::register(handle, param, &dial);
+    let mut stream = dial.stream;
+    if !pending.is_empty() {
+        stream.stream.write_all(&pending).await?;
+    }
+    let result = crate::relay::relay_proxy(
+        rb.stream_mut(),
+        stream,
+        param.client_addr,
+        dial.target,
+        tracked.progress(),
+    )
+    .await;
+    tracked.finish(handle);
+    result?;
+    Ok(())
+}
+
+async fn serve_http(
+    rb: &mut ReadBuffer<TcpStream>,
+    param: &mut ClientParam,
+    config: &ListenerConfig,
+    handle: &ControlPlaneHandle,
+    handshake_deadline: Instant,
+) -> anyhow::Result<()> {
+    let mut first = true;
+    loop {
+        // One total deadline per request head. A slow drip cannot renew it.
+        let deadline = if first {
+            first = false;
+            handshake_deadline
+        } else {
+            Instant::now() + std::time::Duration::from_millis(config.request_timeout_ms)
+        };
+        let head = match rb.read_head(deadline).await {
+            Ok(head) => head,
+            Err(ProtoError::Closed) => return Ok(()),
+            Err(error) => {
+                tracing::debug!(%error, "HTTP request head failed");
+                let status = match error {
+                    ProtoError::TooLarge => 431,
+                    ProtoError::Timeout => 408,
+                    _ => 400,
+                };
+                param::http_error(rb, status, "Bad Request").await;
+                return Ok(());
+            }
+        };
+        let request = match http::parse_http_head(&head, config.auth.as_ref()) {
+            Ok(request) => request,
+            Err(error) => {
+                let (status, reason) = match error {
+                    ProtoError::Auth => (407, "Proxy Authentication Required"),
+                    ProtoError::Unsupported(_) => (405, "Method Not Allowed"),
+                    _ => (400, "Bad Request"),
+                };
+                tracing::debug!(%error, "HTTP request rejected");
+                param::http_error(rb, status, reason).await;
+                return Ok(());
+            }
+        };
+        param.target = request.target.clone();
+        param.target_port = request.port;
+        param.user = request.user.clone();
+
+        let dial = match handle.dial_for_inbound(param).await {
+            Ok(dial) => dial,
+            Err(InboundDialError::Blocked(name)) => {
+                tracing::debug!(%name, "HTTP connection blocked by routing");
+                param::http_error(rb, 403, "Forbidden").await;
+                return Ok(());
+            }
+            Err(InboundDialError::Failed(error)) => {
+                tracing::debug!(%error, "HTTP dial failed");
+                param::http_error(rb, 502, "Bad Gateway").await;
+                return Ok(());
+            }
+        };
+
+        let tracked = Tracked::register(handle, param, &dial);
+        let mut stream = dial.stream;
+        if request.connect {
+            rb.write_all(CONNECT_ESTABLISHED).await?;
+            let pending = rb.drain_buffered();
+            if !pending.is_empty() {
+                stream.stream.write_all(&pending).await?;
+            }
+            let result = crate::relay::relay_proxy(
+                rb.stream_mut(),
+                stream,
+                param.client_addr,
+                dial.target,
+                tracked.progress(),
+            )
+            .await;
+            tracked.finish(handle);
+            result?;
+            // A CONNECT tunnel owns the rest of the client connection.
+            return Ok(());
+        }
+
+        let result = http::forward_plain(
+            rb,
+            &request,
+            &mut *stream.stream,
+            &tracked.upload,
+            &tracked.download,
+        )
+        .await;
+        tracked.finish(handle);
+        if let Err(error) = result {
+            tracing::debug!(%error, "HTTP request forwarding ended");
+            return Ok(());
+        }
+        // Upstream closed (we forced `Connection: close`). Loop for the next
+        // keep-alive request with a fresh dial and a fresh rule decision.
+    }
+}

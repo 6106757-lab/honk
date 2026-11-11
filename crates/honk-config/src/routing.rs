@@ -59,6 +59,11 @@ pub struct RoutingCondition {
     pub ip_version: Vec<String>,
     #[serde(default)]
     pub dscp: Vec<String>,
+    /// `inbound(name)`: identity of the named listener a connection arrived
+    /// on. Userspace-only: transparent/eBPF flows never carry an inbound
+    /// identity, so such a rule can only match the userspace inbound path.
+    #[serde(default)]
+    pub inbound: Vec<String>,
     /// Negated matchers (dae `!matcher(...)`): a rule matches iff every
     /// positive matcher matches and none of these do.
     #[serde(default)]
@@ -100,6 +105,8 @@ pub struct RoutingNotCondition {
     pub ip_version: Vec<String>,
     #[serde(default)]
     pub dscp: Vec<String>,
+    #[serde(default)]
+    pub inbound: Vec<String>,
 }
 
 /// Mutable view over one matcher field set. The dae parser dispatches each
@@ -120,6 +127,7 @@ pub(crate) struct ConditionFields<'a> {
     pub geosite: &'a mut Vec<String>,
     pub ip_version: &'a mut Vec<String>,
     pub dscp: &'a mut Vec<String>,
+    pub inbound: &'a mut Vec<String>,
 }
 
 macro_rules! fields_mut {
@@ -140,6 +148,7 @@ macro_rules! fields_mut {
             geosite: &mut $self.geosite,
             ip_version: &mut $self.ip_version,
             dscp: &mut $self.dscp,
+            inbound: &mut $self.inbound,
         }
     };
 }
@@ -159,6 +168,7 @@ impl RoutingNotCondition {
 impl RoutingCondition {
     fn matchers(&self) -> impl Iterator<Item = (&'static str, &[String])> {
         [
+            ("inbound", self.inbound.as_slice()),
             ("domain", self.domain.as_slice()),
             ("suffix", self.domain_suffix.as_slice()),
             ("keyword", self.domain_keyword.as_slice()),
@@ -209,6 +219,7 @@ impl RoutingNotCondition {
             self.geosite.as_slice(),
             self.ip_version.as_slice(),
             self.dscp.as_slice(),
+            self.inbound.as_slice(),
         ]
         .into_iter()
         .all(|values| values.is_empty())

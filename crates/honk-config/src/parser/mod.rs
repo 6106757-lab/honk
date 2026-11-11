@@ -8,6 +8,7 @@ mod entries;
 mod experimental;
 mod groups;
 pub mod lexer;
+mod listeners;
 mod routing;
 
 mod read;
@@ -17,6 +18,7 @@ mod sources;
 use entries::{parse_node_section, parse_subscription_section};
 use experimental::parse_experimental_section;
 use groups::{parse_group_section, resolve_group_filters_inner};
+use listeners::parse_listeners_section;
 use scalars::parse_global_section;
 pub use sources::{
     LoadedConfig, SourceLimits, SourceSnapshot, check_dae_source, load_dae_sources,
@@ -678,6 +680,9 @@ fn parse_documents(
             Some(Root::Routing) => config.routing = routing::parse_section(segments, diagnostics)?,
             Some(Root::Node) => config.nodes = parse_node_section(segments, diagnostics)?,
             Some(Root::Group) => {}
+            Some(Root::Listeners) => {
+                config.listeners = parse_listeners_section(segments, diagnostics)?
+            }
             Some(Root::Subscription) => {
                 config.subscriptions =
                     parse_subscription_section(segments, &assets.config, diagnostics)?

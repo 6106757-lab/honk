@@ -181,6 +181,25 @@ impl DnsController {
         Ok(resolved.ipv4.into_iter().chain(resolved.ipv6).collect())
     }
 
+    /// Resolve a domain with the originating client address attached.
+    ///
+    /// Unlike [`Self::resolve_domain`] (node hosts / health probes), this
+    /// feeds `DnsRequestMeta` into the forwarder so `qname()` rules, source
+    /// based policies and the `follow` upstream decision see the real client.
+    /// Used by the inbound listener path, whose connections are not eBPF
+    /// hijacked and therefore have no kernel-provided DNS context.
+    pub(crate) async fn resolve_domain_for_source(
+        &self,
+        domain: &str,
+        source: std::net::SocketAddr,
+    ) -> anyhow::Result<Vec<std::net::IpAddr>> {
+        let resolved = self
+            .dns_service
+            .resolve_name_for_source(domain, source)
+            .await?;
+        Ok(resolved.ipv4.into_iter().chain(resolved.ipv6).collect())
+    }
+
     pub(crate) fn runtime_provider(&self) -> Arc<crate::dns::runtime::DnsServiceProvider> {
         self.dns_service
             .provider()
