@@ -15,6 +15,21 @@ const METHOD_USERPASS: u8 = 0x02;
 const METHOD_NONE: u8 = 0xff;
 
 const CMD_CONNECT: u8 = 0x01;
+const CMD_UDP_ASSOCIATE: u8 = 0x03;
+
+/// What the SOCKS5 client asked for after method negotiation.
+pub(super) enum SocksRequest {
+    Connect {
+        target: InboundTarget,
+        port: u16,
+        user: Option<String>,
+    },
+    /// RFC 1928 UDP ASSOCIATE: the TCP connection becomes the control channel
+    /// and stays open while datagrams flow through the UDP relay socket. The
+    /// request address is only a client hint (usually `0.0.0.0:0`), so it is
+    /// parsed and discarded; sessions are keyed by the observed peer IP.
+    UdpAssociate { user: Option<String> },
+}
 
 /// Fill in the target/user part of [`ClientParam`]. Returns the negotiated
 /// identity so the caller can keep the param construction in one place.
@@ -22,7 +37,7 @@ pub(super) async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
     rb: &mut ReadBuffer<S>,
     auth: Option<&ListenerAuth>,
     deadline: Instant,
-) -> Result<(InboundTarget, u16, Option<String>), ProtoError> {
+) -> Result<SocksRequest, ProtoError> {
     let version = rb.read_exact_buffered(1, deadline).await?[0];
     if version != 0x05 {
         return Err(ProtoError::Unsupported("only SOCKS5 is supported"));
@@ -70,10 +85,31 @@ pub(super) async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
     if version != 0x05 {
         return Err(ProtoError::Malformed("bad SOCKS5 request version"));
     }
-    if command != CMD_CONNECT {
-        // UDP ASSOCIATE and BIND have no userspace endpoint pool here.
-        return Err(ProtoError::Unsupported("only CONNECT is supported"));
+    let (target, port) = read_address(rb, deadline, address_type).await?;
+    match command {
+        CMD_CONNECT => {
+            if port == 0 {
+                return Err(ProtoError::Malformed("SOCKS5 destination port is zero"));
+            }
+            Ok(SocksRequest::Connect { target, port, user })
+        }
+        CMD_UDP_ASSOCIATE => {
+            // `target`/`port` were consumed above solely to advance the
+            // request cursor. They are a hint, not an admission constraint.
+            let _ = (target, port);
+            Ok(SocksRequest::UdpAssociate { user })
+        }
+        _ => Err(ProtoError::Unsupported("BIND is not supported")),
     }
+}
+
+/// SOCKS5 address + port, shared by CONNECT and UDP ASSOCIATE requests and
+/// reused (in byte form) by the UDP datagram codec in `udp.rs`.
+async fn read_address<S: AsyncRead + AsyncWrite + Unpin>(
+    rb: &mut ReadBuffer<S>,
+    deadline: Instant,
+    address_type: u8,
+) -> Result<(InboundTarget, u16), ProtoError> {
     let target = match address_type {
         0x01 => {
             let bytes = rb.read_exact_buffered(4, deadline).await?;
@@ -104,10 +140,7 @@ pub(super) async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
     };
     let port_bytes = rb.read_exact_buffered(2, deadline).await?;
     let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
-    if port == 0 {
-        return Err(ProtoError::Malformed("SOCKS5 destination port is zero"));
-    }
-    Ok((target, port, user))
+    Ok((target, port))
 }
 
 /// SOCKS5 reply. `0x00` = succeeded, `0x02` = blocked by ruleset,
@@ -118,6 +151,19 @@ pub(super) async fn write_reply<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> Result<(), ProtoError> {
     rb.write_all(&[0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await
+}
+
+/// Reply carrying the bound relay address. UDP ASSOCIATE clients must learn
+/// where to send their datagrams; `0.0.0.0:0` would be unusable.
+pub(super) async fn write_reply_addr<S: AsyncRead + AsyncWrite + Unpin>(
+    rb: &mut ReadBuffer<S>,
+    code: u8,
+    addr: std::net::SocketAddr,
+) -> Result<(), ProtoError> {
+    let mut reply = vec![0x05, code, 0x00];
+    super::udp::encode_address(&mut reply, addr.ip());
+    reply.extend_from_slice(&addr.port().to_be_bytes());
+    rb.write_all(&reply).await
 }
 
 pub(super) fn fill_param(
@@ -151,7 +197,10 @@ mod tests {
             ])
             .await
             .unwrap();
-        let (target, port, user) = negotiate(&mut rb, None, deadline()).await.unwrap();
+        let request = negotiate(&mut rb, None, deadline()).await.unwrap();
+        let SocksRequest::Connect { target, port, user } = request else {
+            panic!("expected CONNECT");
+        };
         assert_eq!(target, InboundTarget::Domain("example.com".to_owned()));
         assert_eq!(port, 443);
         assert!(user.is_none());
@@ -179,7 +228,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_associate_is_rejected() {
+    async fn udp_associate_is_accepted() {
         let (mut client, server) = tokio::io::duplex(4096);
         let mut rb = ReadBuffer::new(server, 16 * 1024);
         client
@@ -188,8 +237,35 @@ mod tests {
             .unwrap();
         assert!(matches!(
             negotiate(&mut rb, None, deadline()).await,
+            Ok(SocksRequest::UdpAssociate { user: None })
+        ));
+    }
+
+    #[tokio::test]
+    async fn bind_is_still_rejected() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let mut rb = ReadBuffer::new(server, 16 * 1024);
+        client
+            .write_all(&[0x05, 0x01, 0x00, 0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        assert!(matches!(
+            negotiate(&mut rb, None, deadline()).await,
             Err(ProtoError::Unsupported(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn udp_associate_reply_carries_relay_address() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let mut rb = ReadBuffer::new(server, 16 * 1024);
+        let addr: std::net::SocketAddr = "192.0.2.7:12001".parse().unwrap();
+        write_reply_addr(&mut rb, 0x00, addr).await.unwrap();
+        let mut reply = [0u8; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply[..4], &[0x05, 0x00, 0x00, 0x01]);
+        assert_eq!(&reply[4..8], &[192, 0, 2, 7]);
+        assert_eq!(&reply[8..10], &12001u16.to_be_bytes());
     }
 
     #[tokio::test]

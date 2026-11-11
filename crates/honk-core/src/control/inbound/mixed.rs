@@ -13,7 +13,8 @@ use super::super::connection::ControlPlaneHandle;
 use super::dial::{InboundDialError, InboundDial};
 use super::http::{self, CONNECT_ESTABLISHED};
 use super::param::{self, ClientParam, InboundTarget, ProtoError, ReadBuffer};
-use super::socks;
+use super::socks::{self, SocksRequest};
+use super::udp::{self, UdpRelay};
 use crate::connection_tracker::ConnectionEntry;
 use honk_config::ListenerConfig;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -85,6 +86,7 @@ pub(super) async fn serve_mixed_connection(
     client_addr: SocketAddr,
     config: &ListenerConfig,
     handle: &ControlPlaneHandle,
+    relay: Option<&Arc<UdpRelay>>,
 ) -> anyhow::Result<()> {
     let mut param = ClientParam {
         listener: config.name.clone(),
@@ -107,19 +109,29 @@ pub(super) async fn serve_mixed_connection(
     };
 
     if first == 0x05 {
-        return serve_socks(&mut rb, &mut param, config, handle, handshake_deadline).await;
+        return serve_socks(
+            &mut rb,
+            &mut param,
+            config,
+            handle,
+            relay,
+            handshake_deadline,
+        )
+        .await;
     }
     serve_http(&mut rb, &mut param, config, handle, handshake_deadline).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_socks(
     rb: &mut ReadBuffer<TcpStream>,
     param: &mut ClientParam,
     config: &ListenerConfig,
     handle: &ControlPlaneHandle,
+    relay: Option<&Arc<UdpRelay>>,
     deadline: Instant,
 ) -> anyhow::Result<()> {
-    let (target, port, user) = match socks::negotiate(rb, config.auth.as_ref(), deadline).await {
+    let request = match socks::negotiate(rb, config.auth.as_ref(), deadline).await {
         Ok(value) => value,
         Err(ProtoError::Closed) => return Ok(()),
         Err(error) => {
@@ -130,6 +142,30 @@ async fn serve_socks(
             };
             let _ = socks::write_reply(rb, code).await;
             return Ok(());
+        }
+    };
+    let (target, port, user) = match request {
+        SocksRequest::Connect { target, port, user } => (target, port, user),
+        SocksRequest::UdpAssociate { user, .. } => {
+            param.user = user;
+            let Some(relay) = relay else {
+                tracing::debug!("listener has no UDP relay; rejecting UDP ASSOCIATE");
+                let _ = socks::write_reply(rb, 0x07).await; // command not supported
+                return Ok(());
+            };
+            if let Err(error) = socks::write_reply_addr(rb, 0x00, relay.local_addr()).await {
+                tracing::debug!(%error, "SOCKS5 UDP ASSOCIATE 回复失败");
+                return Ok(());
+            }
+            return udp::serve_udp_associate(
+                rb.stream_mut(),
+                param.client_addr,
+                config,
+                handle,
+                relay,
+                deadline,
+            )
+            .await;
         }
     };
     socks::fill_param(param, target, port, user);

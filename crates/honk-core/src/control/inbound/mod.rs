@@ -16,8 +16,11 @@ mod http;
 mod mixed;
 mod param;
 mod socks;
+mod udp;
 #[cfg(test)]
 mod tests;
+
+use udp::UdpRelay;
 
 use super::connection::ControlPlaneHandle;
 use crate::stats::StatsManager;
@@ -52,6 +55,9 @@ fn standalone_tcp_capacity(total: usize) -> usize {
 pub(super) struct BoundInboundListener {
     config: ListenerConfig,
     listener: std::net::TcpListener,
+    /// UDP half on the same address as the TCP half. Optional so an occupied
+    /// UDP port degrades to TCP-only rather than breaking the listener.
+    udp: Option<std::net::UdpSocket>,
 }
 
 impl BoundInboundListener {
@@ -66,9 +72,23 @@ impl BoundInboundListener {
 
     fn bind(config: &ListenerConfig) -> io::Result<Self> {
         let listener = bind_tcp_listener(config.bind_addr())?;
+        let udp = match udp::bind_udp(config.bind_addr()) {
+            Ok(socket) => Some(socket),
+            Err(error) => {
+                // TCP/UDP port spaces are independent, but a UDP conflict is
+                // still possible (another process, or SO_REUSEADDR rules).
+                warn!(
+                    %error,
+                    listener = %config.name,
+                    "入站 UDP relay 绑定失败，该监听退化为仅 TCP"
+                );
+                None
+            }
+        };
         Ok(Self {
             config: config.clone(),
             listener,
+            udp,
         })
     }
 
@@ -84,11 +104,31 @@ impl BoundInboundListener {
         stats: Arc<StatsManager>,
         drain: Arc<super::drain::DrainTracker>,
     ) -> io::Result<InboundListener> {
-        let Self { config, listener } = self;
+        let Self {
+            config,
+            listener,
+            udp,
+        } = self;
         let local_addr = listener.local_addr()?;
         let listener = TcpListener::from_std(listener)?;
         let (phase, phase_rx) = watch::channel(ListenerPhase::Running);
+        let relay = udp
+            .and_then(|socket| match UdpRelay::new(socket) {
+                Ok(relay) => Some(relay),
+                Err(error) => {
+                    warn!(%error, listener = %config.name, "入站 UDP relay 初始化失败");
+                    None
+                }
+            });
         let mut supervisors = JoinSet::new();
+        if let Some(relay) = relay.as_ref() {
+            let dispatcher_relay = Arc::clone(relay);
+            let dispatcher_phase = phase.subscribe();
+            supervisors.spawn(async move {
+                dispatcher_relay.run_dispatcher(dispatcher_phase).await;
+                Ok(())
+            });
+        }
         supervisors.spawn(run_accept_supervisor(
             config.clone(),
             listener,
@@ -98,11 +138,13 @@ impl BoundInboundListener {
             stats,
             drain,
             phase_rx,
+            relay.clone(),
         ));
         info!(
             listener = %config.name,
             %local_addr,
             auth = config.auth.is_some(),
+            udp = relay.is_some(),
             "入站混合监听已启动（出口由 inbound() 规则决定）"
         );
         Ok(InboundListener {
@@ -269,6 +311,7 @@ async fn run_accept_supervisor(
     stats: Arc<StatsManager>,
     drain: Arc<super::drain::DrainTracker>,
     mut phase: watch::Receiver<ListenerPhase>,
+    relay: Option<Arc<UdpRelay>>,
 ) -> anyhow::Result<()> {
     let mut children = JoinSet::new();
     let mut failure = None;
@@ -328,6 +371,7 @@ async fn run_accept_supervisor(
                 let guard = super::connection::ConnectionGuard::new(Arc::clone(&drain));
                 let child_handle = handle.clone();
                 let child_config = config.clone();
+                let child_relay = relay.clone();
                 children.spawn(async move {
                     let _permit = permit;
                     let _standalone_permit = standalone_permit;
@@ -337,6 +381,7 @@ async fn run_accept_supervisor(
                         client_addr,
                         &child_config,
                         &child_handle,
+                        child_relay.as_ref(),
                     )
                     .await
                     {

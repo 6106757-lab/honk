@@ -20,7 +20,7 @@ use tokio::time::Instant;
 
 /// Target as supplied by the client. A domain is kept as a domain: resolving
 /// it is a routing decision (qname rules / follow), not a protocol detail.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum InboundTarget {
     Ip(IpAddr),
     Domain(String),

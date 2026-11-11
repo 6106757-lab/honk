@@ -114,7 +114,7 @@ impl ControlPlaneHandle {
             return Err(InboundDialError::Blocked(outbound));
         }
 
-        let node = resolve_inbound_node(&groups, &outbound, ipver)?;
+        let node = resolve_inbound_node(&groups, &outbound, ipver, ProbeDomain::Tcp)?;
         if node.protocol() == honk_config::types::NodeProtocol::Block {
             return Err(InboundDialError::Blocked(outbound));
         }
@@ -155,10 +155,11 @@ impl ControlPlaneHandle {
 
 /// Resolve a routed outbound name to one node. A bare node name resolves
 /// directly; a group contributes one leaf selected for TCP traffic.
-fn resolve_inbound_node(
+pub(super) fn resolve_inbound_node(
     groups: &honk_outbound::group::GroupManager,
     name: &str,
     ipver: IpVersion,
+    probe: ProbeDomain,
 ) -> Result<honk_config::node::Node, InboundDialError> {
     match name {
         "direct" => Ok(Config::builtin_direct_node()),
@@ -171,7 +172,7 @@ fn resolve_inbound_node(
             // domain: honk's group selector has no per-target key. The
             // concrete domain is still passed to the proxy as target_domain
             // above, so node-side routing keeps the original hostname.
-            if let Some(node) = groups.select_node_for_domain(name, ProbeDomain::Tcp, ipver) {
+            if let Some(node) = groups.select_node_for_domain(name, probe, ipver) {
                 return Ok(node.clone());
             }
             Err(InboundDialError::Failed(anyhow::anyhow!(

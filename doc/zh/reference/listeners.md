@@ -61,11 +61,28 @@ routing {
 - **hop-by-hop 头**：`Proxy-Connection`、`Proxy-Authorization`、`Connection` 及其列出的头、`Keep-Alive`、`TE`、`Trailer`、`Upgrade` 会被剥离。
 - **超时**：握手与请求头各用一个总截止时间，慢速逐字节 drip 无法续命；读完请求头即解除，长连接不受影响。
 - **错误**：所有错误响应都带 `Connection: close`；SOCKS5 的拒绝会回对应的 REP 码（规则禁止 `0x02`、拨号失败 `0x05`）。
-- **SOCKS5**：支持 `CONNECT` 与 IPv4 / IPv6 / 域名地址；`UDP ASSOCIATE` 和 `BIND` 不支持。
+- **SOCKS5**：支持 `CONNECT`、`UDP ASSOCIATE` 与 IPv4 / IPv6 / 域名地址；`BIND` 不支持。
+
+## UDP（SOCKS5 UDP ASSOCIATE）
+
+`listeners {}` 同时绑定一个 UDP socket，**与 TCP 监听同 IP 同端口**（TCP/UDP 端口空间独立，不冲突）。所以如果你把某个端口映射到公网，只要把 **TCP 和 UDP 都放行**，客户端就能用同一个地址走 UDP，无需额外端口。
+
+客户端发起 `UDP ASSOCIATE` 后，服务端在 SOCKS5 回复里带回中继地址；那条 TCP 连接变成控制通道，保持打开即代表 UDP 会话有效，关闭则整个会话终止（RFC 1928）。
+
+实现要点：
+
+- 走的是**独立的用户态转发路径**，不进入 eBPF 的 `udp_endpoint` 池（那套依赖 tproxy mark、BPF conn info 和 janitor），而是复用 `ProxyRegistry::dial_udp_transport()`，因此所有支持 UDP 的节点协议（direct、socks5、shadowsocks、vless 等）都能用。
+- 每个数据报按 `(目标地址, 端口)` 建立/复用一条 flow，`inbound()` 规则与 DNS `qname()` / `-> follow` 全部照常生效，域名目标通过带客户端来源的解析器解析。
+- 组选择使用 `ProbeDomain::DataUdp`（TCP 流量仍是 `ProbeDomain::Tcp`）。
+- 分片数据报（`FRAG != 0`）直接丢弃；单会话最多 256 条 flow，空闲 120 秒回收；UDP 无背压，队列满则丢弃数据报。
+- 每条 UDP flow 会在 doona 连接表出现（`network = udp`），规则列同样由连接表快照提供。
+- 一个 dispatcher 独占 `recv_from`，按**客户端 IP** 分发到各控制连接对应的会话，因此 NAT 后 UDP 源端口与 TCP 源端口不同也能工作。
+- 若 UDP 端口绑定失败（例如被别的进程占用），该监听**降级为仅 TCP**，不影响现有连接；此时 `UDP ASSOCIATE` 会回 REP `0x07`。
 
 ## 已知限制
 
 1. 入站连接没有以太网 L2 头，因此 `mac()` / `pname()` 规则不命中；`sport()` 使用的是客户端连接的真实端口。
-2. 组选择器沿用 `ProbeDomain::Tcp`（honk 的组选择接口不接受具体目标域名），但目标域名仍会作为 `target_domain` 传给节点，域名信息不丢。
+2. 组选择器用的是探测类型而不是具体目标域名（honk 的组选择接口不接受目标域名），但目标域名仍会作为 `target_domain` 传给节点，域名信息不丢。
 3. 重载配置时会随 epoch 重建重新绑定监听；`InboundListenerSet::patch` 已实现按名字增量替换，尚未挂到 reload 事件路径。
 4. 入站连接不生成 flow 证据记录，因此 doona 里「重新评估」按钮不可用；规则列由连接表在注册时快照的 `rule` / `rule_payload` 提供，证据表被清空或 TTL 淘汰也不会变成「—」。
+5. UDP 会话按客户端 IP 分发：同一个 IP 上后建立的 `UDP ASSOCIATE` 会接管先前的会话。多设备经同一个 NAT 出口共用时，只有最后一个会话生效。
