@@ -177,16 +177,8 @@ impl UdpRelay {
             return SocketAddr::new(host, self.local_addr.port());
         }
         let bound = self.local_addr.ip();
-        let client_is_global = match client {
-            IpAddr::V4(v4) => v4.is_global(),
-            IpAddr::V6(v6) => v6.is_global(),
-        };
-        let bound_not_routable_to_client = bound.is_unspecified()
-            || bound.is_loopback()
-            || match bound {
-                IpAddr::V4(v4) => !v4.is_global(),
-                IpAddr::V6(v6) => !v6.is_global(),
-            };
+        let client_is_global = is_globally_routable(client);
+        let bound_not_routable_to_client = !is_globally_routable(bound);
         if client_is_global && bound_not_routable_to_client {
             SocketAddr::new(
                 if bound.is_ipv4() {
@@ -240,6 +232,46 @@ impl UdpRelay {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Whether `ip` is a globally routable unicast address, using only stable
+/// `std::net` APIs (`Ipv4Addr::is_global` / `Ipv6Addr::is_global` are still
+/// unstable on the toolchain this project builds with). Used solely to decide
+/// whether a client can reach a private listener bind address directly.
+fn is_globally_routable(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified() || v4.is_loopback() || v4.is_private() || v4.is_link_local() {
+                return false;
+            }
+            let o = v4.octets();
+            // 100.64.0.0/10 carrier-grade NAT.
+            if o[0] == 100 && (o[1] & 0xc0) == 64 {
+                return false;
+            }
+            // 192.0.0.0/24 and 198.18.0.0/15 benchmarking ranges.
+            if o[0] == 192 && o[1] == 0 && o[2] == 0 {
+                return false;
+            }
+            if o[0] == 198 && (o[1] & 0xfe) == 18 {
+                return false;
+            }
+            // 224.0.0.0/4 multicast and 240.0.0.0/4 reserved.
+            o[0] < 224
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_unspecified() || v6.is_loopback() || v6.is_link_local() {
+                return false;
+            }
+            // IPv4-mapped addresses follow their v4 part.
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_globally_routable(IpAddr::V4(mapped));
+            }
+            // fc00::/7 unique local.
+            let first = v6.segments()[0];
+            !(first & 0xfe00 == 0xfc00)
         }
     }
 }
@@ -703,6 +735,30 @@ mod tests {
             .or_else(|_| std::net::UdpSocket::bind("127.0.0.1:0"))
             .unwrap();
         UdpRelay::new(socket).unwrap()
+    }
+
+    #[test]
+    fn globally_routable_ip_classification() {
+        for ip in ["8.8.8.8", "117.174.205.95", "1.1.1.1"] {
+            assert!(
+                is_globally_routable(ip.parse().unwrap()),
+                "{ip} should be global"
+            );
+        }
+        for ip in [
+            "172.20.1.128",
+            "127.0.0.1",
+            "192.168.1.1",
+            "10.0.0.1",
+            "100.64.0.1",
+            "169.254.1.1",
+            "0.0.0.0",
+        ] {
+            assert!(
+                !is_globally_routable(ip.parse().unwrap()),
+                "{ip} should not be global"
+            );
+        }
     }
 
     #[test]
