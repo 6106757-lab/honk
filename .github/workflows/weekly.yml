@@ -48,7 +48,7 @@ jobs:
           workspaces: |
             . -> target
             crates/honk-ebpf -> target
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: nextest
       - name: Install build dependencies
@@ -118,7 +118,7 @@ jobs:
           key: public-vless-loopback-${{ steps.toolchain.outputs.stable }}
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: nextest
       - name: Install build and archive dependencies
@@ -226,7 +226,7 @@ jobs:
           key: advisories-${{ steps.toolchain.outputs.stable }}
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: cargo-audit
       - run: cargo audit
