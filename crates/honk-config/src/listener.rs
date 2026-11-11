@@ -174,9 +174,15 @@ pub fn validate_listeners(listeners: &[ListenerConfig]) -> Result<(), String> {
                 other.bind_addr()
             ));
         }
-        if listener.auth.is_some() && listener.listen.is_unspecified() {
+        // An unauthenticated wildcard listener is an open proxy: binding every
+        // interface would expose it to the internet with no credential. An
+        // authenticated one is the normal way to publish a listener and is
+        // allowed — the credentials are the protection. This also makes the
+        // SOCKS5 UDP ASSOCIATE reply advertise 0.0.0.0, which strict clients
+        // (sing-box/NekoBox) need to fall back to the public TCP peer.
+        if listener.auth.is_none() && listener.listen.is_unspecified() {
             return Err(format!(
-                "{label}: refusing to expose an authenticated listener on a wildcard address"
+                "{label}: refusing to expose an unauthenticated listener on a wildcard address; set auth or bind a specific address"
             ));
         }
     }
@@ -229,6 +235,25 @@ mod tests {
             listener("b", 12001, default_listen()),
         ];
         assert!(validate_listeners(&items).is_ok());
+    }
+
+    #[test]
+    fn wildcard_requires_auth() {
+        let wildcard = "0.0.0.0".parse().unwrap();
+        let mut open = listener("open", 12000, wildcard);
+        open.auth = None;
+        assert!(
+            validate_listeners(&[open])
+                .unwrap_err()
+                .contains("unauthenticated")
+        );
+
+        let mut secured = listener("secured", 12000, wildcard);
+        secured.auth = Some(ListenerAuth {
+            username: "u".to_owned(),
+            password: "p".to_owned(),
+        });
+        assert!(validate_listeners(&[secured]).is_ok());
     }
 
     #[test]
