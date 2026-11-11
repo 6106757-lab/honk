@@ -67,7 +67,16 @@ routing {
 
 `listeners {}` 同时绑定一个 UDP socket，**与 TCP 监听同 IP 同端口**（TCP/UDP 端口空间独立，不冲突）。所以如果你把某个端口映射到公网，只要把 **TCP 和 UDP 都放行**，客户端就能用同一个地址走 UDP，无需额外端口。
 
-客户端发起 `UDP ASSOCIATE` 后，服务端在 SOCKS5 回复里带回中继地址；那条 TCP 连接变成控制通道，保持打开即代表 UDP 会话有效，关闭则整个会话终止（RFC 1928）。
+客户端发起 `UDP ASSOCIATE` 后，服务端在 SOCKS5 回复里带回中继地址（BND.ADDR）；那条 TCP 连接变成控制通道，保持打开即代表 UDP 会话有效，关闭则整个会话终止（RFC 1928）。
+
+**关于 BND.ADDR（重要，公网转发必看）**：严格遵循 RFC 1928 的客户端（sing-box / NekoBox / NekoRay）会把 UDP 包**直接发给回复里的 BND.ADDR**；小火箭（Shadowrocket）会忽略它、改用 TCP 连接的对端地址。所以当 `listen` 绑在内网地址（如 `172.20.1.128`）而端口由路由器映射到公网时，回内网地址会让 NekoBox 的**第一个 UDP 包就发不出去**（TCP 却正常），表现就是「UDP 不通」。
+
+- 默认自动处理：当客户端来自公网、而监听地址是不可路由的私网地址时，BND.ADDR 回 `0.0.0.0:port`，让客户端回退到它连进来的公网地址（与 Xray 默认用 TCP 本地地址是同一目的）。局域网客户端仍回具体绑定地址，行为不变。
+- 显式指定（等价 Xray / 3x-ui 里的 `ip` 字段）：在 listener 里写 `udp_host: 公网IP`，服务端会把这个地址原样回给客户端。当公网端口和内网端口不同、或公网 IP 无法从 TCP 连接推断时用这个：
+  ```dae
+  shopauth { type: mixed listen: 172.20.1.128 port: 12001 auth: 'adminshop:shoppassword' udp_host: 117.174.205.95 }
+  ```
+  注意端口仍回监听端口；若做了端口转发（公网端口 ≠ `port`），需要在客户端/转发侧按实际端口处理。
 
 实现要点：
 

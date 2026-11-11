@@ -287,7 +287,7 @@ async fn serve_socks(
             // clients (sing-box) dial exactly this address for UDP; a private
             // bind behind a public port-forward must be advertised as
             // 0.0.0.0:port so they fall back to the TCP peer's public address.
-            let advertised = relay.associate_bind_for(param.client_addr.ip());
+            let advertised = relay.associate_bind_for(param.client_addr.ip(), config.udp_host);
             if let Err(error) = socks::write_reply_addr(rb, 0x00, advertised).await {
                 tracing::debug!(%error, "SOCKS5 UDP ASSOCIATE 回复失败");
                 return Ok(());

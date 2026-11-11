@@ -29,6 +29,7 @@ const KNOWN_KEYS: &[&str] = &[
     "listen",
     "port",
     "auth",
+    "udp_host",
     "handshake_timeout_ms",
     "request_timeout_ms",
     "max_header_bytes",
@@ -149,6 +150,18 @@ pub(super) fn parse_listeners_section(
                             listener_scalar_error(value, index, "auth", message)
                         })?);
                 }
+            }
+            if let Some(value) = fields.get("udp_host").copied() {
+                listener.udp_host = Some(value.raw().trim().parse::<std::net::IpAddr>().map_err(
+                    |_| {
+                        listener_scalar_error(
+                            value,
+                            index,
+                            "udp_host",
+                            "udp_host must be an IP address",
+                        )
+                    },
+                )?);
             }
             for (key, target) in [
                 ("handshake_timeout_ms", &mut listener.handshake_timeout_ms),

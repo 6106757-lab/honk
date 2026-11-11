@@ -164,7 +164,18 @@ impl UdpRelay {
     /// the address it already reached us on (its TCP connection's remote end),
     /// which is the public IP:port in exactly this NAT scenario. LAN clients
     /// keep getting the concrete bound address so nothing changes for them.
-    pub(super) fn associate_bind_for(&self, client: IpAddr) -> SocketAddr {
+    ///
+    /// `udp_host` is the explicit override (Xray/3x-ui's `ip` field): when the
+    /// public port is mapped to a different port or the public IP cannot be
+    /// inferred from the TCP peer, set it to the address clients should use.
+    pub(super) fn associate_bind_for(
+        &self,
+        client: IpAddr,
+        udp_host: Option<IpAddr>,
+    ) -> SocketAddr {
+        if let Some(host) = udp_host {
+            return SocketAddr::new(host, self.local_addr.port());
+        }
         let bound = self.local_addr.ip();
         let client_is_global = match client {
             IpAddr::V4(v4) => v4.is_global(),
@@ -698,7 +709,7 @@ mod tests {
     fn associate_advertises_zero_for_public_client_behind_private_bind() {
         let relay = relay_bound_to_private();
         let public: IpAddr = "8.8.8.8".parse().unwrap();
-        let advertised = relay.associate_bind_for(public);
+        let advertised = relay.associate_bind_for(public, None);
         assert!(advertised.ip().is_unspecified(), "got {}", advertised.ip());
         assert_eq!(advertised.port(), relay.local_addr().port());
     }
@@ -707,7 +718,15 @@ mod tests {
     fn associate_advertises_concrete_bind_for_lan_client() {
         let relay = relay_bound_to_private();
         let lan: IpAddr = "172.20.1.185".parse().unwrap();
-        assert_eq!(relay.associate_bind_for(lan), relay.local_addr());
+        assert_eq!(relay.associate_bind_for(lan, None), relay.local_addr());
+    }
+
+    #[test]
+    fn associate_honors_explicit_udp_host() {
+        let relay = relay_bound_to_private();
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        let host: IpAddr = "117.174.205.95".parse().unwrap();
+        assert_eq!(relay.associate_bind_for(public, Some(host)).ip(), host);
     }
 
     #[test]

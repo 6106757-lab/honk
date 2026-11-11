@@ -51,6 +51,12 @@ pub struct ListenerConfig {
     /// listener should only ever bind loopback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ListenerAuth>,
+    /// Address advertised in the SOCKS5 `UDP ASSOCIATE` reply, i.e. the
+    /// equivalent of Xray/3x-ui's `ip` field. Set this to the public IP when
+    /// the listener binds a private address behind a port-forward. When
+    /// unset, honk infers a reachable address from the client's source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_host: Option<IpAddr>,
     /// Deadline covering the *entire* protocol handshake, not each read.
     #[serde(default = "default_handshake_timeout_ms")]
     pub handshake_timeout_ms: u64,
@@ -80,6 +86,7 @@ impl Default for ListenerConfig {
             listen: default_listen(),
             port: 0,
             auth: None,
+            udp_host: None,
             handshake_timeout_ms: DEFAULT_HANDSHAKE_TIMEOUT_MS,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
