@@ -316,7 +316,7 @@ async fn serve_socks(
     socks::write_reply(rb, 0x00).await?;
 
     let pending = rb.drain_buffered();
-    let tracked = Tracked::register(handle, param, &dial);
+    let mut tracked = Tracked::register(handle, param, &dial);
     let mut stream = dial.stream;
     if !pending.is_empty() {
         stream.stream.write_all(&pending).await?;
@@ -404,7 +404,7 @@ async fn serve_http(
             }
         };
 
-        let tracked = Tracked::register(handle, param, &dial);
+        let mut tracked = Tracked::register(handle, param, &dial);
         let mut stream = dial.stream;
         if request.connect {
             rb.write_all(CONNECT_ESTABLISHED).await?;
