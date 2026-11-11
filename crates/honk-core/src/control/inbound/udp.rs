@@ -149,6 +149,47 @@ impl UdpRelay {
         self.local_addr
     }
 
+    /// Address advertised in the SOCKS5 `UDP ASSOCIATE` reply.
+    ///
+    /// RFC 1928 requires the client to send datagrams to the returned
+    /// BND.ADDR. When the listener is bound to a private address behind a
+    /// port-forward (typical: `listen: 172.20.1.128` with the router mapping a
+    /// public IP:port to it), advertising that private address is unusable for
+    /// a client on the public internet. Strict clients such as sing-box
+    /// (NekoBox/NekoRay) dial exactly `response.Bind` and fail on the first UDP
+    /// packet; lenient clients (Shadowrocket) ignore it and fall back to the
+    /// TCP peer, which is why only the former broke.
+    ///
+    /// Advertising `0.0.0.0` keeps the port and lets the client fall back to
+    /// the address it already reached us on (its TCP connection's remote end),
+    /// which is the public IP:port in exactly this NAT scenario. LAN clients
+    /// keep getting the concrete bound address so nothing changes for them.
+    pub(super) fn associate_bind_for(&self, client: IpAddr) -> SocketAddr {
+        let bound = self.local_addr.ip();
+        let client_is_global = match client {
+            IpAddr::V4(v4) => v4.is_global(),
+            IpAddr::V6(v6) => v6.is_global(),
+        };
+        let bound_not_routable_to_client = bound.is_unspecified()
+            || bound.is_loopback()
+            || match bound {
+                IpAddr::V4(v4) => !v4.is_global(),
+                IpAddr::V6(v6) => !v6.is_global(),
+            };
+        if client_is_global && bound_not_routable_to_client {
+            SocketAddr::new(
+                if bound.is_ipv4() {
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+                } else {
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+                },
+                self.local_addr.port(),
+            )
+        } else {
+            self.local_addr
+        }
+    }
+
     fn socket(&self) -> Arc<UdpSocket> {
         Arc::clone(&self.socket)
     }
@@ -643,6 +684,31 @@ pub(super) fn bind_udp(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn relay_bound_to_private() -> UdpRelay {
+        // A bound std socket supplies the local_addr; the socket itself is not
+        // used by associate_bind_for.
+        let socket = std::net::UdpSocket::bind("172.20.1.128:0")
+            .or_else(|_| std::net::UdpSocket::bind("127.0.0.1:0"))
+            .unwrap();
+        UdpRelay::new(socket).unwrap()
+    }
+
+    #[test]
+    fn associate_advertises_zero_for_public_client_behind_private_bind() {
+        let relay = relay_bound_to_private();
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        let advertised = relay.associate_bind_for(public);
+        assert!(advertised.ip().is_unspecified(), "got {}", advertised.ip());
+        assert_eq!(advertised.port(), relay.local_addr().port());
+    }
+
+    #[test]
+    fn associate_advertises_concrete_bind_for_lan_client() {
+        let relay = relay_bound_to_private();
+        let lan: IpAddr = "172.20.1.185".parse().unwrap();
+        assert_eq!(relay.associate_bind_for(lan), relay.local_addr());
+    }
 
     #[test]
     fn parses_ipv4_udp_datagram() {
