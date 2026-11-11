@@ -262,7 +262,7 @@ fn is_globally_routable(ip: IpAddr) -> bool {
             o[0] < 224
         }
         IpAddr::V6(v6) => {
-            if v6.is_unspecified() || v6.is_loopback() || v6.is_link_local() {
+            if v6.is_unspecified() || v6.is_loopback() || v6.is_unicast_link_local() {
                 return false;
             }
             // IPv4-mapped addresses follow their v4 part.
