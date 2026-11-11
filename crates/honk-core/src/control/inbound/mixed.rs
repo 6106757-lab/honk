@@ -31,10 +31,19 @@ use tokio::time::Instant;
 /// When a peer disappears without FIN/RST (cellular handover, radio drop),
 /// `relay_proxy` would otherwise wait forever and its observation row would
 /// stay `active` indefinitely. This watchdog is this path's lifecycle
-/// endpoint, symmetric to the kernel path's janitor sweep.
-const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-const RELAY_IDLE_CHECK: Duration = Duration::from_secs(30);
+/// endpoint, symmetric to the kernel path's janitor sweep. It is deliberately
+/// longer than the listener's TCP keepalive detection window: keepalive is
+/// authoritative, this is only the last-resort backstop.
+const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const RELAY_IDLE_CHECK: Duration = Duration::from_secs(10);
 
+/// Owns exactly one observation row for the lifetime of one listener
+/// connection. Retirement is RAII: the row is acked and removed when this
+/// value is dropped, whichever way the connection ends — a normal relay
+/// finish, an API close, an early `?` return after registration, or the whole
+/// task being aborted by a reload. A row left behind by any of those paths
+/// never reaches a terminal `CloseSignal`, so `sweep_terminal()` cannot reap
+/// it either; that is the zombie-row source this guard closes.
 struct Tracked {
     /// `None` for a `direct(must)` relay: the kernel path bypasses the control
     /// plane for those and therefore has no observation row either.
@@ -42,12 +51,14 @@ struct Tracked {
     /// Owning transport acknowledgement. Dropping it without an explicit
     /// `finish(true)` would make a close request report a failure.
     completion: Option<CloseCompletion>,
+    handle: ControlPlaneHandle,
     upload: Arc<AtomicU64>,
     download: Arc<AtomicU64>,
 }
 
 impl Tracked {
     fn register(handle: &ControlPlaneHandle, param: &ClientParam, dial: &InboundDial) -> Self {
+        let handle = handle.clone();
         let upload = Arc::new(AtomicU64::new(0));
         let download = Arc::new(AtomicU64::new(0));
         if dial.terminal_direct {
@@ -57,6 +68,7 @@ impl Tracked {
             return Self {
                 id: None,
                 completion: None,
+                handle,
                 upload,
                 download,
             };
@@ -98,6 +110,7 @@ impl Tracked {
         Self {
             id: Some(id),
             completion: Some(CloseCompletion(signal)),
+            handle,
             upload,
             download,
         }
@@ -137,14 +150,16 @@ impl Tracked {
         self.upload.load(Ordering::Relaxed) + self.download.load(Ordering::Relaxed)
     }
 
-    fn finish(self, handle: &ControlPlaneHandle) {
+    fn retire(&mut self) {
         // Acknowledge before removing the row: an in-flight close request is
         // waiting on this signal and must observe `Closed`, not `Failed`.
-        if let Some(completion) = &self.completion {
+        // `take` makes this idempotent — `Drop` runs it a second time on the
+        // normal path without touching the tracker again.
+        if let Some(completion) = self.completion.take() {
             completion.0.finish(true);
         }
-        if let Some(id) = &self.id {
-            handle.connection_tracker.remove(id);
+        if let Some(id) = self.id.take() {
+            self.handle.connection_tracker.remove(&id);
         }
     }
 
@@ -160,6 +175,41 @@ impl Tracked {
     }
 }
 
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        self.retire();
+    }
+}
+
+/// Listener sockets have no eBPF janitor. A client that vanishes without
+/// FIN/RST (cellular handover, radio drop) must therefore be detected by the
+/// kernel, not by a userspace timer. Keepalive covers the idle case;
+/// `TCP_USER_TIMEOUT` bounds how long unacknowledged upstream data may pin a
+/// relay that keeps making progress — such a relay never trips the idle
+/// watchdog because its byte counters keep changing.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn arm_client_liveness(stream: &TcpStream) {
+    let sock = socket2::SockRef::from(stream);
+    if let Err(error) = sock.set_keepalive(true) {
+        tracing::debug!(%error, "入站连接 keepalive 开启失败");
+        return;
+    }
+    let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(60));
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let keepalive = keepalive
+        .with_interval(Duration::from_secs(10))
+        .with_retries(3);
+    if let Err(error) = sock.set_tcp_keepalive(&keepalive) {
+        tracing::debug!(%error, "入站连接 keepalive 参数失败");
+    }
+    if let Err(error) = sock.set_tcp_user_timeout(Some(Duration::from_secs(120))) {
+        tracing::debug!(%error, "入站连接 user timeout 设置失败");
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn arm_client_liveness(_stream: &TcpStream) {}
+
 pub(super) async fn serve_mixed_connection(
     stream: TcpStream,
     client_addr: SocketAddr,
@@ -167,6 +217,7 @@ pub(super) async fn serve_mixed_connection(
     handle: &ControlPlaneHandle,
     relay: Option<&Arc<UdpRelay>>,
 ) -> anyhow::Result<()> {
+    arm_client_liveness(&stream);
     let mut param = ClientParam {
         listener: config.name.clone(),
         user: None,
@@ -285,7 +336,7 @@ async fn serve_socks(
         _ = tracked.idle() => None,
         result = relay => Some(result),
     };
-    tracked.finish(handle);
+    tracked.retire();
     if let Some(result) = result {
         result?;
     }
@@ -374,7 +425,7 @@ async fn serve_http(
                 _ = tracked.idle() => None,
                 result = relay => Some(result),
             };
-            tracked.finish(handle);
+            tracked.retire();
             if let Some(result) = result {
                 result?;
             }
@@ -395,7 +446,7 @@ async fn serve_http(
             _ = tracked.idle() => None,
             result = forward => Some(result),
         };
-        tracked.finish(handle);
+        tracked.retire();
         match result {
             Some(Err(error)) => {
                 tracing::debug!(%error, "HTTP request forwarding ended");

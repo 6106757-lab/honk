@@ -247,9 +247,30 @@ impl Drop for UdpFlow {
 }
 
 /// The single observation row owned by one UDP ASSOCIATE session.
+/// Retirement is RAII for the same reason as the TCP `Tracked` guard: a task
+/// aborted by a reload would otherwise leave a row whose `CloseSignal` never
+/// becomes terminal, so even `sweep_terminal()` cannot reclaim it.
 struct SessionRow {
-    id: String,
-    completion: CloseCompletion,
+    id: Option<String>,
+    completion: Option<CloseCompletion>,
+    handle: ControlPlaneHandle,
+}
+
+impl SessionRow {
+    fn retire(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            completion.0.finish(true);
+        }
+        if let Some(id) = self.id.take() {
+            self.handle.connection_tracker.remove(&id);
+        }
+    }
+}
+
+impl Drop for SessionRow {
+    fn drop(&mut self) {
+        self.retire();
+    }
 }
 
 fn register_session(
@@ -294,17 +315,9 @@ fn register_session(
         owner,
     );
     SessionRow {
-        id,
-        completion: CloseCompletion(signal),
-    }
-}
-
-fn retire_session(row: Option<SessionRow>, handle: &ControlPlaneHandle) {
-    if let Some(row) = row {
-        // Acknowledge before removing: an in-flight bulk close is waiting on
-        // this signal and must observe `Closed`, not `Failed`.
-        row.completion.0.finish(true);
-        handle.connection_tracker.remove(&row.id);
+        id: Some(id),
+        completion: Some(CloseCompletion(signal)),
+        handle: handle.clone(),
     }
 }
 
@@ -422,7 +435,9 @@ pub(super) async fn serve_udp_associate(
     }
 
     flows.clear();
-    retire_session(session_row, handle);
+    // Acknowledge before the transports go away so an in-flight bulk close
+    // observes `Closed`, not `Failed`. Dropping the guard is idempotent.
+    drop(session_row);
     Ok(())
 }
 
