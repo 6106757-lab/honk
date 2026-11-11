@@ -49,13 +49,6 @@ impl CloseSignal {
         matches!(*self.0.borrow(), ClosePhase::Closed | ClosePhase::Failed)
     }
 
-    /// True once a close request has claimed this row (or the owner already
-    /// finished). Userspace relays poll this to find which of their flows the
-    /// API asked to close.
-    pub(crate) fn is_claimed(&self) -> bool {
-        *self.0.borrow() != ClosePhase::Active
-    }
-
     fn claim(&self) -> bool {
         self.0.send_if_modified(|phase| {
             if *phase != ClosePhase::Active {
@@ -117,10 +110,10 @@ pub(crate) enum CloseAction {
         token: u32,
         generation: u64,
     },
-    /// A userspace listener relay with no kernel-side action to perform. The
-    /// owning task cannot await one signal per flow, so claiming the row wakes
-    /// it through a shared `Notify`; it then retires every claimed flow and
-    /// acknowledges with `CloseSignal::finish(true)`.
+    /// A userspace listener relay with no kernel-side action to perform. One
+    /// row owns one TCP relay or one whole UDP ASSOCIATE session, so claiming
+    /// it simply wakes that single owner through `Notify`; the owner then
+    /// tears everything down and acknowledges with `CloseSignal::finish(true)`.
     Inbound {
         cancel: Arc<tokio::sync::Notify>,
     },

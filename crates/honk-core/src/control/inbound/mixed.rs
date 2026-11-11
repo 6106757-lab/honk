@@ -21,16 +21,27 @@ use crate::connection_tracker::{
 use honk_config::ListenerConfig;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 
+/// A userspace listener relay has no kernel flow, no eBPF janitor and no TTL.
+/// When a peer disappears without FIN/RST (cellular handover, radio drop),
+/// `relay_proxy` would otherwise wait forever and its observation row would
+/// stay `active` indefinitely. This watchdog is this path's lifecycle
+/// endpoint, symmetric to the kernel path's janitor sweep.
+const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const RELAY_IDLE_CHECK: Duration = Duration::from_secs(30);
+
 struct Tracked {
-    id: String,
+    /// `None` for a `direct(must)` relay: the kernel path bypasses the control
+    /// plane for those and therefore has no observation row either.
+    id: Option<String>,
     /// Owning transport acknowledgement. Dropping it without an explicit
     /// `finish(true)` would make a close request report a failure.
-    completion: CloseCompletion,
+    completion: Option<CloseCompletion>,
     upload: Arc<AtomicU64>,
     download: Arc<AtomicU64>,
 }
@@ -39,6 +50,17 @@ impl Tracked {
     fn register(handle: &ControlPlaneHandle, param: &ClientParam, dial: &InboundDial) -> Self {
         let upload = Arc::new(AtomicU64::new(0));
         let download = Arc::new(AtomicU64::new(0));
+        if dial.terminal_direct {
+            // `must` + direct means terminal bypass. Keep the relay invisible
+            // in the panel instead of registering every domestic direct
+            // connection of a phone that proxies all of its traffic here.
+            return Self {
+                id: None,
+                completion: None,
+                upload,
+                download,
+            };
+        }
         let signal = CloseSignal::new();
         let owner = ConnectionOwner {
             signal: Arc::clone(&signal),
@@ -74,23 +96,56 @@ impl Tracked {
         };
         let id = handle.connection_tracker.register_owned(entry, owner);
         Self {
-            id,
-            completion: CloseCompletion(signal),
+            id: Some(id),
+            completion: Some(CloseCompletion(signal)),
             upload,
             download,
         }
     }
 
-    /// Resolves as soon as the API claims this row for closure.
+    /// Resolves as soon as the API claims this row for closure. A bypassed
+    /// relay has no row to claim, so it simply never resolves.
     async fn cancelled(&self) {
-        self.completion.0.cancelled().await;
+        match &self.completion {
+            Some(completion) => completion.0.cancelled().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Resolves once the relay has carried no bytes at all for
+    /// `RELAY_IDLE_TIMEOUT`. Any traffic (including keep-alives) resets it,
+    /// so live long-lived connections are never cut.
+    async fn idle(&self) {
+        let mut last = self.total();
+        let mut quiet = Duration::ZERO;
+        loop {
+            tokio::time::sleep(RELAY_IDLE_CHECK).await;
+            let now = self.total();
+            if now != last {
+                last = now;
+                quiet = Duration::ZERO;
+            } else {
+                quiet += RELAY_IDLE_CHECK;
+                if quiet >= RELAY_IDLE_TIMEOUT {
+                    return;
+                }
+            }
+        }
+    }
+
+    fn total(&self) -> u64 {
+        self.upload.load(Ordering::Relaxed) + self.download.load(Ordering::Relaxed)
     }
 
     fn finish(self, handle: &ControlPlaneHandle) {
         // Acknowledge before removing the row: an in-flight close request is
         // waiting on this signal and must observe `Closed`, not `Failed`.
-        self.completion.0.finish(true);
-        handle.connection_tracker.remove(&self.id);
+        if let Some(completion) = &self.completion {
+            completion.0.finish(true);
+        }
+        if let Some(id) = &self.id {
+            handle.connection_tracker.remove(id);
+        }
     }
 
     fn progress(&self) -> crate::relay::RelayProgress {
@@ -227,6 +282,7 @@ async fn serve_socks(
     let result = tokio::select! {
         biased;
         _ = tracked.cancelled() => None,
+        _ = tracked.idle() => None,
         result = relay => Some(result),
     };
     tracked.finish(handle);
@@ -315,6 +371,7 @@ async fn serve_http(
             let result = tokio::select! {
                 biased;
                 _ = tracked.cancelled() => None,
+                _ = tracked.idle() => None,
                 result = relay => Some(result),
             };
             tracked.finish(handle);
@@ -335,6 +392,7 @@ async fn serve_http(
         let result = tokio::select! {
             biased;
             _ = tracked.cancelled() => None,
+            _ = tracked.idle() => None,
             result = forward => Some(result),
         };
         tracked.finish(handle);
@@ -343,8 +401,8 @@ async fn serve_http(
                 tracing::debug!(%error, "HTTP request forwarding ended");
                 return Ok(());
             }
-            // The API closed this connection; do not serve another request
-            // on the same client socket.
+            // The API closed this connection, or the idle watchdog decided
+            // the peer vanished. Either way stop serving this client socket.
             None => return Ok(()),
             Some(Ok(())) => {}
         }

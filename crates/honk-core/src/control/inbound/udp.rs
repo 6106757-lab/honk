@@ -10,14 +10,22 @@
 //!
 //! This path deliberately does **not** enter the eBPF `udp_endpoint` pool. That
 //! pool assumes tproxy-redirected sockets with BPF conn info, leases and a
-//! janitor; userspace SOCKS5 datagrams have none of that. Instead each flow
+//! janitor; userspace SOCKS5 datagrams have none of that. Instead each target
 //! dials the ordinary `PacketTransport` through `ProxyRegistry`, reusing every
 //! existing UDP-capable proxy handler (direct, socks5, shadowsocks, vless, ...).
 //!
+//! **The connection is the UDP ASSOCIATE session, not a destination.** One
+//! association can carry datagrams for hundreds of targets (DNS, QUIC, STUN,
+//! network discovery). Registering one observation row per `(target, port)`
+//! produced the 1000+ row flood; now the session owns exactly one row, and the
+//! per-target flows are internal implementation details with no tracker rows.
+//! A `direct(must)` session is terminal-bypassed like its kernel counterpart
+//! and owns no row at all.
+//!
 //! Lifecycle: the TCP control connection owns the session (RFC 1928 says the
 //! UDP association terminates when the control connection closes). Closing it
-//! unregisters the session, aborts every reply task and drops every connection
-//! tracker row, so reload/teardown leaves no zombie flows.
+//! unregisters the session, aborts every reply task and acknowledges the single
+//! session row, so reload/teardown leaves no zombie observation.
 
 use super::super::connection::ControlPlaneHandle;
 use super::dial::resolve_inbound_node;
@@ -102,21 +110,15 @@ fn parse_address(bytes: &[u8], start: usize) -> Option<(InboundTarget, u16, usiz
     Some((target, port, next + 2))
 }
 
-/// Wrap an upstream reply in a SOCKS5 UDP request header so the client sees a
-/// normal datagram from the original destination.
-fn wrap_reply(source: &InboundTarget, port: u16, payload: &[u8]) -> Vec<u8> {
+/// Wrap an upstream reply in a SOCKS5 UDP request header. The source is the
+/// **real peer returned by `PacketTransport::recv_packet`**, never a captured
+/// request target: the packet contract requires replies to carry the genuine
+/// peer, and faking it makes clients treat a reply as a new association.
+fn wrap_reply_addr(source: SocketAddr, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(32 + payload.len());
     out.extend_from_slice(&[0x00, 0x00, 0x00]);
-    match source {
-        InboundTarget::Ip(ip) => encode_address(&mut out, *ip),
-        InboundTarget::Domain(domain) => {
-            let raw = domain.as_bytes();
-            out.push(0x03);
-            out.push(raw.len().min(255) as u8);
-            out.extend_from_slice(&raw[..raw.len().min(255)]);
-        }
-    }
-    out.extend_from_slice(&port.to_be_bytes());
+    encode_address(&mut out, source.ip());
+    out.extend_from_slice(&source.port().to_be_bytes());
     out.extend_from_slice(payload);
     out
 }
@@ -215,43 +217,94 @@ impl Drop for Registration {
     }
 }
 
+/// Routing decision for one datagram, computed before the flow is created.
+struct RoutedDatagram {
+    target: SocketAddr,
+    target_domain: Option<String>,
+    outbound: String,
+    rule: String,
+    rule_payload: String,
+    chains: Vec<String>,
+    /// `must` on a direct action: same terminal-bypass semantics as TCP.
+    terminal_direct: bool,
+    connect_timeout: Duration,
+    ipver: IpVersion,
+}
+
+/// A per-target transport. This is **not** a connection — the ASSOCIATE
+/// session is — so a flow owns no tracker row.
 struct UdpFlow {
     transport: Arc<dyn PacketTransport>,
     last_active: Instant,
-    upload: Arc<AtomicU64>,
-    tracker_id: String,
-    /// Owning transport acknowledgement for the connections API. A close
-    /// request waits on this signal; dropping it without `finish(true)` would
-    /// report a failure even though the flow was torn down.
-    completion: CloseCompletion,
     /// Owns the reply loop; aborted when the flow is dropped.
     reply_task: JoinHandle<()>,
-}
-
-/// Remove every flow matching `predicate`, acknowledging transport teardown
-/// before dropping the tracker row. Dropping a flow aborts its reply task, so
-/// no flow can outlive its observation (or the API's close request).
-fn retire_flows(
-    flows: &mut HashMap<(InboundTarget, u16), UdpFlow>,
-    handle: &ControlPlaneHandle,
-    predicate: impl Fn(&UdpFlow) -> bool,
-) {
-    let keys: Vec<_> = flows
-        .iter()
-        .filter(|(_, flow)| predicate(flow))
-        .map(|(key, _)| key.clone())
-        .collect();
-    for key in keys {
-        if let Some(flow) = flows.remove(&key) {
-            flow.completion.0.finish(true);
-            handle.connection_tracker.remove(&flow.tracker_id);
-        }
-    }
 }
 
 impl Drop for UdpFlow {
     fn drop(&mut self) {
         self.reply_task.abort();
+    }
+}
+
+/// The single observation row owned by one UDP ASSOCIATE session.
+struct SessionRow {
+    id: String,
+    completion: CloseCompletion,
+}
+
+fn register_session(
+    handle: &ControlPlaneHandle,
+    peer: SocketAddr,
+    routed: &RoutedDatagram,
+    cancel: &Arc<Notify>,
+    upload: Arc<AtomicU64>,
+    download: Arc<AtomicU64>,
+) -> SessionRow {
+    let signal = CloseSignal::new();
+    let owner = ConnectionOwner {
+        signal: Arc::clone(&signal),
+        // One row per session, so one notification is enough: claiming it
+        // terminates the whole association (including the control channel).
+        action: CloseAction::Inbound {
+            cancel: Arc::clone(cancel),
+        },
+        groups: Vec::new(),
+    };
+    let id = handle.connection_tracker.register_owned(
+        ConnectionEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            source: peer.to_string(),
+            destination: routed.target.to_string(),
+            proxy: routed.outbound.clone(),
+            #[cfg(feature = "native-api")]
+            routed_outbound: Some(routed.outbound.clone()),
+            #[cfg(feature = "native-api")]
+            native_flow_id: None,
+            rule: routed.rule.clone(),
+            rule_payload: routed.rule_payload.clone(),
+            chains: routed.chains.clone(),
+            upload: Arc::clone(&upload),
+            download: Arc::clone(&download),
+            start_time: std::time::Instant::now(),
+            domain: routed.target_domain.clone(),
+            network: "udp".to_owned(),
+            process: None,
+            process_path: None,
+        },
+        owner,
+    );
+    SessionRow {
+        id,
+        completion: CloseCompletion(signal),
+    }
+}
+
+fn retire_session(row: Option<SessionRow>, handle: &ControlPlaneHandle) {
+    if let Some(row) = row {
+        // Acknowledge before removing: an in-flight bulk close is waiting on
+        // this signal and must observe `Closed`, not `Failed`.
+        row.completion.0.finish(true);
+        handle.connection_tracker.remove(&row.id);
     }
 }
 
@@ -281,9 +334,14 @@ pub(super) async fn serve_udp_associate(
     let mut control_byte = [0u8; 1];
     let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Shared by every flow in this session: claiming one tracker row wakes the
-    // session, which then retires all claimed flows in one pass.
     let session_cancel = Arc::new(Notify::new());
+    // Byte counters are session-wide: every target contributes to the one
+    // observation row regardless of how many flows the association carries.
+    let session_upload = Arc::new(AtomicU64::new(0));
+    let session_download = Arc::new(AtomicU64::new(0));
+    // Created on the first non-bypassed datagram; a session whose traffic is
+    // entirely `direct(must)` stays invisible, like its kernel counterpart.
+    let mut session_row: Option<SessionRow> = None;
     // Never let the control connection outlive the handshake deadline plus a
     // hard ceiling; a client that parks the TCP channel forever must not pin
     // transports indefinitely.
@@ -293,7 +351,9 @@ pub(super) async fn serve_udp_associate(
         tokio::select! {
             biased;
             _ = session_cancel.notified() => {
-                retire_flows(&mut flows, handle, |flow| flow.completion.0.is_claimed());
+                // The session's single row was claimed for closure: terminate
+                // the whole association, not just one destination.
+                break;
             }
             read = stream.read(&mut control_byte) => {
                 // RFC 1928: any data on the control channel is ignored; only
@@ -306,9 +366,9 @@ pub(super) async fn serve_udp_associate(
             _ = tokio::time::sleep_until(session_deadline) => break,
             _ = sweep.tick() => {
                 let now = Instant::now();
-                retire_flows(&mut flows, handle, |flow| {
-                    now.duration_since(flow.last_active) >= FLOW_IDLE_TIMEOUT
-                });
+                // Idle flows disappear, but the session row stays until the
+                // control channel ends: it is the connection, not a target.
+                flows.retain(|_, flow| now.duration_since(flow.last_active) < FLOW_IDLE_TIMEOUT);
             }
             datagram = rx.recv() => {
                 let Some((peer, bytes)) = datagram else { break; };
@@ -319,14 +379,31 @@ pub(super) async fn serve_udp_associate(
                         continue;
                     }
                 };
+                let routed = match route_datagram(&prepared, peer, config, handle).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::debug!(%error, %peer, "入站 UDP 路由失败，丢弃");
+                        continue;
+                    }
+                };
+                if session_row.is_none() && !routed.terminal_direct {
+                    session_row = Some(register_session(
+                        handle,
+                        peer,
+                        &routed,
+                        &session_cancel,
+                        Arc::clone(&session_upload),
+                        Arc::clone(&session_download),
+                    ));
+                }
                 let key = (prepared.target.clone(), prepared.port);
                 if !flows.contains_key(&key) && flows.len() >= MAX_FLOWS_PER_SESSION {
                     tracing::debug!(%peer, "入站 UDP 会话 flow 数达上限，丢弃数据报");
                     continue;
                 }
                 let entry = match ensure_flow(
-                    &mut flows, key.clone(), &prepared, peer, config, handle, relay,
-                    &session_cancel,
+                    &mut flows, key.clone(), &routed, peer, handle, relay,
+                    Arc::clone(&session_download),
                 ).await {
                     Ok(flow) => flow,
                     Err(error) => {
@@ -335,21 +412,17 @@ pub(super) async fn serve_udp_associate(
                     }
                 };
                 entry.last_active = Instant::now();
-                entry.upload.fetch_add(prepared.payload.len() as u64, Ordering::Relaxed);
+                session_upload.fetch_add(prepared.payload.len() as u64, Ordering::Relaxed);
                 if let Err(error) = entry.transport.send_packet(&prepared.payload).await {
                     tracing::debug!(%error, %peer, "入站 UDP 发送失败，移除 flow");
-                    // Remove the single failed flow explicitly so its reply
-                    // task stops and its tracker row is acknowledged.
-                    if let Some(flow) = flows.remove(&key) {
-                        flow.completion.0.finish(true);
-                        handle.connection_tracker.remove(&flow.tracker_id);
-                    }
+                    flows.remove(&key);
                 }
             }
         }
     }
 
-    retire_flows(&mut flows, handle, |_| true);
+    flows.clear();
+    retire_session(session_row, handle);
     Ok(())
 }
 
@@ -384,24 +457,14 @@ fn parse_udp_datagram(bytes: &[u8]) -> Result<PreparedDatagram, &'static str> {
     })
 }
 
-/// Create (or reuse) a flow for `(target, port)`. All the policy lives here:
-/// DNS with client context, `inbound()` routing, group selection for UDP, and
-/// the ordinary proxy registry's UDP transport.
-#[allow(clippy::too_many_arguments)]
-async fn ensure_flow<'a>(
-    flows: &'a mut HashMap<(InboundTarget, u16), UdpFlow>,
-    key: (InboundTarget, u16),
+/// Route one datagram before any transport is created: client-aware DNS,
+/// `inbound()` rules, and the `must` terminal-bypass decision all live here.
+async fn route_datagram(
     datagram: &PreparedDatagram,
     peer: SocketAddr,
     config: &ListenerConfig,
     handle: &ControlPlaneHandle,
-    relay: &Arc<UdpRelay>,
-    cancel: &Arc<Notify>,
-) -> anyhow::Result<&'a mut UdpFlow> {
-    if flows.contains_key(&key) {
-        return Ok(flows.get_mut(&key).expect("checked above"));
-    }
-
+) -> anyhow::Result<RoutedDatagram> {
     let (target_ip, target_domain) = match &datagram.target {
         InboundTarget::Ip(ip) => (*ip, None),
         InboundTarget::Domain(domain) => {
@@ -440,12 +503,11 @@ async fn ensure_flow<'a>(
         mac: None,
         dscp: None,
     };
-    let (outbound, mark, rule, rule_payload, chains) = {
+    let (outbound, rule, rule_payload, chains, terminal_direct) = {
         let router = handle.router.read().await;
         let (action, matched) = router.route_action_inbound(&conn, &config.name);
         (
             action.outbound.clone(),
-            action.mark,
             matched
                 .as_ref()
                 .map(|hit| hit.rule_type.to_owned())
@@ -455,73 +517,76 @@ async fn ensure_flow<'a>(
                 .map(|hit| hit.rule_payload.to_owned())
                 .unwrap_or_default(),
             vec![action.outbound.clone()],
+            action.must && action.outbound == "direct",
         )
     };
     if outbound == "block" {
         anyhow::bail!("规则禁止该 UDP 目标");
     }
-    let _ = mark; // marks are applied by the eBPF datapath, not by this socket
+    // Marks are applied by the eBPF datapath; this is a plain userspace socket.
+    Ok(RoutedDatagram {
+        target,
+        target_domain,
+        outbound,
+        rule,
+        rule_payload,
+        chains,
+        terminal_direct,
+        connect_timeout,
+        ipver,
+    })
+}
+
+/// Create (or reuse) the transport for one target. A flow is internal to the
+/// session and owns no tracker row; the session-level `download` counter is
+/// shared by every target's reply loop.
+async fn ensure_flow<'a>(
+    flows: &'a mut HashMap<(InboundTarget, u16), UdpFlow>,
+    key: (InboundTarget, u16),
+    routed: &RoutedDatagram,
+    peer: SocketAddr,
+    handle: &ControlPlaneHandle,
+    relay: &Arc<UdpRelay>,
+    download: Arc<AtomicU64>,
+) -> anyhow::Result<&'a mut UdpFlow> {
+    if flows.contains_key(&key) {
+        return Ok(flows.get_mut(&key).expect("checked above"));
+    }
 
     let groups = handle.group_manager.read().clone();
-    let node = resolve_inbound_node(&groups, &outbound, ipver, ProbeDomain::DataUdp)?;
+    let node = resolve_inbound_node(
+        &groups,
+        &routed.outbound,
+        routed.ipver,
+        ProbeDomain::DataUdp,
+    )?;
     let transport = handle
         .proxy_registry
-        .dial_udp_transport(&node, target, target_domain.as_deref(), connect_timeout)
+        .dial_udp_transport(
+            &node,
+            routed.target,
+            routed.target_domain.as_deref(),
+            routed.connect_timeout,
+        )
         .await?;
 
-    let upload = Arc::new(AtomicU64::new(0));
-    let download = Arc::new(AtomicU64::new(0));
-    let signal = CloseSignal::new();
-    let owner = ConnectionOwner {
-        signal: Arc::clone(&signal),
-        // The session owns every flow's `recv_packet` task and cannot await
-        // one signal per flow; the notify wakes it to retire claimed rows.
-        action: CloseAction::Inbound {
-            cancel: Arc::clone(cancel),
-        },
-        groups: Vec::new(),
-    };
-    let tracker_id = handle.connection_tracker.register_owned(
-        ConnectionEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            source: peer.to_string(),
-            destination: target.to_string(),
-            proxy: outbound.clone(),
-            #[cfg(feature = "native-api")]
-            routed_outbound: Some(outbound.clone()),
-            #[cfg(feature = "native-api")]
-            native_flow_id: None,
-            rule,
-            rule_payload,
-            chains,
-            upload: Arc::clone(&upload),
-            download: Arc::clone(&download),
-            start_time: std::time::Instant::now(),
-            domain: target_domain.clone(),
-            network: "udp".to_owned(),
-            process: None,
-            process_path: None,
-        },
-        owner,
-    );
-
-    // One reply task per flow: it owns `recv_packet` and writes replies back
+    // One reply task per flow. It owns `recv_packet` and writes replies back
     // through the shared relay socket, addressed to the session's peer.
     let reply_transport = Arc::clone(&transport);
     let reply_socket = relay.socket();
-    let reply_source = datagram.target.clone();
-    let reply_port = datagram.port;
-    let reply_download = Arc::clone(&download);
     let reply_task = tokio::spawn(async move {
         let mut buf = vec![0u8; MAX_DATAGRAM];
         loop {
             match reply_transport.recv_packet(&mut buf).await {
-                Ok((size, _)) => {
-                    let packet = wrap_reply(&reply_source, reply_port, &buf[..size]);
+                Ok((size, source)) => {
+                    // The packet contract requires the real peer from
+                    // recv_packet as the reply source; using the captured
+                    // request target makes clients open a new association.
+                    let packet = wrap_reply_addr(source, &buf[..size]);
                     if reply_socket.send_to(&packet, peer).await.is_err() {
                         break;
                     }
-                    reply_download.fetch_add(size as u64, Ordering::Relaxed);
+                    download.fetch_add(size as u64, Ordering::Relaxed);
                 }
                 Err(error) => {
                     tracing::debug!(%error, "入站 UDP flow 接收结束");
@@ -536,9 +601,6 @@ async fn ensure_flow<'a>(
         UdpFlow {
             transport,
             last_active: Instant::now(),
-            upload,
-            tracker_id,
-            completion: CloseCompletion(signal),
             reply_task,
         },
     );
@@ -608,12 +670,9 @@ mod tests {
     }
 
     #[test]
-    fn reply_header_round_trips() {
-        let reply = wrap_reply(
-            &InboundTarget::Ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
-            443,
-            b"ok",
-        );
+    fn reply_header_uses_real_peer() {
+        let source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 443);
+        let reply = wrap_reply_addr(source, b"ok");
         let parsed = parse_udp_datagram(&reply).unwrap();
         assert_eq!(
             parsed.target,
@@ -621,6 +680,20 @@ mod tests {
         );
         assert_eq!(parsed.port, 443);
         assert_eq!(parsed.payload, b"ok");
+    }
+
+    #[test]
+    fn reply_header_handles_ipv6_peer() {
+        let source: SocketAddr = "[2001:db8::1]:5353".parse().unwrap();
+        let reply = wrap_reply_addr(source, b"x");
+        assert_eq!(reply[3], 0x04);
+        let parsed = parse_udp_datagram(&reply).unwrap();
+        assert_eq!(
+            parsed.target,
+            InboundTarget::Ip("2001:db8::1".parse::<IpAddr>().unwrap())
+        );
+        assert_eq!(parsed.port, 5353);
+        assert_eq!(parsed.payload, b"x");
     }
 
     #[test]

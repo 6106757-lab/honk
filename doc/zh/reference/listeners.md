@@ -1,6 +1,6 @@
 # 入站监听（listeners）
 
-`listeners {}` 提供普通的 TCP 入站端口，在同一个端口上同时接受 HTTP 代理与 SOCKS5。它和 eBPF 透明代理并行工作，用于「每个浏览器配置文件 / 每台设备用一个固定端口」这类场景。
+`listeners {}` 提供普通的 TCP 入站端口，在同一个端口上同时接受 HTTP 代理与 SOCKS5，并在同端口提供 SOCKS5 `UDP ASSOCIATE`。它和 eBPF 透明代理并行工作，用于「每个浏览器配置文件 / 每台设备用一个固定端口」这类场景。
 
 > 监听默认只绑定 `127.0.0.1`。要暴露到局域网必须显式写 `listen`，并且**配置了认证的监听不允许绑定通配地址**。
 
@@ -72,21 +72,26 @@ routing {
 实现要点：
 
 - 走的是**独立的用户态转发路径**，不进入 eBPF 的 `udp_endpoint` 池（那套依赖 tproxy mark、BPF conn info 和 janitor），而是复用 `ProxyRegistry::dial_udp_transport()`，因此所有支持 UDP 的节点协议（direct、socks5、shadowsocks、vless 等）都能用。
-- 每个数据报按 `(目标地址, 端口)` 建立/复用一条 flow，`inbound()` 规则与 DNS `qname()` / `-> follow` 全部照常生效，域名目标通过带客户端来源的解析器解析。
-- 组选择使用 `ProbeDomain::DataUdp`（TCP 流量仍是 `ProbeDomain::Tcp`）。
-- 分片数据报（`FRAG != 0`）直接丢弃；单会话最多 256 条 flow，空闲 120 秒回收；UDP 无背压，队列满则丢弃数据报。
-- 每条 UDP flow 会在 doona 连接表出现（`network = udp`），规则列同样由连接表快照提供。
+- **连接 = 一个 `UDP ASSOCIATE` 会话，不是一个目标。** 会话内部按 `(目标地址, 端口)` 建立/复用 flow，但 doona 里**一个会话只有一行**（`network = udp`）。否则手机一个 tun 会话里的 DNS / QUIC / STUN / 局域网探测会在连接表刷出上千行。
+- 每个目标各自走 `inbound()` 规则与带客户端来源的 DNS（`qname()` / `-> follow` 照常生效），组选择用 `ProbeDomain::DataUdp`（TCP 仍是 `ProbeDomain::Tcp`）。连接表那一行的规则列取会话第一个非 bypass 目标的规则。
+- 回包的 SOCKS5 头使用 `PacketTransport::recv_packet()` 返回的**真实对端**，不会伪造原始请求目标（伪造会让客户端把回包当成新会话）。
+- 分片数据报（`FRAG != 0`）直接丢弃；单会话最多 256 条 flow，空闲 120 秒回收 flow（会话行随控制通道结束才移除）；UDP 无背压，队列满则丢弃数据报。
 - 一个 dispatcher 独占 `recv_from`，按**客户端 IP** 分发到各控制连接对应的会话，因此 NAT 后 UDP 源端口与 TCP 源端口不同也能工作。
 - 若 UDP 端口绑定失败（例如被别的进程占用），该监听**降级为仅 TCP**，不影响现有连接；此时 `UDP ASSOCIATE` 会回 REP `0x07`。
 
+## 连接表与 `must`
+
+- **`direct(must)` 不建观测行**：内核路径里 `must` 是终端直连，流量根本不进控制面，所以连接表里没有它。用户态入站现在沿用同一语义，命中 `must` 的直连连接 / UDP 会话在 doona 里不可见、也无法被面板关闭。这样一台把全部流量代理进来的手机不会把国内直连刷满连接表。
+- **生命周期回收**：内核路径有 eBPF janitor / TTL 兜底；用户态 relay 没有内核 flow，所以补了一个**空闲看门狗**——连续 300 秒双向零字节（检查周期 30 秒）即结束 relay 并移除观测行。手机切网/掉线不发 FIN 时，旧连接不再永久停在「进行中」；有心跳的长连接不受影响。
+
 ## 关闭连接
 
-从 listeners 进来的 TCP 连接和 UDP flow 都注册了可关闭的传输 owner，因此 doona 里：
+从 listeners 进来的 TCP 连接和 UDP **会话**都注册了可关闭的传输 owner，因此 doona 里：
 
 - **单条关闭**（`DELETE /api/v1/connections/{id}`）会真正断开该连接，返回 `204`；
 - **「全部关闭」**（`DELETE /api/v1/connections?all=true`）会把它们计入 `closed`，不会计入 `skipped`。
 
-TCP 连接在关闭请求到达时直接丢弃双向 relay（两个 socket 一起断开）；UDP flow 由会话统一收回，reply 任务被中止、连接表行被移除。
+TCP 连接在关闭请求到达时直接丢弃双向 relay（两个 socket 一起断开）；UDP 一行对应整个会话，关闭它即终止控制通道、收回会话内所有 flow。
 
 注意：入站连接没有内核 flow，**不参与「切换节点组时打断该组连接」**（`snapshot_group` 按组过滤不到它们）。这是唯一仍会跳过入站连接的关闭路径，其余按 id / 按来源 / 全部关闭都生效。
 

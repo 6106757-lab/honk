@@ -30,6 +30,11 @@ pub(super) struct InboundDial {
     pub rule_payload: String,
     pub chains: Vec<String>,
     pub domain: Option<String>,
+    /// `must` on a `direct` action is the kernel's terminal-bypass marker:
+    /// such traffic never reaches the control plane in the eBPF path and thus
+    /// has no observation row. The userspace listener must honour the same
+    /// semantics instead of registering every domestic direct connection.
+    pub terminal_direct: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -94,7 +99,7 @@ impl ControlPlaneHandle {
             dscp: None,
         };
         let groups = self.group_manager.read().clone();
-        let (outbound, mark, rule, rule_payload) = {
+        let (outbound, mark, rule, rule_payload, terminal_direct) = {
             let router = self.router.read().await;
             let (action, matched) = router.route_action_inbound(&conn, &param.listener);
             (
@@ -108,6 +113,7 @@ impl ControlPlaneHandle {
                     .as_ref()
                     .map(|hit| hit.rule_payload.to_owned())
                     .unwrap_or_default(),
+                action.must && action.outbound == "direct",
             )
         };
         if outbound == "block" {
@@ -149,6 +155,7 @@ impl ControlPlaneHandle {
             rule,
             rule_payload,
             domain: target_domain,
+            terminal_direct,
         })
     }
 }
