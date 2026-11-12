@@ -149,47 +149,24 @@ impl UdpRelay {
         self.local_addr
     }
 
-    /// Address advertised in the SOCKS5 `UDP ASSOCIATE` reply.
+    /// Address advertised in the SOCKS5 `UDP ASSOCIATE` reply (BND.ADDR).
     ///
-    /// RFC 1928 requires the client to send datagrams to the returned
-    /// BND.ADDR. When the listener is bound to a private address behind a
-    /// port-forward (typical: `listen: 172.20.1.128` with the router mapping a
-    /// public IP:port to it), advertising that private address is unusable for
-    /// a client on the public internet. Strict clients such as sing-box
-    /// (NekoBox/NekoRay) dial exactly `response.Bind` and fail on the first UDP
-    /// packet; lenient clients (Shadowrocket) ignore it and fall back to the
-    /// TCP peer, which is why only the former broke.
+    /// RFC 1928 requires the client to send datagrams to exactly this address.
+    /// Strict clients (sing-box / NekoBox / NekoRay) dial it verbatim; only
+    /// lenient ones (Shadowrocket) ignore it and use the TCP peer instead.
+    /// So `0.0.0.0` or a private bind is NOT reachable for a public client —
+    /// sing's dialer calls `net.Dial("udp", "0.0.0.0:port")`, i.e. localhost,
+    /// with no fallback to the TCP peer.
     ///
-    /// Advertising `0.0.0.0` keeps the port and lets the client fall back to
-    /// the address it already reached us on (its TCP connection's remote end),
-    /// which is the public IP:port in exactly this NAT scenario. LAN clients
-    /// keep getting the concrete bound address so nothing changes for them.
-    ///
-    /// `udp_host` is the explicit override (Xray/3x-ui's `ip` field): when the
-    /// public port is mapped to a different port or the public IP cannot be
-    /// inferred from the TCP peer, set it to the address clients should use.
-    pub(super) fn associate_bind_for(
-        &self,
-        client: IpAddr,
-        udp_host: Option<IpAddr>,
-    ) -> SocketAddr {
-        if let Some(host) = udp_host {
-            return SocketAddr::new(host, self.local_addr.port());
-        }
-        let bound = self.local_addr.ip();
-        let client_is_global = is_globally_routable(client);
-        let bound_not_routable_to_client = !is_globally_routable(bound);
-        if client_is_global && bound_not_routable_to_client {
-            SocketAddr::new(
-                if bound.is_ipv4() {
-                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-                } else {
-                    IpAddr::V6(Ipv6Addr::UNSPECIFIED)
-                },
-                self.local_addr.port(),
-            )
-        } else {
-            self.local_addr
+    /// `udp_host` (Xray/3x-ui's `ip` field) is the explicit public address to
+    /// advertise; a public listener must set it. Otherwise we return the real
+    /// bound address, which is correct for LAN clients sharing that segment.
+    /// This mirrors sing-box's server, which advertises the UDP socket's
+    /// actual bind address and likewise relies on configuration, not guessing.
+    pub(super) fn associate_bind_for(&self, udp_host: Option<IpAddr>) -> SocketAddr {
+        match udp_host {
+            Some(host) => SocketAddr::new(host, self.local_addr.port()),
+            None => self.local_addr,
         }
     }
 
@@ -232,46 +209,6 @@ impl UdpRelay {
                     }
                 }
             }
-        }
-    }
-}
-
-/// Whether `ip` is a globally routable unicast address, using only stable
-/// `std::net` APIs (`Ipv4Addr::is_global` / `Ipv6Addr::is_global` are still
-/// unstable on the toolchain this project builds with). Used solely to decide
-/// whether a client can reach a private listener bind address directly.
-fn is_globally_routable(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            if v4.is_unspecified() || v4.is_loopback() || v4.is_private() || v4.is_link_local() {
-                return false;
-            }
-            let o = v4.octets();
-            // 100.64.0.0/10 carrier-grade NAT.
-            if o[0] == 100 && (o[1] & 0xc0) == 64 {
-                return false;
-            }
-            // 192.0.0.0/24 and 198.18.0.0/15 benchmarking ranges.
-            if o[0] == 192 && o[1] == 0 && o[2] == 0 {
-                return false;
-            }
-            if o[0] == 198 && (o[1] & 0xfe) == 18 {
-                return false;
-            }
-            // 224.0.0.0/4 multicast and 240.0.0.0/4 reserved.
-            o[0] < 224
-        }
-        IpAddr::V6(v6) => {
-            if v6.is_unspecified() || v6.is_loopback() || v6.is_unicast_link_local() {
-                return false;
-            }
-            // IPv4-mapped addresses follow their v4 part.
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_globally_routable(IpAddr::V4(mapped));
-            }
-            // fc00::/7 unique local.
-            let first = v6.segments()[0];
-            !(first & 0xfe00 == 0xfc00)
         }
     }
 }
@@ -738,51 +675,18 @@ mod tests {
     }
 
     #[test]
-    fn globally_routable_ip_classification() {
-        for ip in ["8.8.8.8", "117.174.205.95", "1.1.1.1"] {
-            assert!(
-                is_globally_routable(ip.parse().unwrap()),
-                "{ip} should be global"
-            );
-        }
-        for ip in [
-            "172.20.1.128",
-            "127.0.0.1",
-            "192.168.1.1",
-            "10.0.0.1",
-            "100.64.0.1",
-            "169.254.1.1",
-            "0.0.0.0",
-        ] {
-            assert!(
-                !is_globally_routable(ip.parse().unwrap()),
-                "{ip} should not be global"
-            );
-        }
-    }
-
-    #[test]
-    fn associate_advertises_zero_for_public_client_behind_private_bind() {
+    fn associate_advertises_concrete_bind_without_udp_host() {
         let relay = relay_bound_to_private();
-        let public: IpAddr = "8.8.8.8".parse().unwrap();
-        let advertised = relay.associate_bind_for(public, None);
-        assert!(advertised.ip().is_unspecified(), "got {}", advertised.ip());
-        assert_eq!(advertised.port(), relay.local_addr().port());
-    }
-
-    #[test]
-    fn associate_advertises_concrete_bind_for_lan_client() {
-        let relay = relay_bound_to_private();
-        let lan: IpAddr = "172.20.1.185".parse().unwrap();
-        assert_eq!(relay.associate_bind_for(lan, None), relay.local_addr());
+        assert_eq!(relay.associate_bind_for(None), relay.local_addr());
     }
 
     #[test]
     fn associate_honors_explicit_udp_host() {
         let relay = relay_bound_to_private();
-        let public: IpAddr = "8.8.8.8".parse().unwrap();
         let host: IpAddr = "117.174.205.95".parse().unwrap();
-        assert_eq!(relay.associate_bind_for(public, Some(host)).ip(), host);
+        let advertised = relay.associate_bind_for(Some(host));
+        assert_eq!(advertised.ip(), host);
+        assert_eq!(advertised.port(), relay.local_addr().port());
     }
 
     #[test]
