@@ -159,11 +159,10 @@ pub(super) async fn write_reply<S: AsyncRead + AsyncWrite + Unpin>(
 pub(super) async fn write_reply_addr<S: AsyncRead + AsyncWrite + Unpin>(
     rb: &mut ReadBuffer<S>,
     code: u8,
-    addr: std::net::SocketAddr,
+    addr: super::udp::ReplyAddr,
 ) -> Result<(), ProtoError> {
     let mut reply = vec![0x05, code, 0x00];
-    super::udp::encode_address(&mut reply, addr.ip());
-    reply.extend_from_slice(&addr.port().to_be_bytes());
+    addr.encode(&mut reply);
     rb.write_all(&reply).await
 }
 
@@ -261,7 +260,9 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(4096);
         let mut rb = ReadBuffer::new(server, 16 * 1024);
         let addr: std::net::SocketAddr = "192.0.2.7:12001".parse().unwrap();
-        write_reply_addr(&mut rb, 0x00, addr).await.unwrap();
+        write_reply_addr(&mut rb, 0x00, super::super::udp::ReplyAddr::Ip(addr))
+            .await
+            .unwrap();
         let mut reply = [0u8; 10];
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply[..4], &[0x05, 0x00, 0x00, 0x01]);

@@ -72,6 +72,34 @@ pub(super) fn encode_address(out: &mut Vec<u8>, ip: IpAddr) {
     }
 }
 
+/// Address advertised in a SOCKS5 reply: either an IP or a hostname.
+/// A hostname is encoded ATYP=0x03 verbatim — the client resolves it with
+/// whatever DNS it is configured to use. This keeps the choice on the client
+/// side: sing-box/Xray resolve a DDNS name themselves, while clients that
+/// cannot handle a domain here simply omit `udp_host` and get `0.0.0.0`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ReplyAddr {
+    Ip(SocketAddr),
+    Domain(String, u16),
+}
+
+impl ReplyAddr {
+    pub(super) fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            ReplyAddr::Ip(addr) => {
+                encode_address(out, addr.ip());
+                out.extend_from_slice(&addr.port().to_be_bytes());
+            }
+            ReplyAddr::Domain(name, port) => {
+                out.push(0x03);
+                out.push(name.len() as u8);
+                out.extend_from_slice(name.as_bytes());
+                out.extend_from_slice(&port.to_be_bytes());
+            }
+        }
+    }
+}
+
 /// Parse `ATYP + ADDR + PORT` out of a SOCKS5 message. Returns the target,
 /// port and the offset of the first payload byte.
 fn parse_address(bytes: &[u8], start: usize) -> Option<(InboundTarget, u16, usize)> {
@@ -152,58 +180,26 @@ impl UdpRelay {
     /// Address advertised in the SOCKS5 `UDP ASSOCIATE` reply (BND.ADDR).
     ///
     /// RFC 1928 requires the client to send datagrams to exactly this address.
-    /// Strict clients (sing-box / NekoBox / NekoRay) dial it verbatim; only
-    /// lenient ones (Shadowrocket) ignore it and use the TCP peer instead.
-    /// So `0.0.0.0` or a private bind is NOT reachable for a public client —
-    /// sing's dialer calls `net.Dial("udp", "0.0.0.0:port")`, i.e. localhost,
-    /// with no fallback to the TCP peer.
+    /// Strict clients (sing-box/NekoBox/Xray) dial it verbatim; lenient ones
+    /// (Shadowrocket) ignore it and use the TCP peer. sing-box dials
+    /// `0.0.0.0:port` as localhost with no fallback, so a public listener must
+    /// advertise a reachable address.
     ///
-    /// Address advertised in the SOCKS5 `UDP ASSOCIATE` reply (BND.ADDR).
+    /// `udp_host` (Xray/3x-ui's `ip` field) is advertised VERBATIM: an IP as
+    /// ATYP=1/4, a hostname as ATYP=0x03. The client resolves a hostname with
+    /// its own DNS, so a DDNS name tracks a changing public IP and the server
+    /// never needs to know (or guess) its own public IP — which is impossible
+    /// behind DNAT. This also leaves the choice to the client: sing-box/Xray
+    /// accept a domain here; mihomo rejects ATYP=3, so it should omit
+    /// `udp_host` and rely on its own fallback from a `0.0.0.0` reply.
     ///
-    /// RFC 1928 requires the client to send datagrams to exactly this address.
-    /// Strict clients (sing-box/NekoBox) dial it verbatim with no fallback;
-    /// lenient ones (Shadowrocket) ignore it and use the TCP peer. So a public
-    /// listener must advertise a routable public IP — `0.0.0.0`/private binds
-    /// are unreachable, and mihomo rejects a domain name here (its UDPAddr()
-    /// returns nil for ATYP=3). The reply therefore always carries an IP.
-    ///
-    /// `udp_host` (Xray/3x-ui's `ip` field) may be an IP or a DDNS hostname.
-    /// A hostname is RESOLVED HERE to its current public IP at association
-    /// time, so a changing public IP needs no config edit. Resolution uses the
-    /// system resolver directly (no proxy), matching the requirement that this
-    /// UDP path stays direct. Missing `udp_host` -> the real bind address,
-    /// correct only for LAN clients on the same segment.
-    pub(super) async fn associate_bind_for(&self, udp_host: Option<&UdpHost>) -> SocketAddr {
+    /// Missing `udp_host` -> the real bind address (correct for LAN clients).
+    pub(super) fn associate_bind_for(&self, udp_host: Option<&UdpHost>) -> ReplyAddr {
         let port = self.local_addr.port();
         match udp_host {
-            Some(UdpHost::Ip(ip)) => SocketAddr::new(*ip, port),
-            Some(UdpHost::Domain(name)) => {
-                match tokio::net::lookup_host((name.as_str(), port)).await {
-                    Ok(addrs) => {
-                        let addrs: Vec<SocketAddr> = addrs.collect();
-                        // Prefer IPv4: DNAT port-forwards are almost always v4.
-                        let chosen = addrs
-                            .iter()
-                            .find(|addr| addr.is_ipv4())
-                            .or_else(|| addrs.first());
-                        match chosen {
-                            Some(addr) => {
-                                tracing::debug!(%name, %addr, "udp_host 域名已解析");
-                                SocketAddr::new(addr.ip(), port)
-                            }
-                            None => {
-                                tracing::warn!(%name, "udp_host 域名解析无结果，回退到绑定地址");
-                                self.local_addr
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%name, %error, "udp_host 域名解析失败，回退到绑定地址");
-                        self.local_addr
-                    }
-                }
-            }
-            None => self.local_addr,
+            Some(UdpHost::Ip(ip)) => ReplyAddr::Ip(SocketAddr::new(*ip, port)),
+            Some(UdpHost::Domain(name)) => ReplyAddr::Domain(name.clone(), port),
+            None => ReplyAddr::Ip(self.local_addr),
         }
     }
 
@@ -702,7 +698,7 @@ pub(super) fn bind_udp(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket>
 mod tests {
     use super::*;
 
-    fn relay_bound_to_private() -> UdpRelay {
+    fn relay_bound_to_private() -> std::sync::Arc<UdpRelay> {
         // A bound std socket supplies the local_addr; the socket itself is not
         // used by associate_bind_for.
         let socket = std::net::UdpSocket::bind("172.20.1.128:0")
@@ -711,35 +707,47 @@ mod tests {
         UdpRelay::new(socket).unwrap()
     }
 
-    #[tokio::test]
-    async fn associate_advertises_concrete_bind_without_udp_host() {
+    #[test]
+    fn associate_advertises_concrete_bind_without_udp_host() {
         let relay = relay_bound_to_private();
-        assert_eq!(relay.associate_bind_for(None).await, relay.local_addr());
+        assert_eq!(
+            relay.associate_bind_for(None),
+            ReplyAddr::Ip(relay.local_addr())
+        );
     }
 
-    #[tokio::test]
-    async fn associate_honors_explicit_udp_host_ip() {
+    #[test]
+    fn associate_honors_explicit_udp_host_ip() {
         let relay = relay_bound_to_private();
         let host: IpAddr = "117.174.205.95".parse().unwrap();
-        let advertised = relay.associate_bind_for(Some(&UdpHost::Ip(host))).await;
-        assert_eq!(advertised.ip(), host);
-        assert_eq!(advertised.port(), relay.local_addr().port());
+        assert_eq!(
+            relay.associate_bind_for(Some(&UdpHost::Ip(host))),
+            ReplyAddr::Ip(SocketAddr::new(host, relay.local_addr().port()))
+        );
     }
 
-    #[tokio::test]
-    async fn associate_resolves_udp_host_domain_to_ip() {
+    #[test]
+    fn associate_advertises_domain_verbatim() {
         let relay = relay_bound_to_private();
-        // localhost resolves via the system resolver to 127.0.0.1 or ::1;
-        // the reply must be an IP (ATYP=1/4), never a domain.
-        let advertised = relay
-            .associate_bind_for(Some(&UdpHost::Domain("localhost".to_owned())))
-            .await;
-        assert!(
-            advertised.ip().is_loopback(),
-            "expected a resolved loopback IP, got {}",
-            advertised.ip()
+        // A hostname is returned as ATYP=3 verbatim; the CLIENT resolves it.
+        let name = "home.example.com".to_owned();
+        assert_eq!(
+            relay.associate_bind_for(Some(&UdpHost::Domain(name.clone()))),
+            ReplyAddr::Domain(name, relay.local_addr().port())
         );
-        assert_eq!(advertised.port(), relay.local_addr().port());
+    }
+
+    #[test]
+    fn reply_addr_encodes_domain_as_atyp3() {
+        let mut out = Vec::new();
+        ReplyAddr::Domain("home.example.com".to_owned(), 12001).encode(&mut out);
+        assert_eq!(out[0], 0x03);
+        assert_eq!(out[1] as usize, "home.example.com".len());
+        assert_eq!(&out[2..2 + "home.example.com".len()], b"home.example.com");
+        assert_eq!(
+            &out[2 + "home.example.com".len()..],
+            &12001u16.to_be_bytes()
+        );
     }
 
     #[test]

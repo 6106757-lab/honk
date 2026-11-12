@@ -73,17 +73,27 @@ routing {
 
 **关于 BND.ADDR（重要，公网转发必看）**：严格遵循 RFC 1928 的客户端（sing-box / NekoBox / NekoRay）会把 UDP 包**直接发给回复里的 BND.ADDR**；小火箭（Shadowrocket）会忽略它、改用 TCP 连接的对端地址。所以当 `listen` 绑在内网地址（如 `172.20.1.128`）而端口由路由器映射到公网时，回内网地址会让 NekoBox 的**第一个 UDP 包就发不出去**（TCP 却正常），表现就是「UDP 不通」。
 
-- **公网转发必配**：在 listener 里写 `udp_host`（等价 Xray / 3x-ui 的 `ip` 字段），这是公网 UDP 能通的关键。它可以是**公网 IP**，也可以是**域名**（DDNS）——域名会在每次 `UDP ASSOCIATE` 时由服务端用系统 DNS **解析成当前 IP** 再回包，所以 IP 变动后无需改配置（前提是 DDNS 记录已更新）：
+- **`udp_host` 原样回给客户端**（等价 Xray / 3x-ui 的 `ip` 字段）：IP 回 ATYP=1/4，域名回 ATYP=0x03，**服务端不解析**，由客户端用自己的 DNS 解析。这样 DDNS 域名自动跟随变化的公网 IP，且服务端不需要知道自己的公网 IP（DNAT 后面根本也拿不到）。按客户端类型选写法：
   ```dae
-  # 固定公网 IP
+  # 固定公网 IP：三家客户端都通
   shopauth { type: mixed listen: 0.0.0.0 port: 12001 auth: 'adminshop:shoppassword' udp_host: 117.174.205.95 }
-  # 动态公网 + DDNS：填域名，回包自动跟随解析出的 IP
+  # 动态公网 + DDNS 域名：给 sing-box / Xray 用（它们会解析域名 BND.ADDR）
   shopauth { type: mixed listen: 0.0.0.0 port: 12001 auth: 'adminshop:shoppassword' udp_host: home.example.com }
+  # 不写 udp_host：给 mihomo / Xray 用，回 0.0.0.0，客户端兜底成自己配置里的 server 地址
+  shopauth { type: mixed listen: 0.0.0.0 port: 12001 auth: 'adminshop:shoppassword' }
   ```
-  回包**始终是 IP**（ATYP=1/4），不会回域名：sing-box 能处理域名 BND.ADDR，但 mihomo 的 `Addr.UDPAddr()` 对域名返回 `nil` 并报 `invalid UDP bind address`，所以统一回 IP 才能两家兼容。域名解析优先取 IPv4（DNAT 端口转发几乎都是 v4），失败则回退到实际绑定地址并写警告日志。解析走系统 DNS、不经代理，符合 UDP 直连的要求。
   端口仍回监听端口；若做了端口转发（公网端口 ≠ `port`），需在客户端/转发侧按实际端口处理。`udp_host` 只影响回包里广播的地址，不改变实际绑定，也不改变 UDP 出站走直连还是节点（那由 routing 规则决定）。
-- **未配 `udp_host` 时**：BND.ADDR 回实际绑定地址。局域网客户端（与监听同网段）可达，行为不变；但公网客户端拿到 `0.0.0.0` 或内网地址都不可达——所以公网场景一定要显式配置。各客户端对 `0.0.0.0` 的处理不同：sing-box（NekoBox / NekoRay）把 BND.ADDR 原样拿去 dial UDP，`0.0.0.0` 意味着「连本机」，第一个包即失败；mihomo 会把它换成配置里的服务器地址兜底；小火箭则完全忽略该字段。正因行为不一致，别依赖 `0.0.0.0` 兜底，公网场景一律配 `udp_host`。
-- **DDNS 注意事项**：域名必须是「直连型」解析——A/AAAA 记录直接指向真实公网 IP，不要用 CDN / 隧道（Cloudflare 橙云、Cloudflare Tunnel、ngrok 等只转 TCP，UDP 数据报过不去）。Cloudflare 里应选灰云 "DNS only"，或用 duckdns / no-ip 这类纯 DDNS 服务。
+- **三种回包内容的客户端兼容性**（源码逐一核实）：
+
+  | BND.ADDR | sing-box / NekoBox | mihomo | Xray |
+  |---|---|---|---|
+  | 公网 IP | 通 | 通 | 通 |
+  | 域名 ATYP=3 | 通（客户端解析） | **报错**（`Addr.UDPAddr()` 返 nil） | 通 |
+  | `0.0.0.0` | **废**（原样 dial 本机） | 通（兜底成配置的 server 地址） | 通（兜底成配置的服务器地址） |
+
+  所以：sing-box 用域名或 IP，mihomo 用 IP 或不写（靠 `0.0.0.0` 兜底），Xray 三者皆可。同一端口要同时服务 mihomo 和 sing-box 时，写公网 IP 最省事。
+- **未配 `udp_host` 时**：BND.ADDR 回实际绑定地址（如 `listen: 0.0.0.0` 就回 `0.0.0.0`，`listen: 172.20.1.128` 就回内网地址）。局域网客户端（与监听同网段）可达，行为不变；公网客户端只有 mihomo/Xray 能靠 `0.0.0.0` 兜底，sing-box 不行。
+- **DDNS 注意事项**：域名必须是「直连型」解析——A/AAAA 记录直接指向真实公网 IP，不要用 CDN / 隧道（Cloudflare 橙云、Cloudflare Tunnel、ngrok、frp 等只转 TCP 或映射到别的端口，UDP 数据报过不去，且解析出的 IP/端口都不是你的服务）。Cloudflare 里应选灰云 "DNS only"，或用 duckdns / no-ip 这类纯 DDNS 服务。
 
 实现要点：
 
