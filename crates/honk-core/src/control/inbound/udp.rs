@@ -34,7 +34,7 @@ use crate::connection_tracker::{
     CloseAction, CloseCompletion, CloseSignal, ConnectionEntry, ConnectionOwner,
 };
 use crate::routing::ConnectionInfo;
-use honk_config::ListenerConfig;
+use honk_config::{ListenerConfig, UdpHost};
 use honk_outbound::alive::{IpVersion, ProbeDomain};
 use honk_outbound::proxy::PacketTransport;
 use std::collections::HashMap;
@@ -158,14 +158,51 @@ impl UdpRelay {
     /// sing's dialer calls `net.Dial("udp", "0.0.0.0:port")`, i.e. localhost,
     /// with no fallback to the TCP peer.
     ///
-    /// `udp_host` (Xray/3x-ui's `ip` field) is the explicit public address to
-    /// advertise; a public listener must set it. Otherwise we return the real
-    /// bound address, which is correct for LAN clients sharing that segment.
-    /// This mirrors sing-box's server, which advertises the UDP socket's
-    /// actual bind address and likewise relies on configuration, not guessing.
-    pub(super) fn associate_bind_for(&self, udp_host: Option<IpAddr>) -> SocketAddr {
+    /// Address advertised in the SOCKS5 `UDP ASSOCIATE` reply (BND.ADDR).
+    ///
+    /// RFC 1928 requires the client to send datagrams to exactly this address.
+    /// Strict clients (sing-box/NekoBox) dial it verbatim with no fallback;
+    /// lenient ones (Shadowrocket) ignore it and use the TCP peer. So a public
+    /// listener must advertise a routable public IP — `0.0.0.0`/private binds
+    /// are unreachable, and mihomo rejects a domain name here (its UDPAddr()
+    /// returns nil for ATYP=3). The reply therefore always carries an IP.
+    ///
+    /// `udp_host` (Xray/3x-ui's `ip` field) may be an IP or a DDNS hostname.
+    /// A hostname is RESOLVED HERE to its current public IP at association
+    /// time, so a changing public IP needs no config edit. Resolution uses the
+    /// system resolver directly (no proxy), matching the requirement that this
+    /// UDP path stays direct. Missing `udp_host` -> the real bind address,
+    /// correct only for LAN clients on the same segment.
+    pub(super) async fn associate_bind_for(&self, udp_host: Option<&UdpHost>) -> SocketAddr {
+        let port = self.local_addr.port();
         match udp_host {
-            Some(host) => SocketAddr::new(host, self.local_addr.port()),
+            Some(UdpHost::Ip(ip)) => SocketAddr::new(*ip, port),
+            Some(UdpHost::Domain(name)) => {
+                match tokio::net::lookup_host((name.as_str(), port)).await {
+                    Ok(addrs) => {
+                        let addrs: Vec<SocketAddr> = addrs.collect();
+                        // Prefer IPv4: DNAT port-forwards are almost always v4.
+                        let chosen = addrs
+                            .iter()
+                            .find(|addr| addr.is_ipv4())
+                            .or_else(|| addrs.first());
+                        match chosen {
+                            Some(addr) => {
+                                tracing::debug!(%name, %addr, "udp_host 域名已解析");
+                                SocketAddr::new(addr.ip(), port)
+                            }
+                            None => {
+                                tracing::warn!(%name, "udp_host 域名解析无结果，回退到绑定地址");
+                                self.local_addr
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%name, %error, "udp_host 域名解析失败，回退到绑定地址");
+                        self.local_addr
+                    }
+                }
+            }
             None => self.local_addr,
         }
     }
@@ -674,18 +711,34 @@ mod tests {
         UdpRelay::new(socket).unwrap()
     }
 
-    #[test]
-    fn associate_advertises_concrete_bind_without_udp_host() {
+    #[tokio::test]
+    async fn associate_advertises_concrete_bind_without_udp_host() {
         let relay = relay_bound_to_private();
-        assert_eq!(relay.associate_bind_for(None), relay.local_addr());
+        assert_eq!(relay.associate_bind_for(None).await, relay.local_addr());
     }
 
-    #[test]
-    fn associate_honors_explicit_udp_host() {
+    #[tokio::test]
+    async fn associate_honors_explicit_udp_host_ip() {
         let relay = relay_bound_to_private();
         let host: IpAddr = "117.174.205.95".parse().unwrap();
-        let advertised = relay.associate_bind_for(Some(host));
+        let advertised = relay.associate_bind_for(Some(&UdpHost::Ip(host))).await;
         assert_eq!(advertised.ip(), host);
+        assert_eq!(advertised.port(), relay.local_addr().port());
+    }
+
+    #[tokio::test]
+    async fn associate_resolves_udp_host_domain_to_ip() {
+        let relay = relay_bound_to_private();
+        // localhost resolves via the system resolver to 127.0.0.1 or ::1;
+        // the reply must be an IP (ATYP=1/4), never a domain.
+        let advertised = relay
+            .associate_bind_for(Some(&UdpHost::Domain("localhost".to_owned())))
+            .await;
+        assert!(
+            advertised.ip().is_loopback(),
+            "expected a resolved loopback IP, got {}",
+            advertised.ip()
+        );
         assert_eq!(advertised.port(), relay.local_addr().port());
     }
 

@@ -37,6 +37,16 @@ pub enum ListenerType {
     Mixed,
 }
 
+/// Address advertised in a SOCKS5 `UDP ASSOCIATE` reply, i.e. Xray/3x-ui's
+/// `ip` field. Either a literal IP or a hostname. A hostname lets DDNS track a
+/// changing public IP: strict clients (sing-box/NekoBox) resolve it to reach
+/// the relay, so the config never needs editing when the IP changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UdpHost {
+    Ip(IpAddr),
+    Domain(String),
+}
+
 /// One named TCP listener.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenerConfig {
@@ -52,11 +62,12 @@ pub struct ListenerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ListenerAuth>,
     /// Address advertised in the SOCKS5 `UDP ASSOCIATE` reply, i.e. the
-    /// equivalent of Xray/3x-ui's `ip` field. Set this to the public IP when
-    /// the listener binds a private address behind a port-forward. When
-    /// unset, honk infers a reachable address from the client's source.
+    /// equivalent of Xray/3x-ui's `ip` field. An IP or a hostname; a hostname
+    /// tracks a changing public IP through DDNS. Set this for any listener
+    /// reachable from the public internet. When unset, the real bind address
+    /// is advertised (correct for LAN clients only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub udp_host: Option<IpAddr>,
+    pub udp_host: Option<UdpHost>,
     /// Deadline covering the *entire* protocol handshake, not each read.
     #[serde(default = "default_handshake_timeout_ms")]
     pub handshake_timeout_ms: u64,
@@ -112,6 +123,37 @@ impl ListenerConfig {
             username: user.to_owned(),
             password: password.to_owned(),
         })
+    }
+
+    /// Parse `udp_host`: a literal IP or a DNS hostname. A hostname is how a
+    /// DDNS name tracks a changing public IP. Reject malformed names and
+    /// anything exceeding SOCKS5's one-byte address length.
+    pub fn parse_udp_host(raw: &str) -> Result<UdpHost, &'static str> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("udp_host must not be empty");
+        }
+        if let Ok(ip) = raw.parse::<IpAddr>() {
+            return Ok(UdpHost::Ip(ip));
+        }
+        if raw.len() > 255 {
+            return Err("udp_host hostname exceeds 255 bytes");
+        }
+        if !raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+        {
+            return Err("udp_host must be an IP address or an ASCII hostname");
+        }
+        if raw.starts_with('.')
+            || raw.ends_with('.')
+            || raw
+                .split('.')
+                .any(|label| label.is_empty() || label.starts_with('-') || label.ends_with('-'))
+        {
+            return Err("udp_host hostname has an empty or invalid label");
+        }
+        Ok(UdpHost::Domain(raw.to_owned()))
     }
 }
 
@@ -257,6 +299,34 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn udp_host_accepts_ip_and_domain() {
+        assert_eq!(
+            ListenerConfig::parse_udp_host("117.174.205.95").unwrap(),
+            UdpHost::Ip("117.174.205.95".parse().unwrap())
+        );
+        assert_eq!(
+            ListenerConfig::parse_udp_host("  home.example.com  ").unwrap(),
+            UdpHost::Domain("home.example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn udp_host_rejects_malformed_values() {
+        for raw in [
+            "",
+            "..",
+            "bad..domain",
+            "-bad.example.com",
+            "bad_.example.com",
+        ] {
+            assert!(
+                ListenerConfig::parse_udp_host(raw).is_err(),
+                "{raw} should be rejected"
+            );
+        }
+    }
+
     fn auth_requires_colon() {
         assert!(ListenerConfig::parse_auth("user").is_err());
         assert_eq!(

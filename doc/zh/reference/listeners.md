@@ -73,12 +73,17 @@ routing {
 
 **关于 BND.ADDR（重要，公网转发必看）**：严格遵循 RFC 1928 的客户端（sing-box / NekoBox / NekoRay）会把 UDP 包**直接发给回复里的 BND.ADDR**；小火箭（Shadowrocket）会忽略它、改用 TCP 连接的对端地址。所以当 `listen` 绑在内网地址（如 `172.20.1.128`）而端口由路由器映射到公网时，回内网地址会让 NekoBox 的**第一个 UDP 包就发不出去**（TCP 却正常），表现就是「UDP 不通」。
 
-- **公网转发必配**：在 listener 里写 `udp_host: 公网IP`（等价 Xray / 3x-ui 的 `ip` 字段），服务端把这个地址原样回给客户端。这是公网 UDP 能通的关键——不配它，回 `0.0.0.0` 或内网地址，严格客户端（NekoBox / NekoRay）的第一个 UDP 包就发不出去：
+- **公网转发必配**：在 listener 里写 `udp_host`（等价 Xray / 3x-ui 的 `ip` 字段），这是公网 UDP 能通的关键。它可以是**公网 IP**，也可以是**域名**（DDNS）——域名会在每次 `UDP ASSOCIATE` 时由服务端用系统 DNS **解析成当前 IP** 再回包，所以 IP 变动后无需改配置（前提是 DDNS 记录已更新）：
   ```dae
+  # 固定公网 IP
   shopauth { type: mixed listen: 0.0.0.0 port: 12001 auth: 'adminshop:shoppassword' udp_host: 117.174.205.95 }
+  # 动态公网 + DDNS：填域名，回包自动跟随解析出的 IP
+  shopauth { type: mixed listen: 0.0.0.0 port: 12001 auth: 'adminshop:shoppassword' udp_host: home.example.com }
   ```
-  端口仍回监听端口；若做了端口转发（公网端口 ≠ `port`），需在客户端/转发侧按实际端口处理。`udp_host` 只影响回包里广播的地址，不改变实际绑定。
-- **未配 `udp_host` 时**：BND.ADDR 回实际绑定地址。局域网客户端（与监听同网段）可达，行为不变；但公网客户端拿到 `0.0.0.0` 或内网地址都不可达——所以公网场景一定要显式配置。之前以为 `0.0.0.0` 会让客户端回退到 TCP 对端，实测（NekoBox）证明不成立：sing-box 把 BND.ADDR 原样拿去 dial UDP，`0.0.0.0` 意味着「连本机」，第一个包即失败。小火箭忽略该字段才不受影响。
+  回包**始终是 IP**（ATYP=1/4），不会回域名：sing-box 能处理域名 BND.ADDR，但 mihomo 的 `Addr.UDPAddr()` 对域名返回 `nil` 并报 `invalid UDP bind address`，所以统一回 IP 才能两家兼容。域名解析优先取 IPv4（DNAT 端口转发几乎都是 v4），失败则回退到实际绑定地址并写警告日志。解析走系统 DNS、不经代理，符合 UDP 直连的要求。
+  端口仍回监听端口；若做了端口转发（公网端口 ≠ `port`），需在客户端/转发侧按实际端口处理。`udp_host` 只影响回包里广播的地址，不改变实际绑定，也不改变 UDP 出站走直连还是节点（那由 routing 规则决定）。
+- **未配 `udp_host` 时**：BND.ADDR 回实际绑定地址。局域网客户端（与监听同网段）可达，行为不变；但公网客户端拿到 `0.0.0.0` 或内网地址都不可达——所以公网场景一定要显式配置。各客户端对 `0.0.0.0` 的处理不同：sing-box（NekoBox / NekoRay）把 BND.ADDR 原样拿去 dial UDP，`0.0.0.0` 意味着「连本机」，第一个包即失败；mihomo 会把它换成配置里的服务器地址兜底；小火箭则完全忽略该字段。正因行为不一致，别依赖 `0.0.0.0` 兜底，公网场景一律配 `udp_host`。
+- **DDNS 注意事项**：域名必须是「直连型」解析——A/AAAA 记录直接指向真实公网 IP，不要用 CDN / 隧道（Cloudflare 橙云、Cloudflare Tunnel、ngrok 等只转 TCP，UDP 数据报过不去）。Cloudflare 里应选灰云 "DNS only"，或用 duckdns / no-ip 这类纯 DDNS 服务。
 
 实现要点：
 

@@ -285,10 +285,10 @@ async fn serve_socks(
             };
             // Advertise a bind address the client can actually reach. Strict
             // clients (sing-box) dial exactly this address for UDP, so public
-            // listeners must set udp_host to the reachable public IP; a bare
-            // 0.0.0.0 or private address is not routable for them (they do NOT
-            // fall back to the TCP peer). LAN clients need no udp_host.
-            let advertised = relay.associate_bind_for(config.udp_host);
+            // listeners must set udp_host to a reachable public IP (or a DDNS
+            // hostname, resolved here to the current IP). A bare 0.0.0.0 or
+            // private bind is not routable. LAN clients need no udp_host.
+            let advertised = relay.associate_bind_for(config.udp_host.as_ref()).await;
             if let Err(error) = socks::write_reply_addr(rb, 0x00, advertised).await {
                 tracing::debug!(%error, "SOCKS5 UDP ASSOCIATE 回复失败");
                 return Ok(());

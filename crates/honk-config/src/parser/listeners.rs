@@ -152,16 +152,11 @@ pub(super) fn parse_listeners_section(
                 }
             }
             if let Some(value) = fields.get("udp_host").copied() {
-                listener.udp_host = Some(value.raw().trim().parse::<std::net::IpAddr>().map_err(
-                    |_| {
-                        listener_scalar_error(
-                            value,
-                            index,
-                            "udp_host",
-                            "udp_host must be an IP address",
-                        )
-                    },
-                )?);
+                listener.udp_host = Some(
+                    ListenerConfig::parse_udp_host(value.raw()).map_err(|message| {
+                        listener_scalar_error(value, index, "udp_host", message)
+                    })?,
+                );
             }
             for (key, target) in [
                 ("handshake_timeout_ms", &mut listener.handshake_timeout_ms),

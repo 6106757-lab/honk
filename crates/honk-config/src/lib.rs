@@ -27,7 +27,7 @@ pub mod types;
 pub use config::Config;
 pub use diagnostic::ConfigDiagnostic;
 pub use error::ConfigError;
-pub use listener::{ListenerAuth, ListenerConfig, ListenerType, validate_listeners};
+pub use listener::{ListenerAuth, ListenerConfig, ListenerType, UdpHost, validate_listeners};
 
 #[cfg(feature = "conformance")]
 pub use parser::conformance;
