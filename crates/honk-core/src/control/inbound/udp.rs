@@ -707,8 +707,8 @@ mod tests {
         UdpRelay::new(socket).unwrap()
     }
 
-    #[test]
-    fn associate_advertises_concrete_bind_without_udp_host() {
+    #[tokio::test]
+    async fn associate_advertises_concrete_bind_without_udp_host() {
         let relay = relay_bound_to_private();
         assert_eq!(
             relay.associate_bind_for(None),
@@ -716,8 +716,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn associate_honors_explicit_udp_host_ip() {
+    #[tokio::test]
+    async fn associate_honors_explicit_udp_host_ip() {
         let relay = relay_bound_to_private();
         let host: IpAddr = "117.174.205.95".parse().unwrap();
         assert_eq!(
@@ -726,8 +726,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn associate_advertises_domain_verbatim() {
+    #[tokio::test]
+    async fn associate_advertises_domain_verbatim() {
         let relay = relay_bound_to_private();
         // A hostname is returned as ATYP=3 verbatim; the CLIENT resolves it.
         let name = "home.example.com".to_owned();
